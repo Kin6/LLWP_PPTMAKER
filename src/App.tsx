@@ -167,7 +167,20 @@ function App() {
   }, [apiConfig]);
 
   useEffect(() => {
-    fetch("/api/health").then((response) => response.json()).then((data) => setEnvKeyConfigured(Boolean(data.envKeyConfigured))).catch(() => undefined);
+    fetch("/api/health").then((response) => response.json()).then((data) => {
+      setEnvKeyConfigured(Boolean(data.envKeyConfigured));
+      const defaults = data.apiDefaults;
+      if (defaults?.source === "environment") {
+        setApiConfig((current) => ({
+          ...current,
+          provider: defaults.provider === "compatible" ? "compatible" : "openai",
+          baseUrl: String(defaults.baseUrl || current.baseUrl),
+          model: String(defaults.model || current.model),
+          imageBaseUrl: String(defaults.imageBaseUrl || current.imageBaseUrl),
+          imageModel: String(defaults.imageModel || current.imageModel),
+        }));
+      }
+    }).catch(() => undefined);
   }, []);
 
   useEffect(() => {

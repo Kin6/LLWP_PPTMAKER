@@ -52,9 +52,10 @@
 
 ```dotenv
 OPENAI_API_KEY=你的_key
-TEXT_API_BASE_URL=https://api.openai.com/v1
+OPENAI_API_BASE=
+TEXT_API_BASE_URL=
 TEXT_MODEL=gpt-5.6-terra
-IMAGE_API_BASE_URL=https://api.openai.com/v1
+IMAGE_API_BASE_URL=
 IMAGE_MODEL=gpt-image-2
 ```
 
@@ -73,6 +74,14 @@ npm run dev
 ```
 
 设置后重新打开终端并运行 `npm run dev`。首屏只显示“系统 Key 已读取”，Key 本身不会返回前端。若使用 OpenAI 兼容服务，还需要在“API 设置”中填写该服务的正确 Base URL；OpenAI Key 不能自动推断第三方服务地址。
+
+第三方教程常用的 `OPENAI_API_BASE` 和 `OPENAI_BASE_URL` 也会被读取，并自动同步到所有浏览器页面：
+
+```powershell
+[Environment]::SetEnvironmentVariable("OPENAI_API_BASE", "https://你的兼容服务/v1", "User")
+```
+
+`TEXT_API_BASE_URL` 和 `IMAGE_API_BASE_URL` 的优先级更高，适合文本与图片使用不同服务的情况。
 
 服务会读取 `HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY`，并在这些变量缺失时尝试沿用当前仓库的 `git config http.proxy`，用于访问外部模型服务。
 

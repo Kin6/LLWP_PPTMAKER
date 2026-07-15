@@ -14,6 +14,17 @@ dotenv.config({ path: path.join(root, ".env.local"), quiet: true });
 dotenv.config({ path: path.join(root, ".env"), quiet: true });
 
 const openAiApiKey = resolveEnvironmentSecret("OPENAI_API_KEY");
+const openAiApiBase = resolveEnvironmentSecret("OPENAI_API_BASE") || resolveEnvironmentSecret("OPENAI_BASE_URL");
+const explicitTextApiBase = resolveEnvironmentSecret("TEXT_API_BASE_URL");
+const explicitImageApiBase = resolveEnvironmentSecret("IMAGE_API_BASE_URL");
+const explicitTextModel = resolveEnvironmentSecret("TEXT_MODEL");
+const explicitImageModel = resolveEnvironmentSecret("IMAGE_MODEL");
+const textApiBaseUrl = explicitTextApiBase || openAiApiBase || "https://api.openai.com/v1";
+const imageApiBaseUrl = explicitImageApiBase || openAiApiBase || "https://api.openai.com/v1";
+const textModel = explicitTextModel || "gpt-5.6-terra";
+const imageModel = explicitImageModel || "gpt-image-2";
+const apiDefaultsFromEnvironment = Boolean(openAiApiBase || explicitTextApiBase || explicitImageApiBase || explicitTextModel || explicitImageModel);
+const defaultApiProvider = isOfficialOpenAIBase(textApiBaseUrl) ? "openai" : "compatible";
 const outboundProxyUrl = resolveProxyUrl();
 const outboundProxyAgent = outboundProxyUrl ? new ProxyAgent(outboundProxyUrl) : null;
 
@@ -142,6 +153,14 @@ app.get("/api/health", (_req, res) => {
     mode: "hybrid",
     envKeyConfigured: Boolean(openAiApiKey),
     proxyConfigured: Boolean(outboundProxyAgent),
+    apiDefaults: {
+      source: apiDefaultsFromEnvironment ? "environment" : "default",
+      provider: defaultApiProvider,
+      baseUrl: textApiBaseUrl,
+      model: textModel,
+      imageBaseUrl: imageApiBaseUrl,
+      imageModel,
+    },
     pipeline: ["logic-planner", "image-2-reference-edit", "vision-decomposition", "native-assembly", "editable-pptx"],
   });
 });
@@ -250,16 +269,16 @@ app.post("/api/ai/decompose-images", async (req, res) => {
 
 function normalizeTextConfig(raw) {
   const provider = ["openai", "compatible", "ollama"].includes(raw.provider) ? raw.provider : "openai";
-  const fallbackBase = provider === "ollama" ? "http://127.0.0.1:11434/v1" : process.env.TEXT_API_BASE_URL || "https://api.openai.com/v1";
-  const fallbackModel = provider === "ollama" ? "qwen3:8b" : process.env.TEXT_MODEL || "gpt-5.6-terra";
+  const fallbackBase = provider === "ollama" ? "http://127.0.0.1:11434/v1" : textApiBaseUrl;
+  const fallbackModel = provider === "ollama" ? "qwen3:8b" : textModel;
   return finishConfig({ provider, baseUrl: raw.baseUrl || fallbackBase, model: raw.model || fallbackModel, apiKey: raw.apiKey, allowNoKey: provider === "ollama" });
 }
 
 function normalizeImageConfig(raw) {
   return finishConfig({
     provider: "openai",
-    baseUrl: raw.baseUrl || process.env.IMAGE_API_BASE_URL || "https://api.openai.com/v1",
-    model: raw.model || process.env.IMAGE_MODEL || "gpt-image-2",
+    baseUrl: raw.baseUrl || imageApiBaseUrl,
+    model: raw.model || imageModel,
     apiKey: raw.apiKey,
     allowNoKey: false,
     quality: ["low", "medium", "high"].includes(raw.quality) ? raw.quality : "medium",
@@ -510,6 +529,10 @@ function sendApiError(res, error) {
 }
 
 function cleanText(value, maxLength) { return String(value ?? "").replace(/\u0000/g, "").trim().slice(0, maxLength); }
+function isOfficialOpenAIBase(value) {
+  try { return new URL(value).hostname.toLowerCase() === "api.openai.com"; }
+  catch { return false; }
+}
 function resolveEnvironmentSecret(name) {
   const inherited = String(process.env[name] || "").trim();
   if (inherited || process.platform !== "win32") return inherited;

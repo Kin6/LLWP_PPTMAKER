@@ -56,13 +56,16 @@ npm start
 
 如果 Windows 用户或计算机环境变量中已经存在 `OPENAI_API_KEY`，本地服务会自动读取，不需要把 Key 再写进页面或项目文件。程序也会读取常见代理环境变量，并在必要时沿用 Git 的 HTTP 代理设置。
 
+第三方 OpenAI 兼容网关可设置 `OPENAI_API_BASE` 或 `OPENAI_BASE_URL`。服务会自动将页面切换为 `OpenAI Compatible`，并把该地址同时作为文本和图片接口默认值；`TEXT_API_BASE_URL`、`IMAGE_API_BASE_URL` 可以分别覆盖它。
+
 长期使用建议在根目录创建 `.env.local`：
 
 ```dotenv
 OPENAI_API_KEY=你的_key
-TEXT_API_BASE_URL=https://api.openai.com/v1
+OPENAI_API_BASE=
+TEXT_API_BASE_URL=
 TEXT_MODEL=gpt-5.6-terra
-IMAGE_API_BASE_URL=https://api.openai.com/v1
+IMAGE_API_BASE_URL=
 IMAGE_MODEL=gpt-image-2
 ```
 
