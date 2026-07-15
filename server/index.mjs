@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import dotenv from "dotenv";
-import { ProxyAgent, fetch as undiciFetch } from "undici";
+import { FormData as UndiciFormData, ProxyAgent, fetch as undiciFetch } from "undici";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -214,17 +214,28 @@ app.post("/api/ai/generate-images", async (req, res) => {
     const images = [];
 
     for (const job of jobs) {
-      const form = new FormData();
+      const form = new UndiciFormData();
+      const officialImageApi = isOfficialOpenAIBase(config.baseUrl);
       form.append("model", config.model);
       form.append("size", "1536x1024");
-      form.append("quality", config.quality);
-      form.append("output_format", "png");
-      form.append("image[]", new Blob([guideBytes], { type: "image/png" }), `style-${styleId}.png`);
-      references.forEach((reference, index) => {
-        const decoded = decodeDataUrl(reference.dataUrl);
-        form.append("image[]", new Blob([decoded.bytes], { type: decoded.mime }), `user-reference-${index + 1}.${mimeExtension(decoded.mime)}`);
-      });
-      const prompt = buildImagePrompt(job, guide, references.length);
+      let referenceMode = "style-single";
+      if (officialImageApi) {
+        form.append("quality", config.quality);
+        form.append("output_format", "png");
+        form.append("image[]", new Blob([guideBytes], { type: "image/png" }), `style-${styleId}.png`);
+        references.forEach((reference, index) => {
+          const decoded = decodeDataUrl(reference.dataUrl);
+          form.append("image[]", new Blob([decoded.bytes], { type: decoded.mime }), `user-reference-${index + 1}.${mimeExtension(decoded.mime)}`);
+        });
+        referenceMode = "multi";
+      } else if (references.length) {
+        const decoded = decodeDataUrl(references[0].dataUrl);
+        form.append("image", new Blob([decoded.bytes], { type: decoded.mime }), `user-reference-1.${mimeExtension(decoded.mime)}`);
+        referenceMode = "user-single";
+      } else {
+        form.append("image", new Blob([guideBytes], { type: "image/png" }), `style-${styleId}.png`);
+      }
+      const prompt = buildImagePrompt(job, guide, references.length, referenceMode);
       form.append("prompt", prompt);
       const response = await fetchWithTimeout(`${config.baseUrl}/images/edits`, {
         method: "POST",
@@ -234,7 +245,7 @@ app.post("/api/ai/generate-images", async (req, res) => {
       const payload = await readJson(response);
       if (!response.ok) throw upstreamError(response.status, payload);
       const item = payload?.data?.[0];
-      const url = item?.b64_json ? `data:image/png;base64,${item.b64_json}` : item?.url;
+      const url = await imageResultToDataUrl(item);
       if (!url) throw new HttpError(502, "Image 2 没有返回可用图片。");
       images.push({ slideIndex: job.slideIndex, url, prompt, revisedPrompt: item?.revised_prompt || "" });
     }
@@ -334,8 +345,13 @@ function buildDeckPrompt(source) {
   return { system, user };
 }
 
-function buildImagePrompt(job, guide, userReferenceCount) {
-  return `为第 ${job.slideIndex + 1} 页生成一张 16:9 演示视觉。\n内容任务：${job.prompt}\n页面布局：${job.layout || "visual-right"}。\nImage 1 是内置“${guide.label}”风格引导图，只学习它的视觉语法、构图节奏、配色关系和材质，不复制具体内容。${userReferenceCount ? `Image 2 到 Image ${userReferenceCount + 1} 是用户提供的内容参考，保留其主体身份和事实属性。` : "没有用户内容参考，请只根据内容任务创造主题画面。"}\n整体方向：${guide.direction}。画面必须像高端演示文稿的可拆分视觉素材，主体清楚，最多 3 个主要视觉区域。禁止任何文字、字母、数字、标志、水印和伪界面文案。为后续叠加原生 PowerPoint 标题与正文保留一块干净、低细节、高对比的负空间。`;
+function buildImagePrompt(job, guide, userReferenceCount, referenceMode) {
+  const referenceInstruction = referenceMode === "multi"
+    ? `Image 1 是内置“${guide.label}”风格引导图，只学习其视觉语法，不复制具体内容。${userReferenceCount ? `Image 2 到 Image ${userReferenceCount + 1} 是用户内容参考，必须保留主体身份和事实属性。` : "没有用户内容参考。"}`
+    : referenceMode === "user-single"
+      ? `Image 1 是用户提供的内容参考，必须保留主体身份和事实属性。内置“${guide.label}”风格通过文字描述提供，不要改变用户主体。`
+      : `Image 1 是内置“${guide.label}”风格引导图，只学习其视觉语法、构图节奏、配色关系和材质，不复制具体内容。`;
+  return `画一个适合第 ${job.slideIndex + 1} 页的 16:9 高端演示视觉。\n内容任务：${job.prompt}\n页面布局：${job.layout || "visual-right"}。\n${referenceInstruction}\n整体方向：${guide.direction}。画面必须是可拆分的演示视觉素材，主体清楚，最多 3 个主要视觉区域。禁止任何文字、字母、数字、标志、水印和伪界面文案。为后续叠加原生 PowerPoint 标题与正文保留一块干净、低细节、高对比的负空间。`;
 }
 
 function buildDecompositionPrompt(images) {
@@ -471,6 +487,23 @@ function cleanDataUrl(value) {
   if (!/^data:image\/(png|jpe?g|webp);base64,/i.test(text)) return "";
   if (text.length > 9_000_000) throw new HttpError(413, "单张图片过大，请压缩到约 6MB 以内。");
   return text;
+}
+
+async function imageResultToDataUrl(item) {
+  if (item?.b64_json) return `data:image/png;base64,${item.b64_json}`;
+  const remoteUrl = String(item?.url || "").trim();
+  if (!remoteUrl) return "";
+  if (remoteUrl.startsWith("data:image/")) return cleanDataUrl(remoteUrl);
+  let parsed;
+  try { parsed = new URL(remoteUrl); } catch { throw new HttpError(502, "Image 2 返回了无效图片地址。"); }
+  if (!["http:", "https:"].includes(parsed.protocol)) throw new HttpError(502, "Image 2 返回了不支持的图片地址。");
+  const response = await fetchWithTimeout(remoteUrl, { method: "GET" }, 90_000);
+  if (!response.ok) throw new HttpError(502, `无法下载 Image 2 返回的图片 (${response.status})。`);
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (!bytes.length || bytes.length > 12_000_000) throw new HttpError(502, "Image 2 返回的图片为空或过大。");
+  const rawMime = String(response.headers.get("content-type") || "image/png").split(";")[0].toLowerCase();
+  const mime = ["image/png", "image/jpeg", "image/webp"].includes(rawMime) ? rawMime : "image/png";
+  return `data:${mime};base64,${bytes.toString("base64")}`;
 }
 
 function mimeExtension(mime) {

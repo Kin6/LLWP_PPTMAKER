@@ -47,11 +47,27 @@ const decomposition = {
 };
 
 const server = http.createServer(async (req, res) => {
+  if (req.method === "GET" && req.url === "/mock-image.png") {
+    res.setHeader("Content-Type", "image/png");
+    return res.end(Buffer.from(imageBase64, "base64"));
+  }
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   if (req.method === "GET" && req.url === "/v1/models") return res.end(JSON.stringify({ data: [{ id: "mock-vision" }] }));
   if (req.method === "POST" && req.url === "/v1/images/edits") {
-    for await (const _chunk of req) { /* consume multipart request */ }
-    return res.end(JSON.stringify({ data: [{ b64_json: imageBase64 }] }));
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const multipart = Buffer.concat(chunks).toString("latin1");
+    const fieldNames = [...multipart.matchAll(/;\s*name="([^"]+)"/g)].map((match) => match[1]);
+    if (!multipart.includes('name="image"') || multipart.includes('name="image[]"')) {
+      res.statusCode = 400;
+      return res.end(JSON.stringify({ error: { message: `Missing request parameter: image (received: ${fieldNames.join(", ")})` } }));
+    }
+    const explicitDrawInstruction = Buffer.from("画一个", "utf8").toString("latin1");
+    if (!multipart.includes(explicitDrawInstruction)) {
+      res.statusCode = 400;
+      return res.end(JSON.stringify({ error: { message: "Prompt must contain an explicit drawing instruction" } }));
+    }
+    return res.end(JSON.stringify({ data: [{ url: "http://127.0.0.1:4010/mock-image.png" }] }));
   }
   if (req.method === "POST" && req.url === "/v1/responses") {
     let body = "";
