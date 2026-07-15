@@ -23,13 +23,13 @@ Use the native system sans stack with Microsoft YaHei for Chinese. UI headings s
 
 ## Layout
 
-Desktop uses a compact top bar and a two-column workspace: a 400px input rail plus a flexible result canvas. The result canvas contains a slide navigator and an editing surface. Mobile collapses to one column with actions kept reachable.
+Desktop uses a compact top bar and a Manus-like three-column workspace: a source rail, a five-step agent timeline, and a flexible artifact canvas. The artifact canvas contains the story thesis, slide preview, navigator, and native text editor. Mobile collapses to one column with actions kept reachable.
 
 ## Components
 
 - Controls use 6px radii, 40px minimum height, visible hover, focus, disabled, and loading states.
 - Segmented controls are used for local versus AI mode.
-- API configuration is an inline disclosure panel, not a modal.
+- API configuration is an inline disclosure panel, not a modal, and separates text/vision service credentials from Image 2 credentials.
 - Cards are reserved for repeated slide thumbnails and evidence items.
 - Status uses text plus an icon; color is supportive, never the only signal.
 

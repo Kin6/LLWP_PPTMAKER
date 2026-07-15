@@ -1,4 +1,4 @@
-import type { NotebookDeckSpec } from "../App";
+import type { NotebookDeckSpec, NormalizedRect } from "../types";
 
 export type ApiProvider = "openai" | "compatible" | "ollama";
 
@@ -8,9 +8,17 @@ export type ApiConfig = {
   model: string;
   apiKey: string;
   imageEnabled: boolean;
+  imageBaseUrl: string;
+  imageApiKey: string;
   imageModel: string;
   imageCount: number;
   imageQuality: "low" | "medium" | "high";
+};
+
+export type ApiSourceImage = {
+  name: string;
+  dataUrl: string;
+  summary: string;
 };
 
 export type DeckSource = {
@@ -20,7 +28,26 @@ export type DeckSource = {
   textInput: string;
   tableInput: string;
   imageBrief: string;
-  imageSummaries: string[];
+  styleId: string;
+  images: ApiSourceImage[];
+};
+
+export type ImageJob = {
+  slideIndex: number;
+  prompt: string;
+  layout: string;
+};
+
+export type DecompositionPart = NormalizedRect & {
+  label: string;
+  role: string;
+};
+
+export type DecompositionResult = {
+  slideIndex: number;
+  composition: string;
+  safeArea: NormalizedRect;
+  parts: DecompositionPart[];
 };
 
 type ApiMeta = {
@@ -46,21 +73,35 @@ export async function generateAiDeck(config: ApiConfig, source: DeckSource) {
 
 export async function generateAiImages(
   config: ApiConfig,
-  prompts: string[],
+  jobs: ImageJob[],
+  referenceImages: ApiSourceImage[],
+  styleId: string,
 ) {
   return requestJson<{
     ok: true;
-    images: { url: string; prompt: string; revisedPrompt?: string }[];
+    images: { slideIndex: number; url: string; prompt: string; revisedPrompt?: string }[];
     meta: ApiMeta;
   }>("/api/ai/generate-images", {
     config: {
-      baseUrl: config.provider === "ollama" ? "https://api.openai.com/v1" : config.baseUrl,
+      baseUrl: config.imageBaseUrl || "https://api.openai.com/v1",
       model: config.imageModel,
-      apiKey: config.apiKey,
+      apiKey: config.imageApiKey || config.apiKey,
       quality: config.imageQuality,
     },
-    prompts,
+    jobs,
+    referenceImages,
+    styleId,
   });
+}
+
+export async function decomposeAiImages(
+  config: ApiConfig,
+  images: { slideIndex: number; url: string }[],
+) {
+  return requestJson<{ ok: true; decompositions: DecompositionResult[]; meta: ApiMeta }>(
+    "/api/ai/decompose-images",
+    { config: textConfig(config), images },
+  );
 }
 
 function textConfig(config: ApiConfig) {
