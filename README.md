@@ -2,6 +2,16 @@
 
 一个本地优先、可切换 API 增强的 AI PPT 工作台。用户可以同时输入文字、表格和图片，系统先建立演示逻辑，再生成与拆解视觉，最后输出真正可编辑的 `.pptx`。
 
+## Manus 式首屏
+
+首屏用一个对话框完成创建：输入主题、选择页数和模板，然后从模式菜单选择：
+
+- **本地**：不联网，直接建立本地 `DeckSpec` 并输出可编辑 PPTX。
+- **标准**：调用文本/视觉模型理清逻辑，保留原生文本和表格，不调用图片生成。
+- **视觉增强**：运行完整五阶段流程，包括 GPT Image 2 生图与视觉拆解。
+
+对话框左下角的 `+` 支持上传 PNG/JPG/WebP、CSV/TSV、XLSX、TXT/MD 和示例 PPTX。示例 PPTX 会提取前 40 页文字和前 4 张内嵌图片，作为内容与审美参考；旧版二进制 `.ppt`/`.xls` 需要先在 Office 中另存为 `.pptx`/`.xlsx`。
+
 ## 五阶段 API 工作流
 
 1. **理清内容逻辑**：多模态文本模型把素材转成结构化 `DeckSpec`，包含受众判断、核心主张、叙事弧、证据缺口、逐页观点和来源。
@@ -42,14 +52,16 @@ npm start
 
 ## API Key
 
-页面右上角齿轮可以配置文本服务、图片服务、模型与 Key。页面填写的 Key 只保存在当前浏览器会话。
+工作台右上角的“API 设置”可以配置文本服务、图片服务、模型与 Key。页面填写的 Key 只保存在当前浏览器会话。
+
+如果 Windows 用户或计算机环境变量中已经存在 `OPENAI_API_KEY`，本地服务会自动读取，不需要把 Key 再写进页面或项目文件。程序也会读取常见代理环境变量，并在必要时沿用 Git 的 HTTP 代理设置。
 
 长期使用建议在根目录创建 `.env.local`：
 
 ```dotenv
 OPENAI_API_KEY=你的_key
 TEXT_API_BASE_URL=https://api.openai.com/v1
-TEXT_MODEL=gpt-5.4-mini
+TEXT_MODEL=gpt-5.6-terra
 IMAGE_API_BASE_URL=https://api.openai.com/v1
 IMAGE_MODEL=gpt-image-2
 ```
@@ -60,6 +72,7 @@ IMAGE_MODEL=gpt-image-2
 
 ```powershell
 npm run build
+npm run test:attachments
 node scripts/mock-openai.mjs
 ```
 

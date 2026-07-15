@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDownToLine,
+  ArrowUp,
   BrainCircuit,
   Check,
   ChevronDown,
@@ -10,12 +11,16 @@ import {
   Cloud,
   Crop,
   FileText,
+  FileSpreadsheet,
+  FolderOpen,
+  House,
   Image as ImageIcon,
   KeyRound,
   Layers3,
   Loader2,
   MonitorUp,
   Plus,
+  Presentation,
   Settings2,
   Sparkles,
   Table2,
@@ -23,6 +28,7 @@ import {
   WandSparkles,
   X,
 } from "lucide-react";
+import { parseAttachment, type ParsedAttachment } from "./lib/attachmentParser";
 import { exportNotebookDeck } from "./lib/exportDeck";
 import { buildLocalDeck, parseTable } from "./lib/localPlanner";
 import {
@@ -45,6 +51,8 @@ import {
 } from "./types";
 
 type Mode = "local" | "ai";
+type Screen = "home" | "workspace";
+type GenerationPreset = "local" | "api-standard" | "api-visual";
 type SourceTab = "text" | "table" | "image";
 type StepId = "logic" | "image" | "decompose" | "assemble" | "export";
 type StepStatus = "idle" | "running" | "done" | "skipped" | "error";
@@ -57,10 +65,21 @@ type WorkflowStep = {
   detail: string;
 };
 
+type GenerationSource = {
+  topic: string;
+  audience: string;
+  slideCount: number;
+  textInput: string;
+  tableInput: string;
+  imageBrief: string;
+  styleId: string;
+  assets: GeneratedAsset[];
+};
+
 const defaultApiConfig: ApiConfig = {
   provider: "openai",
   baseUrl: "https://api.openai.com/v1",
-  model: "gpt-5.4-mini",
+  model: "gpt-5.6-terra",
   apiKey: "",
   imageEnabled: true,
   imageBaseUrl: "https://api.openai.com/v1",
@@ -90,7 +109,21 @@ const sampleTable = `阶段,输入,处理,输出
 视觉拆解,生成图,安全区与主体区域识别,独立裁图
 页面组装,DeckSpec 与视觉部件,原生对象排版,可编辑 PPTX`;
 
+const examplePrompts = [
+  "设计带预测数据的投资者推介材料",
+  "分析竞争者市场和定位",
+  "研究产品发布的市场机会",
+  "自动化每周团队状态报告",
+];
+
 function App() {
+  const [screen, setScreen] = useState<Screen>("home");
+  const [prompt, setPrompt] = useState("");
+  const [preset, setPreset] = useState<GenerationPreset>("api-standard");
+  const [attachments, setAttachments] = useState<ParsedAttachment[]>([]);
+  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
+  const [presetMenuOpen, setPresetMenuOpen] = useState(false);
+  const [homeMessage, setHomeMessage] = useState("");
   const [mode, setMode] = useState<Mode>("local");
   const [sourceTab, setSourceTab] = useState<SourceTab>("text");
   const [topic, setTopic] = useState("AI PPT 五阶段工作流");
@@ -149,21 +182,28 @@ function App() {
     setSteps(initialSteps.map((step) => ({ ...step })));
   }
 
-  function runLocal() {
-    const next = buildLocalDeck({ topic, audience, slideCount, textInput, tableInput, imageBrief, styleId, assets });
+  function runLocal(source: GenerationSource = { topic, audience, slideCount, textInput, tableInput, imageBrief, styleId, assets }) {
+    const next = buildLocalDeck(source);
+    const sourceUploads = source.assets.filter((asset) => asset.kind === "upload");
     setDeck(next);
+    setAssets(source.assets);
     setSelectedSlide(0);
     resetSteps();
     updateStep("logic", "done", "本地规则已提取观点并生成叙事骨架");
-    updateStep("image", "skipped", uploadedAssets.length ? "使用用户上传图片，不调用外部生图" : "本地模式未调用图像模型");
+    updateStep("image", "skipped", sourceUploads.length ? "使用用户上传图片，不调用外部生图" : "本地模式未调用图像模型");
     updateStep("decompose", "skipped", "本地模式保留原图，不做视觉拆解");
     updateStep("assemble", "done", "已组装原生标题、正文、表格与上传图片");
     updateStep("export", "idle", "点击右上角即可导出可编辑 PPTX");
     setStatus("本地 DeckSpec 已更新。内容与表格可以继续编辑后导出。");
   }
 
-  async function runAiPipeline() {
+  async function runAiPipeline(
+    source: GenerationSource = { topic, audience, slideCount, textInput, tableInput, imageBrief, styleId, assets },
+    config: ApiConfig = apiConfig,
+  ) {
     if (isRunning) return;
+    const sourceUploads = source.assets.filter((asset) => asset.kind === "upload");
+    const sourceStyle = styleProfiles.find((style) => style.id === source.styleId) || styleProfiles[0];
     setRunning(true);
     setApiCalls(0);
     resetSteps();
@@ -171,23 +211,30 @@ function App() {
     try {
       setStatus("正在读取文字、表格和图片，并建立演示论证链…");
       updateStep("logic", "running", "模型正在区分结论、证据、缺口与行动");
-      const sourceImages = await Promise.all(uploadedAssets.slice(0, 3).map(assetToApiImage));
-      const response = await generateAiDeck(apiConfig, {
-        topic, audience, slideCount, textInput, tableInput, imageBrief, styleId, images: sourceImages,
+      const sourceImages = await Promise.all(sourceUploads.slice(0, 3).map(assetToApiImage));
+      const response = await generateAiDeck(config, {
+        topic: source.topic,
+        audience: source.audience,
+        slideCount: source.slideCount,
+        textInput: source.textInput,
+        tableInput: source.tableInput,
+        imageBrief: source.imageBrief,
+        styleId: source.styleId,
+        images: sourceImages,
       });
-      let nextDeck = attachEditableTable(remapUploadedImageIndexes(response.deck, uploadedAssets), tableInput);
+      let nextDeck = attachEditableTable(remapUploadedImageIndexes(response.deck, sourceUploads), source.tableInput);
       setDeck(nextDeck);
       setSelectedSlide(0);
       setApiCalls((value) => value + response.meta.apiCalls);
       updateStep("logic", "done", `已形成 ${nextDeck.slides.length} 页叙事，发现 ${nextDeck.story.evidenceGaps.length} 个证据缺口`);
 
-      let nextAssets = assets.filter((asset) => asset.kind === "upload");
-      if (apiConfig.imageEnabled) {
+      let nextAssets = sourceUploads;
+      if (config.imageEnabled) {
         activeStep = "image";
-        updateStep("image", "running", `正在用 ${currentStyle.name} 引导 GPT Image 2`);
+        updateStep("image", "running", `正在用 ${sourceStyle.name} 引导 GPT Image 2`);
         setStatus("正在将内置风格图与用户内容图一起送入 Image 2…");
-        const jobs = createImageJobs(nextDeck, apiConfig.imageCount);
-        const imageResponse = await generateAiImages(apiConfig, jobs, sourceImages, styleId);
+        const jobs = createImageJobs(nextDeck, config.imageCount);
+        const imageResponse = await generateAiImages(config, jobs, sourceImages, source.styleId);
         const startIndex = maxAssetIndex(nextAssets) + 1;
         const generatedAssets: GeneratedAsset[] = imageResponse.images.map((image, index) => ({
           id: makeId("generated"),
@@ -215,7 +262,7 @@ function App() {
         updateStep("decompose", "running", "视觉模型正在识别文字安全区和主体区域");
         setStatus("正在拆解生成图，并裁出可单独移动的视觉部件…");
         const decompositionResponse = await decomposeAiImages(
-          apiConfig,
+          config,
           imageResponse.images.map((image) => ({ slideIndex: image.slideIndex, url: image.url })),
         );
         const cropResult = await createCropAssets(generatedAssets, decompositionResponse.decompositions, nextAssets);
@@ -274,6 +321,95 @@ function App() {
     setStatus(`已加入 ${additions.length} 张内容参考图。API 模式会把它们与风格引导图分开使用。`);
   }
 
+  async function handleAttachmentFiles(files: FileList | File[]) {
+    const incoming = Array.from(files).slice(0, Math.max(0, 8 - attachments.length));
+    if (!incoming.length) return;
+    setAttachmentMenuOpen(false);
+    setHomeMessage("正在读取附件…");
+    const parsed: ParsedAttachment[] = [];
+    const imageAssets: GeneratedAsset[] = [];
+    let nextIndex = maxAssetIndex(assets) + 1;
+    let remainingImages = Math.max(0, 6 - uploadedAssets.length);
+
+    for (const file of incoming) {
+      try {
+        const attachment = await parseAttachment(file);
+        const acceptedImages = attachment.imageFiles.slice(0, remainingImages);
+        const attachmentAssets: GeneratedAsset[] = [];
+        for (const imageFile of acceptedImages) {
+          const asset = await inspectImage(imageFile, nextIndex, imageBrief);
+          attachmentAssets.push(asset);
+          imageAssets.push(asset);
+          nextIndex += 1;
+          remainingImages -= 1;
+        }
+        parsed.push({ ...attachment, assetIds: attachmentAssets.map((asset) => asset.id) });
+      } catch (error) {
+        setHomeMessage(error instanceof Error ? error.message : `无法读取 ${file.name}`);
+      }
+    }
+
+    if (parsed.length) {
+      setAttachments((current) => [...current, ...parsed]);
+      setAssets((current) => [
+        ...current.filter((asset) => asset.kind === "upload"),
+        ...imageAssets,
+      ]);
+      setHomeMessage(`已读取 ${parsed.length} 个附件`);
+    }
+  }
+
+  function removeHomeAttachment(id: string) {
+    const target = attachments.find((attachment) => attachment.id === id);
+    setAttachments((current) => current.filter((attachment) => attachment.id !== id));
+    if (target?.assetIds.length) {
+      const ids = new Set(target.assetIds);
+      setAssets((current) => current.filter((asset) => !ids.has(asset.id)));
+    }
+    setHomeMessage("");
+  }
+
+  async function startFromComposer() {
+    const attachmentText = attachments.map((attachment) => attachment.extractedText).filter(Boolean).join("\n\n");
+    const attachmentTables = attachments.map((attachment) => attachment.tableText).filter(Boolean).join("\n");
+    const combinedText = [prompt.trim(), attachmentText].filter(Boolean).join("\n\n");
+    const combinedTable = attachmentTables || tableInput;
+    if (!combinedText && !combinedTable && !uploadedAssets.length) {
+      setHomeMessage("请描述演示主题，或先添加一份材料。");
+      return;
+    }
+
+    const nextTopic = compactTopic(prompt || attachments[0]?.name || "导入材料演示文稿");
+    const source: GenerationSource = {
+      topic: nextTopic,
+      audience,
+      slideCount,
+      textInput: combinedText || `请根据已上传材料制作一份关于“${nextTopic}”的演示文稿。`,
+      tableInput: combinedTable,
+      imageBrief,
+      styleId,
+      assets: assets.filter((asset) => asset.kind === "upload"),
+    };
+    setTopic(source.topic);
+    setTextInput(source.textInput);
+    setTableInput(source.tableInput);
+    setScreen("workspace");
+
+    if (preset === "local") {
+      setMode("local");
+      runLocal(source);
+      return;
+    }
+
+    const nextConfig: ApiConfig = {
+      ...apiConfig,
+      imageEnabled: preset === "api-visual",
+    };
+    setMode("ai");
+    setApiConfig(nextConfig);
+    await runAiPipeline(source, nextConfig);
+  }
+
   function removeAsset(id: string) {
     setAssets((current) => current.filter((asset) => asset.id !== id && asset.parentId !== id));
   }
@@ -297,13 +433,43 @@ function App() {
     }
   }
 
+  if (screen === "home") {
+    return (
+      <HomeScreen
+        prompt={prompt}
+        onPromptChange={setPrompt}
+        preset={preset}
+        onPresetChange={(value) => {
+          setPreset(value);
+          setPresetMenuOpen(false);
+        }}
+        presetMenuOpen={presetMenuOpen}
+        onTogglePreset={() => setPresetMenuOpen((value) => !value)}
+        attachmentMenuOpen={attachmentMenuOpen}
+        onToggleAttachments={() => setAttachmentMenuOpen((value) => !value)}
+        attachments={attachments}
+        onFiles={handleAttachmentFiles}
+        onRemoveAttachment={removeHomeAttachment}
+        styleId={styleId}
+        onStyleChange={setStyleId}
+        slideCount={slideCount}
+        onSlideCountChange={setSlideCount}
+        envKeyConfigured={envKeyConfigured}
+        message={homeMessage}
+        running={isRunning}
+        onSubmit={startFromComposer}
+        onOpenWorkspace={() => setScreen("workspace")}
+      />
+    );
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
-        <div className="brand-lockup">
+        <button className="brand-lockup brand-button" onClick={() => setScreen("home")} title="返回首页">
           <span className="brand-mark"><Layers3 size={16} /></span>
           <div><strong>LLWP PPTMAKER</strong><span>{deck.title}</span></div>
-        </div>
+        </button>
         <div className="topbar-actions">
           <div className="mode-switch" aria-label="生成模式">
             <button className={mode === "local" ? "active" : ""} onClick={() => setMode("local")}><MonitorUp size={14} />本地</button>
@@ -407,12 +573,12 @@ function App() {
           <div className="run-area">
             <p>{status}</p>
             {mode === "ai" ? (
-              <button className="primary-button" onClick={runAiPipeline} disabled={isRunning}>
+              <button className="primary-button" onClick={() => void runAiPipeline()} disabled={isRunning}>
                 {isRunning ? <Loader2 className="spin" size={16} /> : <WandSparkles size={16} />}
                 {isRunning ? "正在执行五阶段…" : "运行并生成 PPTX"}
               </button>
             ) : (
-              <button className="primary-button" onClick={runLocal}><Sparkles size={16} />生成本地方案</button>
+              <button className="primary-button" onClick={() => runLocal()}><Sparkles size={16} />生成本地方案</button>
             )}
             <small>{mode === "ai" ? "文字和图片会发送到你配置的模型服务。" : "不联网、不需要 Key，所有处理在浏览器完成。"}</small>
           </div>
@@ -450,6 +616,162 @@ function App() {
   );
 }
 
+function HomeScreen({
+  prompt,
+  onPromptChange,
+  preset,
+  onPresetChange,
+  presetMenuOpen,
+  onTogglePreset,
+  attachmentMenuOpen,
+  onToggleAttachments,
+  attachments,
+  onFiles,
+  onRemoveAttachment,
+  styleId,
+  onStyleChange,
+  slideCount,
+  onSlideCountChange,
+  envKeyConfigured,
+  message,
+  running,
+  onSubmit,
+  onOpenWorkspace,
+}: {
+  prompt: string;
+  onPromptChange: (value: string) => void;
+  preset: GenerationPreset;
+  onPresetChange: (value: GenerationPreset) => void;
+  presetMenuOpen: boolean;
+  onTogglePreset: () => void;
+  attachmentMenuOpen: boolean;
+  onToggleAttachments: () => void;
+  attachments: ParsedAttachment[];
+  onFiles: (files: FileList | File[]) => void;
+  onRemoveAttachment: (id: string) => void;
+  styleId: string;
+  onStyleChange: (id: string) => void;
+  slideCount: number;
+  onSlideCountChange: (value: number) => void;
+  envKeyConfigured: boolean;
+  message: string;
+  running: boolean;
+  onSubmit: () => void;
+  onOpenWorkspace: () => void;
+}) {
+  const imageRef = useRef<HTMLInputElement>(null);
+  const tableRef = useRef<HTMLInputElement>(null);
+  const pptRef = useRef<HTMLInputElement>(null);
+  const presetLabel = preset === "local" ? "本地" : preset === "api-visual" ? "视觉" : "标准";
+
+  return (
+    <main className="home-shell">
+      <header className="home-topbar">
+        <div className="home-nav-inner">
+          <div className="home-brand"><span><Layers3 size={15} /></span><strong>LLWP PPTMAKER</strong></div>
+          <div className="home-nav-actions">
+            <span className={`env-status ${envKeyConfigured ? "ready" : "missing"}`}>
+              <Circle size={7} fill="currentColor" />{envKeyConfigured ? "系统 Key 已读取" : "未检测到系统 Key"}
+            </span>
+            <button className="workspace-link" onClick={onOpenWorkspace}><House size={14} />工作台</button>
+          </div>
+        </div>
+      </header>
+
+      <section className="home-main">
+        <h1>我能为你做什么？</h1>
+        <div
+          className="manus-composer"
+          onDragOver={(event) => event.preventDefault()}
+          onDrop={(event) => { event.preventDefault(); void onFiles(event.dataTransfer.files); }}
+        >
+          <textarea
+            value={prompt}
+            onChange={(event) => onPromptChange(event.target.value)}
+            onKeyDown={(event) => {
+              if ((event.ctrlKey || event.metaKey) && event.key === "Enter") void onSubmit();
+            }}
+            placeholder="描述您的演示文稿主题"
+            aria-label="描述您的演示文稿主题"
+          />
+
+          {!!attachments.length && (
+            <div className="attachment-chips">
+              {attachments.map((attachment) => (
+                <span className={`attachment-chip ${attachment.kind}`} key={attachment.id}>
+                  {attachment.kind === "image" ? <ImageIcon size={13} /> : attachment.kind === "table" ? <FileSpreadsheet size={13} /> : attachment.kind === "pptx" ? <Presentation size={13} /> : <FileText size={13} />}
+                  <span><strong>{attachment.name}</strong><small>{attachment.detail}</small></span>
+                  <button title="移除附件" onClick={() => onRemoveAttachment(attachment.id)}><X size={12} /></button>
+                </span>
+              ))}
+            </div>
+          )}
+
+          <div className="composer-footer">
+            <div className="composer-tools">
+              <div className="popover-anchor">
+                <button className="circle-tool" aria-label="添加附件" title="添加附件" onClick={onToggleAttachments}><Plus size={17} /></button>
+                {attachmentMenuOpen && (
+                  <div className="attachment-menu" role="menu">
+                    <button onClick={() => imageRef.current?.click()}><ImageIcon size={16} /><span><strong>图片</strong><small>PNG、JPG、WebP</small></span></button>
+                    <button onClick={() => tableRef.current?.click()}><FileSpreadsheet size={16} /><span><strong>表格</strong><small>CSV、TSV、XLSX</small></span></button>
+                    <button onClick={() => pptRef.current?.click()}><Presentation size={16} /><span><strong>示例 PPTX</strong><small>提取页面文字与内嵌图片</small></span></button>
+                  </div>
+                )}
+              </div>
+              <span className="artifact-type"><Presentation size={14} />幻灯片</span>
+              <div className="popover-anchor">
+                <button className="preset-trigger" onClick={onTogglePreset}><span>{presetLabel}</span><ChevronDown size={14} /></button>
+                {presetMenuOpen && (
+                  <div className="preset-menu" role="menu">
+                    <button className={preset === "api-standard" ? "selected" : ""} onClick={() => onPresetChange("api-standard")}>
+                      <Cloud size={16} /><span><strong>标准</strong><small>API 理清逻辑并生成原生可编辑 PPTX</small></span>{preset === "api-standard" && <Check size={15} />}
+                    </button>
+                    <button className={preset === "api-visual" ? "selected" : ""} onClick={() => onPresetChange("api-visual")}>
+                      <ImageIcon size={16} /><span><strong>视觉增强</strong><small>标准流程 + GPT Image 2 + 视觉拆解</small></span>{preset === "api-visual" && <Check size={15} />}
+                    </button>
+                    <button className={preset === "local" ? "selected" : ""} onClick={() => onPresetChange("local")}>
+                      <MonitorUp size={16} /><span><strong>本地</strong><small>不调用 API，直接组装可编辑演示文稿</small></span>{preset === "local" && <Check size={15} />}
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+            <button className="composer-submit" aria-label="生成演示文稿" title="生成演示文稿" onClick={() => void onSubmit()} disabled={running}>
+              {running ? <Loader2 className="spin" size={17} /> : <ArrowUp size={17} />}
+            </button>
+          </div>
+          <input ref={imageRef} hidden type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(event) => { if (event.target.files) void onFiles(event.target.files); event.target.value = ""; }} />
+          <input ref={tableRef} hidden type="file" accept=".csv,.tsv,.xlsx,text/csv" multiple onChange={(event) => { if (event.target.files) void onFiles(event.target.files); event.target.value = ""; }} />
+          <input ref={pptRef} hidden type="file" accept=".pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation" onChange={(event) => { if (event.target.files) void onFiles(event.target.files); event.target.value = ""; }} />
+        </div>
+        <div className="home-message" aria-live="polite">{message}</div>
+
+        <section className="example-section">
+          <h2>示例提示词</h2>
+          <div className="example-grid">
+            {examplePrompts.map((example) => <button key={example} onClick={() => onPromptChange(example)}>{example}<ArrowUp size={12} /></button>)}
+          </div>
+        </section>
+
+        <section className="template-section">
+          <div className="template-heading"><h2>选择模板</h2><label><Presentation size={13} /><select value={slideCount <= 6 ? 6 : slideCount <= 8 ? 8 : slideCount <= 10 ? 10 : 12} onChange={(event) => onSlideCountChange(clamp(Number(event.target.value), 4, 12))}><option value={6}>4–6 页</option><option value={8}>7–8 页</option><option value={10}>9–10 页</option><option value={12}>11–12 页</option></select></label></div>
+          <div className="home-template-grid">
+            <button className="import-template" onClick={() => pptRef.current?.click()}><FolderOpen size={19} /><span>导入示例 PPTX</span></button>
+            {styleProfiles.map((style) => (
+              <button key={style.id} className={`home-template ${styleId === style.id ? "active" : ""}`} onClick={() => onStyleChange(style.id)}>
+                <img src={style.image} alt={`${style.name}模板`} />
+                <span>{style.name}</span>
+                {styleId === style.id && <i><Check size={12} /></i>}
+              </button>
+            ))}
+          </div>
+        </section>
+      </section>
+    </main>
+  );
+}
+
 function WorkflowRow({ step, index }: { step: WorkflowStep; index: number }) {
   return (
     <div className={`workflow-row ${step.status}`}>
@@ -474,9 +796,9 @@ function ApiSettings({ config, onChange, envKeyConfigured, connection, onTest }:
       <div className="section-line"><div><span className="eyebrow">MODEL SERVICE</span><h2>API 设置</h2></div><KeyRound size={15} /></div>
       <label><span>文本与视觉模型服务</span><select value={config.provider} onChange={(event) => patch({ provider: event.target.value as ApiProvider, baseUrl: event.target.value === "ollama" ? "http://127.0.0.1:11434/v1" : config.baseUrl })}><option value="openai">OpenAI</option><option value="compatible">OpenAI Compatible</option><option value="ollama">Ollama</option></select></label>
       <label><span>Base URL</span><input value={config.baseUrl} onChange={(event) => patch({ baseUrl: event.target.value })} /></label>
-      <label><span>文本 / 视觉模型</span><input value={config.model} onChange={(event) => patch({ model: event.target.value })} placeholder="gpt-5.4-mini" /></label>
-      <label><span>API Key {envKeyConfigured && <em>环境变量已配置</em>}</span><input type="password" autoComplete="off" value={config.apiKey} onChange={(event) => patch({ apiKey: event.target.value })} placeholder={envKeyConfigured ? "使用 .env.local 中的 Key" : "sk-…"} /></label>
-      <div className="api-note">页面 Key 只保存在当前浏览器会话，并由本机服务转发。长期使用请在项目根目录 <code>.env.local</code> 填写 <code>OPENAI_API_KEY=...</code>。</div>
+      <label><span>文本 / 视觉模型</span><input value={config.model} onChange={(event) => patch({ model: event.target.value })} placeholder="gpt-5.6-terra" /></label>
+      <label><span>API Key {envKeyConfigured && <em>环境变量已配置</em>}</span><input type="password" autoComplete="off" value={config.apiKey} onChange={(event) => patch({ apiKey: event.target.value })} placeholder={envKeyConfigured ? "自动使用系统环境变量" : "sk-…"} /></label>
+      <div className="api-note">页面 Key 只保存在当前浏览器会话，并由本机服务转发。留空时自动读取系统环境变量或项目根目录 <code>.env.local</code> 中的 <code>OPENAI_API_KEY</code>。</div>
       <label className="toggle-row"><span><strong>Image 2 生图</strong><small>需要 OpenAI 图片接口和单独计费</small></span><input type="checkbox" checked={config.imageEnabled} onChange={(event) => patch({ imageEnabled: event.target.checked })} /></label>
       {config.imageEnabled && <div className="image-config"><label className="wide"><span>图片 API Base URL</span><input value={config.imageBaseUrl || ""} onChange={(event) => patch({ imageBaseUrl: event.target.value })} /></label><label className="wide"><span>图片 API Key（留空则复用上方 Key）</span><input type="password" autoComplete="off" value={config.imageApiKey || ""} onChange={(event) => patch({ imageApiKey: event.target.value })} placeholder="可与文本服务分开" /></label><label><span>图片模型</span><input value={config.imageModel} onChange={(event) => patch({ imageModel: event.target.value })} /></label><label><span>张数</span><input type="number" min={1} max={4} value={config.imageCount} onChange={(event) => patch({ imageCount: clamp(Number(event.target.value), 1, 4) })} /></label><label><span>质量</span><select value={config.imageQuality} onChange={(event) => patch({ imageQuality: event.target.value as ApiConfig["imageQuality"] })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label></div>}
       <button className={`connection-button ${connection}`} onClick={onTest} disabled={connection === "testing"}>{connection === "testing" ? <Loader2 className="spin" size={14} /> : <Cloud size={14} />}{connection === "success" ? "连接正常" : connection === "error" ? "重试连接" : "测试连接"}</button>
@@ -642,6 +964,10 @@ function loadApiConfig(): ApiConfig {
 }
 
 function maxAssetIndex(assets: GeneratedAsset[]) { return assets.reduce((max, asset) => Math.max(max, asset.index), 0); }
+function compactTopic(value: string) {
+  const line = value.replace(/\s+/g, " ").trim().split(/[。！？!?；;]/)[0] || "导入材料演示文稿";
+  return line.length > 54 ? `${line.slice(0, 53)}…` : line;
+}
 function clamp(value: number, min: number, max: number) { return Math.max(min, Math.min(max, Number.isFinite(value) ? Math.round(value) : min)); }
 function clamp01(value: number) { return Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0)); }
 function makeId(prefix: string) { return `${prefix}-${crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`; }

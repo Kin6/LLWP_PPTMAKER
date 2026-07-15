@@ -1,8 +1,10 @@
 import path from "node:path";
 import fs from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import dotenv from "dotenv";
+import { ProxyAgent, fetch as undiciFetch } from "undici";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -10,6 +12,10 @@ const root = path.resolve(__dirname, "..");
 
 dotenv.config({ path: path.join(root, ".env.local"), quiet: true });
 dotenv.config({ path: path.join(root, ".env"), quiet: true });
+
+const openAiApiKey = resolveEnvironmentSecret("OPENAI_API_KEY");
+const outboundProxyUrl = resolveProxyUrl();
+const outboundProxyAgent = outboundProxyUrl ? new ProxyAgent(outboundProxyUrl) : null;
 
 const isProduction = process.env.NODE_ENV === "production" || process.argv.includes("--production");
 const portArgIndex = process.argv.indexOf("--port");
@@ -134,7 +140,8 @@ app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
     mode: "hybrid",
-    envKeyConfigured: Boolean(process.env.OPENAI_API_KEY),
+    envKeyConfigured: Boolean(openAiApiKey),
+    proxyConfigured: Boolean(outboundProxyAgent),
     pipeline: ["logic-planner", "image-2-reference-edit", "vision-decomposition", "native-assembly", "editable-pptx"],
   });
 });
@@ -244,7 +251,7 @@ app.post("/api/ai/decompose-images", async (req, res) => {
 function normalizeTextConfig(raw) {
   const provider = ["openai", "compatible", "ollama"].includes(raw.provider) ? raw.provider : "openai";
   const fallbackBase = provider === "ollama" ? "http://127.0.0.1:11434/v1" : process.env.TEXT_API_BASE_URL || "https://api.openai.com/v1";
-  const fallbackModel = provider === "ollama" ? "qwen3:8b" : process.env.TEXT_MODEL || "gpt-5.4-mini";
+  const fallbackModel = provider === "ollama" ? "qwen3:8b" : process.env.TEXT_MODEL || "gpt-5.6-terra";
   return finishConfig({ provider, baseUrl: raw.baseUrl || fallbackBase, model: raw.model || fallbackModel, apiKey: raw.apiKey, allowNoKey: provider === "ollama" });
 }
 
@@ -265,7 +272,7 @@ function finishConfig({ provider, baseUrl, model, apiKey, allowNoKey, quality })
   try { parsedUrl = new URL(normalizedBaseUrl); } catch { throw new HttpError(400, "API Base URL 格式不正确。"); }
   if (!["http:", "https:"].includes(parsedUrl.protocol)) throw new HttpError(400, "API Base URL 只支持 http 或 https。");
   const requestKey = String(apiKey || "").trim();
-  const envKey = String(process.env.OPENAI_API_KEY || "").trim();
+  const envKey = openAiApiKey;
   const resolvedKey = requestKey || envKey;
   if (!allowNoKey && !resolvedKey) throw new HttpError(400, "缺少 API Key。请在页面填写，或在 .env.local 配置 OPENAI_API_KEY。");
   return {
@@ -472,7 +479,13 @@ function parseModelJson(text) {
 }
 
 async function fetchWithTimeout(url, options, timeoutMs) {
-  try { return await fetch(url, { ...options, signal: AbortSignal.timeout(timeoutMs) }); }
+  try {
+    const host = new URL(url).hostname;
+    const dispatcher = outboundProxyAgent && !["127.0.0.1", "localhost", "::1"].includes(host)
+      ? outboundProxyAgent
+      : undefined;
+    return await undiciFetch(url, { ...options, dispatcher, signal: AbortSignal.timeout(timeoutMs) });
+  }
   catch (error) {
     if (error?.name === "TimeoutError") throw new HttpError(504, "模型服务响应超时。");
     throw new HttpError(502, `无法连接模型服务：${error?.message || "网络错误"}`);
@@ -497,6 +510,34 @@ function sendApiError(res, error) {
 }
 
 function cleanText(value, maxLength) { return String(value ?? "").replace(/\u0000/g, "").trim().slice(0, maxLength); }
+function resolveEnvironmentSecret(name) {
+  const inherited = String(process.env[name] || "").trim();
+  if (inherited || process.platform !== "win32") return inherited;
+  try {
+    const script = `$user=[Environment]::GetEnvironmentVariable('${name}','User'); if($user){$user}else{[Environment]::GetEnvironmentVariable('${name}','Machine')}`;
+    return String(execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 5_000,
+    }) || "").trim();
+  } catch {
+    return "";
+  }
+}
+function resolveProxyUrl() {
+  const envProxy = resolveEnvironmentSecret("HTTPS_PROXY") || resolveEnvironmentSecret("HTTP_PROXY") || resolveEnvironmentSecret("ALL_PROXY");
+  if (envProxy) return envProxy;
+  try {
+    const gitProxy = String(execFileSync("git", ["config", "--get", "http.proxy"], {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 3_000,
+    }) || "").trim();
+    return /^https?:\/\//i.test(gitProxy) ? gitProxy : "";
+  } catch {
+    return "";
+  }
+}
 class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
 
 if (isProduction) {

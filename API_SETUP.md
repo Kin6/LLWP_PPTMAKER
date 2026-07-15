@@ -1,6 +1,6 @@
 # API 配置与五阶段实现
 
-本地模式不需要 API。切换到页面顶部的“API”后，五阶段会按顺序执行，并把状态与错误显示在中间任务轨迹中。
+本地模式不需要 API。首屏“标准”运行内容规划与原生组装，“视觉增强”运行完整五阶段，并把状态与错误显示在工作台的任务轨迹中。
 
 ## 需要哪些 API
 
@@ -53,7 +53,7 @@
 ```dotenv
 OPENAI_API_KEY=你的_key
 TEXT_API_BASE_URL=https://api.openai.com/v1
-TEXT_MODEL=gpt-5.4-mini
+TEXT_MODEL=gpt-5.6-terra
 IMAGE_API_BASE_URL=https://api.openai.com/v1
 IMAGE_MODEL=gpt-image-2
 ```
@@ -63,6 +63,26 @@ IMAGE_MODEL=gpt-image-2
 ```powershell
 npm run dev
 ```
+
+### 方式 3：Windows 系统环境变量
+
+已设置 `OPENAI_API_KEY` 时无需创建 `.env.local`。服务启动时按“当前进程 -> Windows 用户环境变量 -> Windows 计算机环境变量”的顺序读取：
+
+```powershell
+[Environment]::SetEnvironmentVariable("OPENAI_API_KEY", "你的_key", "User")
+```
+
+设置后重新打开终端并运行 `npm run dev`。首屏只显示“系统 Key 已读取”，Key 本身不会返回前端。若使用 OpenAI 兼容服务，还需要在“API 设置”中填写该服务的正确 Base URL；OpenAI Key 不能自动推断第三方服务地址。
+
+服务会读取 `HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY`，并在这些变量缺失时尝试沿用当前仓库的 `git config http.proxy`，用于访问外部模型服务。
+
+## 附件输入
+
+- 图片：PNG、JPG、WebP，作为内容参考图发送给支持视觉的模型。
+- 表格：CSV、TSV、XLSX；XLSX 在浏览器内按 Office Open XML 解析，不上传原文件。
+- 示例 PPT：PPTX；提取前 40 页文本和前 4 张内嵌图片，合并进内容规划与风格参考。
+- 文本：TXT、MD，追加到主题文字。
+- 旧版 `.ppt`、`.xls` 不直接解析，请先另存为新版 Office 格式。
 
 ## 数据与隐私边界
 

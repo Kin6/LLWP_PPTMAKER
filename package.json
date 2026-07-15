@@ -8,22 +8,26 @@
     "dev:vite": "vite --host 0.0.0.0",
     "start": "node server/index.mjs --production",
     "build": "tsc -b && vite build",
+    "test:attachments": "node --experimental-strip-types scripts/test-attachment-parser.mjs",
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {
     "dotenv": "^17.4.2",
     "express": "^4.19.2",
+    "jszip": "^3.10.1",
     "lucide-react": "^0.468.0",
     "pptxgenjs": "^3.12.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "undici": "^8.7.0"
   },
   "devDependencies": {
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
+    "@xmldom/xmldom": "^0.9.10",
     "playwright": "^1.61.1",
     "typescript": "^5.5.3",
-    "vite": "^5.4.1"
+    "vite": "^6.4.3"
   }
 }
