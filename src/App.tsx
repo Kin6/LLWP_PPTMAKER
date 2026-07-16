@@ -89,13 +89,14 @@ const defaultApiConfig: ApiConfig = {
   imageModel: "gpt-image-2",
   imageCount: 2,
   imageQuality: "medium",
+  imageTextMode: "integrated",
 };
 
 const initialSteps: WorkflowStep[] = [
   { id: "logic", title: "理清内容逻辑", engine: "Responses · 结构化 DeckSpec", status: "idle", detail: "判断受众、结论、证据和叙事弧" },
   { id: "image", title: "生成主题视觉", engine: "GPT Image 2 · 参考图编辑", status: "idle", detail: "用户内容图 + 可选风格引导图" },
   { id: "decompose", title: "拆解视觉部件", engine: "视觉模型 / 本地 Canvas", status: "idle", detail: "识别安全区并裁出独立图片对象，超时自动降级" },
-  { id: "assemble", title: "组装页面对象", engine: "原生文字、表格与图片", status: "idle", detail: "把内容逻辑映射到可编辑页面" },
+  { id: "assemble", title: "组装页面对象", engine: "整页图文 / 原生对象", status: "idle", detail: "按文字模式组装视觉、表格、图片与内容源" },
   { id: "export", title: "生成可编辑 PPTX", engine: "PptxGenJS", status: "idle", detail: "输出文本框、表格、图片与讲稿备注" },
 ];
 
@@ -133,7 +134,7 @@ function App() {
   const [slideCount, setSlideCount] = useState(7);
   const [textInput, setTextInput] = useState(sampleText);
   const [tableInput, setTableInput] = useState(sampleTable);
-  const [imageBrief, setImageBrief] = useState("保留上传图片的主体身份；视觉需要专业、克制，并为原生文字留出干净空间。");
+  const [imageBrief, setImageBrief] = useState("保留上传图片的主体身份；让核心文字与主视觉相互解释，形成完整页面构图。");
   const [styleId, setStyleId] = useState("blank");
   const [assets, setAssets] = useState<GeneratedAsset[]>([]);
   const [deck, setDeck] = useState<NotebookDeckSpec>(() => buildLocalDeck({
@@ -142,7 +143,7 @@ function App() {
     slideCount: 7,
     textInput: sampleText,
     tableInput: sampleTable,
-    imageBrief: "专业、克制，为原生文字留出干净空间。",
+    imageBrief: "专业、克制，让文字与视觉相互配合。",
     styleId: "blank",
     assets: [],
   }));
@@ -262,7 +263,7 @@ function App() {
         activeStep = "image";
         updateStep("image", "running", source.styleId === "blank" ? "未套用风格图，正在按内容生成视觉" : `正在用 ${sourceStyle.name} 引导 GPT Image 2`);
         setStatus(source.styleId === "blank" ? "正在按内容和用户参考图生成视觉，不套用内置风格…" : "正在将内置风格图与用户内容图一起送入 Image 2…");
-        const jobs = createImageJobs(nextDeck, config.imageCount);
+        const jobs = createImageJobs(nextDeck, config.imageCount, config.imageTextMode);
         const imageResponse = await generateAiImages(config, jobs, sourceImages, source.styleId);
         const slideImages = await Promise.all(imageResponse.images.map(normalizeGeneratedSlideImage));
         const startIndex = maxAssetIndex(nextAssets) + 1;
@@ -282,7 +283,11 @@ function App() {
           ...nextDeck,
           slides: nextDeck.slides.map((slide, index) => {
             const position = slideImages.findIndex((image) => image.slideIndex === index);
-            return position >= 0 ? { ...slide, imageIndex: generatedAssets[position].index, visualMode: "full-slide" } : slide;
+            return position >= 0 ? {
+              ...slide,
+              imageIndex: generatedAssets[position].index,
+              visualMode: config.imageTextMode === "integrated" ? "full-slide-text" : "full-slide",
+            } : slide;
           }),
         };
         setAssets(nextAssets);
@@ -320,18 +325,24 @@ function App() {
       }
 
       activeStep = "assemble";
-      updateStep("assemble", "running", "正在映射原生文字、表格、图片和讲稿备注");
-      setStatus("正在组装可编辑页面对象…");
+      updateStep("assemble", "running", config.imageTextMode === "integrated" ? "正在组装图文融合页面、独立裁图和内容源" : "正在映射原生文字、表格、图片和讲稿备注");
+      setStatus(config.imageEnabled && config.imageTextMode === "integrated" ? "正在组装图文页面并保存可追溯内容源…" : "正在组装可编辑页面对象…");
       await sleep(240);
       setDeck(nextDeck);
-      updateStep("assemble", "done", `${nextDeck.slides.length} 页已组装，文字和表格保持原生可编辑`);
+      updateStep("assemble", "done", config.imageEnabled && config.imageTextMode === "integrated"
+        ? `${nextDeck.slides.length} 页已组装，融合页保留内容源与独立裁图`
+        : `${nextDeck.slides.length} 页已组装，文字和表格保持原生可编辑`);
 
       activeStep = "export";
       updateStep("export", "running", "正在写入 PowerPoint 文件");
-      setStatus("正在生成可编辑 PPTX，完成后浏览器会保存文件…");
+      setStatus(config.imageEnabled && config.imageTextMode === "integrated"
+        ? "正在生成 PPTX，并写入图文页面、内容源与讲稿备注…"
+        : "正在生成可编辑 PPTX，完成后浏览器会保存文件…");
       await exportNotebookDeck(nextDeck, nextAssets);
       updateStep("export", "done", "PPTX 已生成并保存到下载目录");
-      setStatus("五阶段流程完成。你可以继续修改右侧内容并再次导出。");
+      setStatus(config.imageEnabled && config.imageTextMode === "integrated"
+        ? "五阶段流程完成。融合页修改内容源后需要重新生成画面。"
+        : "五阶段流程完成。你可以继续修改右侧内容并再次导出。");
     } catch (error) {
       updateStep(activeStep, "error", error instanceof Error ? error.message : "流程执行失败");
       setStatus(error instanceof Error ? error.message : "API 流程执行失败。");
@@ -885,7 +896,7 @@ function ApiSettings({ config, onChange, envKeyConfigured, connection, onTest }:
       <label><span>API Key {envKeyConfigured && <em>环境变量已配置</em>}</span><input type="password" autoComplete="off" value={config.apiKey} onChange={(event) => patch({ apiKey: event.target.value })} placeholder={envKeyConfigured ? "自动使用系统环境变量" : "sk-…"} /></label>
       <div className="api-note">页面 Key 只保存在当前浏览器会话，并由本机服务转发。留空时自动读取系统环境变量或项目根目录 <code>.env.local</code> 中的 <code>OPENAI_API_KEY</code>。</div>
       <label className="toggle-row"><span><strong>Image 2 完整页面</strong><small>生成整页视觉底稿，按页面计费</small></span><input type="checkbox" checked={config.imageEnabled} onChange={(event) => patch({ imageEnabled: event.target.checked })} /></label>
-      {config.imageEnabled && <div className="image-config"><label className="wide"><span>图片 API Base URL</span><input value={config.imageBaseUrl || ""} onChange={(event) => patch({ imageBaseUrl: event.target.value })} /></label><label className="wide"><span>图片 API Key（留空则复用上方 Key）</span><input type="password" autoComplete="off" value={config.imageApiKey || ""} onChange={(event) => patch({ imageApiKey: event.target.value })} placeholder="可与文本服务分开" /></label><label><span>图片模型</span><input value={config.imageModel} onChange={(event) => patch({ imageModel: event.target.value })} /></label><label><span>视觉页数</span><input type="number" min={1} max={4} value={config.imageCount} onChange={(event) => patch({ imageCount: clamp(Number(event.target.value), 1, 4) })} /></label><label><span>质量</span><select value={config.imageQuality} onChange={(event) => patch({ imageQuality: event.target.value as ApiConfig["imageQuality"] })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label></div>}
+      {config.imageEnabled && <div className="image-config"><label className="wide"><span>图片 API Base URL</span><input value={config.imageBaseUrl || ""} onChange={(event) => patch({ imageBaseUrl: event.target.value })} /></label><label className="wide"><span>图片 API Key（留空则复用上方 Key）</span><input type="password" autoComplete="off" value={config.imageApiKey || ""} onChange={(event) => patch({ imageApiKey: event.target.value })} placeholder="可与文本服务分开" /></label><label className="wide"><span>文字呈现</span><select value={config.imageTextMode} onChange={(event) => patch({ imageTextMode: event.target.value as ApiConfig["imageTextMode"] })}><option value="integrated">图文融合（视觉优先）</option><option value="native">原生文字（编辑优先）</option></select><small className="field-hint">图文融合由 Image 2 设计文字与视觉；原生文字可逐字编辑。</small></label><label><span>图片模型</span><input value={config.imageModel} onChange={(event) => patch({ imageModel: event.target.value })} /></label><label><span>视觉页数</span><input type="number" min={1} max={4} value={config.imageCount} onChange={(event) => patch({ imageCount: clamp(Number(event.target.value), 1, 4) })} /></label><label><span>质量</span><select value={config.imageQuality} onChange={(event) => patch({ imageQuality: event.target.value as ApiConfig["imageQuality"] })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label></div>}
       <button className={`connection-button ${connection}`} onClick={onTest} disabled={connection === "testing"}>{connection === "testing" ? <Loader2 className="spin" size={14} /> : <Cloud size={14} />}{connection === "success" ? "连接正常" : connection === "error" ? "重试连接" : "测试连接"}</button>
     </section>
   );
@@ -895,8 +906,9 @@ function SlideCanvas({ slide, assets, theme, index }: { slide: NotebookSlideSpec
   const primary = slide.imageIndex == null ? undefined : assets.find((asset) => asset.index === slide.imageIndex);
   const dark = slide.layout === "cover" || slide.layout === "section" || theme === "dark-executive";
   const parts = (slide.visualParts || []).map((part) => ({ ...part, asset: assets.find((asset) => asset.index === part.imageIndex) })).filter((part) => part.asset);
-  const fullSlide = Boolean(primary && slide.visualMode === "full-slide");
-  const copyStyle = fullSlide && slide.safeArea ? {
+  const integratedText = Boolean(primary && slide.visualMode === "full-slide-text");
+  const fullSlide = Boolean(primary && (slide.visualMode === "full-slide" || integratedText));
+  const copyStyle = fullSlide && !integratedText && slide.safeArea ? {
     left: `${slide.safeArea.x * 100}%`,
     top: `${slide.safeArea.y * 100}%`,
     width: `${slide.safeArea.w * 100}%`,
@@ -911,20 +923,20 @@ function SlideCanvas({ slide, assets, theme, index }: { slide: NotebookSlideSpec
   return (
     <article className={`slide-canvas ${dark ? "dark" : "light"} layout-${slide.layout || "two-column"} ${fullSlide ? "full-slide-art" : ""}`}>
       {fullSlide && <img className="slide-background-visual" src={primary!.url} alt={primary!.filename} />}
-      <span className="slide-number">{String(index + 1).padStart(2, "0")}</span>
-      <div className="slide-copy" style={copyStyle}>
+      {!integratedText && <span className="slide-number">{String(index + 1).padStart(2, "0")}</span>}
+      {!integratedText && <div className="slide-copy" style={copyStyle}>
         <h3>{slide.title}</h3>
         {slide.subtitle && <p className="slide-subtitle">{slide.subtitle}</p>}
         {slide.claim && <strong className="slide-claim">{slide.claim}</strong>}
         <ul>{(slide.bullets || []).slice(0, fullSlide ? 4 : 5).map((bullet, bulletIndex) => <li key={`${bullet}-${bulletIndex}`}>{bullet}</li>)}</ul>
         {!!slide.callouts?.length && <div className="callout-row">{slide.callouts.map((callout, calloutIndex) => <span key={`${callout.label}-${calloutIndex}`}><b>{callout.value}</b><small>{callout.label}</small></span>)}</div>}
-      </div>
+      </div>}
       {!fullSlide && <div className="slide-visual">
         {parts.length ? parts.map((part) => <img key={part.imageIndex} src={part.asset!.url} alt={part.role} style={{ left: `${part.x * 100}%`, top: `${part.y * 100}%`, width: `${part.w * 100}%`, height: `${part.h * 100}%` }} />) : primary ? <img className="primary-visual" src={primary.url} alt={primary.filename} /> : slide.tableRows?.length ? <MiniTable rows={slide.tableRows} /> : <div className="visual-placeholder"><ImageIcon size={22} /><span>{slide.visualBrief || "等待视觉素材"}</span></div>}
       </div>}
-      {fullSlide && slide.tableRows?.length && <div className="full-slide-table" style={tableStyle}><MiniTable rows={slide.tableRows} /></div>}
+      {fullSlide && !integratedText && slide.tableRows?.length && <div className="full-slide-table" style={tableStyle}><MiniTable rows={slide.tableRows} /></div>}
       {!fullSlide && slide.safeArea && <div className="safe-area" style={{ left: `${slide.safeArea.x * 100}%`, top: `${slide.safeArea.y * 100}%`, width: `${slide.safeArea.w * 100}%`, height: `${slide.safeArea.h * 100}%` }}><span>TEXT SAFE</span></div>}
-      <footer>LLWP PPTMAKER · editable objects</footer>
+      {!integratedText && <footer>LLWP PPTMAKER · editable objects</footer>}
     </article>
   );
 }
@@ -937,13 +949,13 @@ function SlideEditor({ slide, onChange }: { slide: NotebookSlideSpec; onChange: 
   const [open, setOpen] = useState(true);
   return (
     <section className="slide-editor">
-      <button className="editor-toggle" onClick={() => setOpen((value) => !value)}><span><FileText size={14} />编辑当前页原生文字</span><ChevronDown className={open ? "open" : ""} size={16} /></button>
+      <button className="editor-toggle" onClick={() => setOpen((value) => !value)}><span><FileText size={14} />{slide.visualMode === "full-slide-text" ? "编辑当前页内容源（重新生成后更新画面）" : "编辑当前页原生文字"}</span><ChevronDown className={open ? "open" : ""} size={16} /></button>
       {open && <div className="editor-fields"><label><span>观点标题</span><input value={slide.title} onChange={(event) => onChange({ title: event.target.value })} /></label><label><span>副标题</span><input value={slide.subtitle || ""} onChange={(event) => onChange({ subtitle: event.target.value })} /></label><label className="wide"><span>要点（每行一个）</span><textarea value={(slide.bullets || []).join("\n")} onChange={(event) => onChange({ bullets: event.target.value.split("\n").filter(Boolean).slice(0, 6) })} /></label><label className="wide"><span>演讲者备注</span><textarea value={slide.speakerNotes || ""} onChange={(event) => onChange({ speakerNotes: event.target.value })} /></label></div>}
     </section>
   );
 }
 
-function createImageJobs(deck: NotebookDeckSpec, count: number): ImageJob[] {
+function createImageJobs(deck: NotebookDeckSpec, count: number, textMode: ApiConfig["imageTextMode"]): ImageJob[] {
   const candidates = deck.slides.map((slide, slideIndex) => ({ slide, slideIndex })).filter(({ slide }) => Boolean(slide.imagePrompt || slide.visualBrief));
   const ordered = [...candidates.filter(({ slide }) => slide.layout === "cover"), ...candidates.filter(({ slide }) => slide.layout !== "cover")];
   return ordered.slice(0, clamp(count, 1, 4)).map(({ slide, slideIndex }) => ({
@@ -955,6 +967,16 @@ function createImageJobs(deck: NotebookDeckSpec, count: number): ImageJob[] {
       `视觉任务：${slide.imagePrompt || slide.visualBrief || slide.title}`,
     ].filter(Boolean).join("\n"),
     layout: slide.layout || "visual-right",
+    deckTitle: deck.title,
+    title: slide.title,
+    subtitle: slide.subtitle || "",
+    claim: slide.claim || "",
+    bullets: (slide.bullets || []).slice(0, 4),
+    callouts: (slide.callouts || []).slice(0, 3),
+    tableRows: (slide.tableRows || []).slice(0, 5).map((row) => row.slice(0, 4)),
+    pageNumber: slideIndex + 1,
+    totalPages: deck.slides.length,
+    textMode,
   }));
 }
 

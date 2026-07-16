@@ -274,6 +274,7 @@ h1, h2, h3, p { margin: 0; }
 .toggle-row input { width: 34px; min-height: 18px; accent-color: var(--blue); }
 .image-config { display: grid; grid-template-columns: 1fr 54px 72px; gap: 7px; }
 .image-config .wide { grid-column: 1 / -1; }
+.field-hint { color: var(--faint); font-size: 8px; line-height: 1.45; }
 .connection-button { min-height: 35px; border: 1px solid var(--line); background: white; font-size: 10px; }
 .connection-button.success { color: var(--green); border-color: #a7d2c0; }
 .connection-button.error { color: var(--red); border-color: #dfb2aa; }

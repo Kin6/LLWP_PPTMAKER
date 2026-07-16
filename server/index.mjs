@@ -206,6 +206,21 @@ app.post("/api/ai/generate-images", async (req, res) => {
           slideIndex: Number(job?.slideIndex),
           prompt: cleanText(job?.prompt, 1_800),
           layout: cleanText(job?.layout, 40),
+          deckTitle: cleanText(job?.deckTitle, 120),
+          title: cleanText(job?.title, 120),
+          subtitle: cleanText(job?.subtitle, 180),
+          claim: cleanText(job?.claim, 220),
+          bullets: Array.isArray(job?.bullets) ? job.bullets.map((item) => cleanText(item, 120)).filter(Boolean).slice(0, 4) : [],
+          callouts: Array.isArray(job?.callouts) ? job.callouts.map((item) => ({
+            label: cleanText(item?.label, 50),
+            value: cleanText(item?.value, 50),
+          })).filter((item) => item.label || item.value).slice(0, 3) : [],
+          tableRows: Array.isArray(job?.tableRows) ? job.tableRows.slice(0, 5).map((row) => Array.isArray(row)
+            ? row.slice(0, 4).map((cell) => cleanText(cell, 60))
+            : []) : [],
+          pageNumber: Math.max(1, Number(job?.pageNumber) || Number(job?.slideIndex) + 1),
+          totalPages: Math.max(1, Number(job?.totalPages) || 1),
+          textMode: job?.textMode === "native" ? "native" : "integrated",
         })).filter((job) => Number.isInteger(job.slideIndex) && job.prompt).slice(0, 4)
       : [];
     if (!jobs.length) throw new HttpError(400, "至少需要一个图片任务。");
@@ -362,7 +377,7 @@ function buildDeckPrompt(source) {
   const system = `你是资深演示文稿策略师和信息设计师。任务不是总结材料，而是建立一条可辩护的演示逻辑。先识别受众要做的决定，再区分事实、判断、证据和行动。使用“核心结论 -> 背景矛盾 -> 关键证据 -> 方案 -> 行动”的结构，但根据材料调整。不得编造数字、案例或来源；材料不足时写入 evidenceGaps。每页标题必须表达观点，每页只承担一个论证任务。图片只是证据和视觉参考，不要从图片中臆测看不清的信息。严格输出 JSON。`;
   const imageList = source.images.map((image, index) => `图片 ${index + 1}: ${image.name}；${image.summary || "用户上传的内容参考"}`).join("\n");
   const styleLabel = source.styleId === "blank" ? "未指定，使用空白模板" : styleGuides[source.styleId].label;
-  const user = `主题：${source.topic}\n受众：${source.audience}\n页数：严格 ${source.slideCount} 页\n选定风格：${styleLabel}\n\n文字材料：\n${source.textInput || "（无）"}\n\n表格材料：\n${source.tableInput || "（无）"}\n\n图片使用说明：\n${source.imageBrief || "（无）"}\n${imageList || "（未上传图片）"}\n\n请先在 story 中给出核心主张、受众洞察、叙事弧和证据缺口，再生成恰好 ${source.slideCount} 页。imageIndex 只引用从 1 开始的用户图片序号，没有合适图片时为 null。visualBrief 描述该页需要表达什么，imagePrompt 是给图像模型的中文提示词，必须要求 16:9、无文字、为原生文字保留清晰留白。`;
+  const user = `主题：${source.topic}\n受众：${source.audience}\n页数：严格 ${source.slideCount} 页\n选定风格：${styleLabel}\n\n文字材料：\n${source.textInput || "（无）"}\n\n表格材料：\n${source.tableInput || "（无）"}\n\n图片使用说明：\n${source.imageBrief || "（无）"}\n${imageList || "（未上传图片）"}\n\n请先在 story 中给出核心主张、受众洞察、叙事弧和证据缺口，再生成恰好 ${source.slideCount} 页。imageIndex 只引用从 1 开始的用户图片序号，没有合适图片时为 null。visualBrief 描述该页需要表达什么，imagePrompt 只描述与页面观点直接相关的主体、场景、数据关系和视觉隐喻；不要在 imagePrompt 中规定有字或无字，最终文字呈现由后续模式决定。`;
   return { system, user };
 }
 
@@ -376,12 +391,35 @@ function buildImagePrompt(job, guide, userReferenceCount, referenceMode) {
       : referenceMode === "none"
         ? "没有风格图或用户参考图，请只根据内容任务组织中性、清楚的视觉。"
       : `Image 1 是内置“${guide.label}”风格引导图，只学习其视觉语法、构图节奏、配色关系和材质，不复制具体内容。`;
+  return job.textMode === "native"
+    ? buildNativeTextImagePrompt(job, guide, referenceInstruction)
+    : buildIntegratedTextImagePrompt(job, guide, referenceInstruction);
+}
+
+function buildIntegratedTextImagePrompt(job, guide, referenceInstruction) {
+  const page = `${String(job.pageNumber).padStart(2, "0")}/${String(job.totalPages).padStart(2, "0")}`;
+  const bullets = job.bullets.slice(0, 3).map((item, index) => `${index + 1}. ${item}`).join("\n") || "（无）";
+  const callouts = job.callouts.map((item) => `${item.label}：${item.value}`).join("；") || "（无）";
+  const table = job.tableRows.length ? job.tableRows.map((row) => row.join(" | ")).join("\n") : "（无）";
+  const archetype = imagePageArchetype(job.layout, job.pageNumber);
+  return `画一个完整的 16:9 高端 PowerPoint 成品页面，用于第 ${job.pageNumber} 页。重点不是生成背景图，而是让文字本身参与构图：标题、关键词、图像、图标、数据和装饰结构必须共同讲清这一页的观点。视觉完成度要达到顶级发布会、竞赛路演或品牌提案主视觉的水准，但不要复制任何特定题材或现成作品。\n\n【页面文案，必须逐字呈现，不得改写、翻译或虚构】\n演示名称：${job.deckTitle || "（不显示）"}\n主标题：${job.title}\n副标题：${job.subtitle || "（无）"}\n核心句：${job.claim || "（无）"}\n短要点：\n${bullets}\n数据标注：${callouts}\n表格数据：\n${table}\n页码：${page}\n\n【内容与构图任务】\n${job.prompt}\n页面原型：${archetype}\n布局线索：${job.layout || "visual-right"}。\n${referenceInstruction}\n整体审美方向：${guide.direction}。\n\n【图文融合规则】\n1. 主标题是第一视觉元素，占据约 20% 到 30% 的页面，最多两到三行，按语义主动断行。选择一到两个关键词，通过明显的字号、重量、颜色、材质、描边或空间层级形成对比，但所有字仍需清晰可读。\n2. 不要把文字放进一个孤立的白框。让标题与主体轮廓、光影、构图轴线或信息图结构发生关系；短要点可以变成带图标的功能带、边注、标签、数据面板或因果链。文字和视觉必须互相解释。\n3. 至少包含一个与内容直接相关的强主视觉，以及两种辅助信息形态，例如真实摄影或高质量 3D 主体、示意图、数据曲线、图标、局部特写、流程箭头、对比面板。不能只有大字加抽象背景。\n4. 信息丰富但秩序清楚：一眼先读主标题，随后看到核心视觉，再读核心句与最多三个短要点。使用非对称网格、前中后景、尺度反差和精确对齐建立高级感。\n5. 只使用上面提供的文字。没有提供的品牌、统计数字、按钮、网址、免责声明和伪界面文案一律不要生成。若文字过多，优先完整呈现主标题、核心句、页码和最短的两个要点，不得自行缩写或编造。\n6. 中文使用清晰、粗壮、现代的简体中文字体效果，笔画完整；数字和英文保持准确。小字号也要高对比，不要出现乱码、随机字符或无意义占位文字。\n7. 参考图式视觉机制是“巨型标题 + 叙事主视觉 + 模块化证据 + 底部总结带”，只借鉴其图文结合、材质和层级，不要固定使用扑克、红黑金、机械臂或赛事元素；题材、色彩和材质必须服从当前内容与选定风格。\n8. 整张图就是幻灯片本身，满画布、无白边。不要画投影幕、电脑屏幕、PPT 编辑器边框或页面外环境。关键文字与主体必须位于中央 16:9 安全裁切区；最上方和最下方只能放可被裁掉的延展背景。`;
+}
+
+function buildNativeTextImagePrompt(job, guide, referenceInstruction) {
   const textZone = job.layout === "visual-left"
     ? "右侧 40% 是原生文字安全区，左侧承担主要视觉冲击"
     : job.layout === "section"
       ? "中央保留宽阔的原生标题安全区，视觉从四周建立氛围与空间"
       : "左侧 40% 是原生文字安全区，右侧承担主要视觉冲击";
-  return `画一个完整的 16:9 高端 PowerPoint 成品页面视觉底稿，用于第 ${job.slideIndex + 1} 页。它必须看起来像顶级设计师已经完成整页构图，而不是一张插图、背景图、局部素材或常规模板。\n\n内容任务：\n${job.prompt}\n\n页面结构：${textZone}；布局类型为 ${job.layout || "visual-right"}。\n${referenceInstruction}\n整体审美方向：${guide.direction}。\n\n请大胆发挥：建立强烈主视觉、清楚的信息层级、非对称网格、富有张力的尺度对比、精确留白和具有叙事性的构图。根据内容主动选择摄影、3D、信息图、数据形态、材质或空间场景，不要默认生成软件界面、卡片墙或平庸商务模板。整页都要被设计，视觉可以跨越画布、裁切出界、形成前后景和大胆构图。所有关键主体与文字安全区必须位于画面中央的 16:9 安全裁切范围内，允许最上方和最下方仅出现可被裁掉的延展背景。\n\n这是给原生 PowerPoint 文字叠加的视觉底稿：禁止生成任何可读文字、字母、数字、标志、水印和伪界面文案，但文字安全区本身也必须像成品页面的一部分，保持干净、低细节、对比明确。输出一张完整满画布的幻灯片，不要留白边，不要画投影幕、电脑屏幕、PPT 编辑器边框或页面外环境。`;
+  return `画一个完整的 16:9 高端 PowerPoint 成品页面视觉底稿，用于第 ${job.pageNumber} 页。它必须看起来像顶级设计师已经完成整页构图，而不是一张插图、背景图、局部素材或常规模板。\n\n内容任务：\n${job.prompt}\n\n页面结构：${textZone}；布局类型为 ${job.layout || "visual-right"}。\n${referenceInstruction}\n整体审美方向：${guide.direction}。\n\n请大胆发挥：建立强烈主视觉、清楚的信息层级、非对称网格、富有张力的尺度对比、精确留白和具有叙事性的构图。根据内容主动选择摄影、3D、信息图、数据形态、材质或空间场景，不要默认生成软件界面、卡片墙或平庸商务模板。整页都要被设计，视觉可以跨越画布、裁切出界、形成前后景和大胆构图。所有关键主体与文字安全区必须位于画面中央的 16:9 安全裁切范围内，允许最上方和最下方仅出现可被裁掉的延展背景。\n\n这是给原生 PowerPoint 文字叠加的视觉底稿：禁止生成任何可读文字、字母、数字、标志、水印和伪界面文案，但文字安全区本身也必须像成品页面的一部分，保持干净、低细节、对比明确。输出一张完整满画布的幻灯片，不要留白边，不要画投影幕、电脑屏幕、PPT 编辑器边框或页面外环境。`;
+}
+
+function imagePageArchetype(layout, pageNumber) {
+  if (layout === "cover" || pageNumber === 1) return "封面型：巨型主标题与英雄主体互相穿插，副标题紧贴标题，底部用一条能力或价值总结带收束。";
+  if (layout === "section") return "章节型：单一核心判断占主导，中央场景建立情绪，四周只有少量方向性注释与章节标记。";
+  if (layout === "takeaway") return "结论型：一个强象征画面承载最终判断，核心句成为视觉锚点，底部用两到三个行动或指标收束。";
+  if (layout === "visual-left") return "证据型：左侧主视觉或数据场景占主导，右侧用短要点和数据标注解释证据，形成清楚的阅读路径。";
+  return "叙事型：主标题与核心句建立观点，中央或右侧强主视觉承担故事，周围用模块化证据、图标和底部因果链补足信息。";
 }
 
 function buildDecompositionPrompt(images) {

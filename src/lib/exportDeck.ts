@@ -36,14 +36,18 @@ export async function exportNotebookDeck(deck: NotebookDeckSpec, assets: Generat
   for (const [index, item] of deck.slides.entries()) {
     const layout = item.layout || (index === 0 ? "cover" : "two-column");
     const primaryAsset = item.imageIndex == null ? undefined : assets.find((asset) => asset.index === item.imageIndex);
-    const fullSlideVisual = item.visualMode === "full-slide" && primaryAsset?.kind === "generated";
+    const fullSlideVisual = (item.visualMode === "full-slide" || item.visualMode === "full-slide-text") && primaryAsset?.kind === "generated";
     const slide = (fullSlideVisual || layout === "cover" || layout === "section") ? pptx.addSlide() : pptx.addSlide("CONTENT");
     const partData = await getVisualParts(item, assets, cache);
     const primary = await getPrimaryImage(item, assets, cache);
     slide.addNotes([
       item.speakerNotes || "",
       "",
+      `页面标题：${item.title}`,
+      item.subtitle ? `副标题：${item.subtitle}` : "",
       `核心主张：${item.claim || item.title}`,
+      ...(item.bullets || []).map((bullet) => `- ${bullet}`),
+      "",
       "来源：",
       ...(item.sourceNotes || []).map((note) => `- ${note}`),
       ...partData.map((part) => `- 独立图片对象：${part.asset.filename} (${part.role})`),
@@ -80,6 +84,8 @@ function addFullSlideVisual(
       h: Math.max(0.5, Math.min(part.h * slideH, slideH - part.y * slideH)),
     });
   });
+
+  if (item.visualMode === "full-slide-text") return;
 
   const safe = item.safeArea || defaultSafeArea(item.layout);
   const panelX = safe.x * slideW;

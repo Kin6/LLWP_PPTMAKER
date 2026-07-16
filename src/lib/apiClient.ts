@@ -1,6 +1,7 @@
 import type { NotebookDeckSpec, NormalizedRect } from "../types";
 
 export type ApiProvider = "openai" | "compatible" | "ollama";
+export type ImageTextMode = "integrated" | "native";
 
 export type ApiConfig = {
   provider: ApiProvider;
@@ -13,6 +14,7 @@ export type ApiConfig = {
   imageModel: string;
   imageCount: number;
   imageQuality: "low" | "medium" | "high";
+  imageTextMode: ImageTextMode;
 };
 
 export type ApiSourceImage = {
@@ -36,6 +38,16 @@ export type ImageJob = {
   slideIndex: number;
   prompt: string;
   layout: string;
+  deckTitle: string;
+  title: string;
+  subtitle: string;
+  claim: string;
+  bullets: string[];
+  callouts: { label: string; value: string }[];
+  tableRows: string[][];
+  pageNumber: number;
+  totalPages: number;
+  textMode: ImageTextMode;
 };
 
 export type DecompositionPart = NormalizedRect & {

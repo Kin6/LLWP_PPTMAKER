@@ -44,7 +44,7 @@ export type NotebookSlideSpec = {
   callouts?: { label: string; value: string }[];
   visualBrief?: string;
   imagePrompt?: string;
-  visualMode?: "panel" | "full-slide";
+  visualMode?: "panel" | "full-slide" | "full-slide-text";
   safeArea?: NormalizedRect;
   visualParts?: VisualPart[];
 };
