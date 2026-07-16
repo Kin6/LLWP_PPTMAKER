@@ -19,6 +19,8 @@ const explicitTextApiBase = resolveEnvironmentSecret("TEXT_API_BASE_URL");
 const explicitImageApiBase = resolveEnvironmentSecret("IMAGE_API_BASE_URL");
 const explicitTextModel = resolveEnvironmentSecret("TEXT_MODEL");
 const explicitImageModel = resolveEnvironmentSecret("IMAGE_MODEL");
+const configuredImageTimeoutMs = boundedInteger(resolveEnvironmentSecret("IMAGE_API_TIMEOUT_MS"), 240_000, 900_000, 600_000);
+const configuredImageMaxRetries = boundedInteger(resolveEnvironmentSecret("IMAGE_API_MAX_RETRIES"), 0, 2, 1);
 const textApiBaseUrl = explicitTextApiBase || openAiApiBase || "https://api.openai.com/v1";
 const imageApiBaseUrl = explicitImageApiBase || openAiApiBase || "https://api.openai.com/v1";
 const textModel = explicitTextModel || "gpt-5.6-terra";
@@ -161,6 +163,8 @@ app.get("/api/health", (_req, res) => {
       model: textModel,
       imageBaseUrl: imageApiBaseUrl,
       imageModel,
+      imageTimeoutMs: configuredImageTimeoutMs,
+      imageMaxRetries: configuredImageMaxRetries,
     },
     pipeline: ["story-planner", "story-refinement", "image-2-art-direction", "full-slide-assembly", "pptx-export"],
   });
@@ -255,63 +259,83 @@ app.post("/api/ai/generate-images", async (req, res) => {
     const guide = styleGuides[styleId];
     const guideBytes = guide.file ? await fs.readFile(path.join(root, "public", "style-guides", guide.file)) : null;
     const images = [];
+    let apiCalls = 0;
 
     for (const job of jobs) {
       const officialImageApi = isOfficialOpenAIBase(config.baseUrl);
-      let response;
       let prompt;
-      if (!guideBytes && !references.length) {
-        prompt = buildImagePrompt(job, guide, 0, "none");
-        const generationBody = {
-          model: config.model,
-          prompt,
-          size: "1536x1024",
-          quality: config.quality,
-          ...(officialImageApi ? { output_format: "png" } : {}),
-        };
-        response = await fetchWithTimeout(`${config.baseUrl}/images/generations`, {
-          method: "POST",
-          headers: { ...authHeaders(config), "Content-Type": "application/json" },
-          body: JSON.stringify(generationBody),
-        }, 240_000);
-      } else {
-        const form = new UndiciFormData();
-        form.append("model", config.model);
-        form.append("size", "1536x1024");
-        form.append("quality", config.quality);
-        let referenceMode = "style-single";
-        if (officialImageApi) {
-          form.append("output_format", "png");
-          if (guideBytes) form.append("image[]", new Blob([guideBytes], { type: "image/png" }), `style-${styleId}.png`);
-          references.forEach((reference, index) => {
-            const decoded = decodeDataUrl(reference.dataUrl);
-            form.append("image[]", new Blob([decoded.bytes], { type: decoded.mime }), `user-reference-${index + 1}.${mimeExtension(decoded.mime)}`);
-          });
-          referenceMode = guideBytes ? "style-and-user-multi" : "user-multi";
-        } else if (references.length) {
-          const decoded = decodeDataUrl(references[0].dataUrl);
-          form.append("image", new Blob([decoded.bytes], { type: decoded.mime }), `user-reference-1.${mimeExtension(decoded.mime)}`);
-          referenceMode = "user-single";
-        } else if (guideBytes) {
-          form.append("image", new Blob([guideBytes], { type: "image/png" }), `style-${styleId}.png`);
+      const maxAttempts = config.maxRetries + 1;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        try {
+          let response;
+          if (!guideBytes && !references.length) {
+            prompt = buildImagePrompt(job, guide, 0, "none");
+            const generationBody = {
+              model: config.model,
+              prompt,
+              size: "1536x1024",
+              quality: config.quality,
+              ...(officialImageApi ? { output_format: "png" } : {}),
+            };
+            apiCalls += 1;
+            response = await fetchWithTimeout(`${config.baseUrl}/images/generations`, {
+              method: "POST",
+              headers: { ...authHeaders(config), "Content-Type": "application/json" },
+              body: JSON.stringify(generationBody),
+            }, config.timeoutMs);
+          } else {
+            const form = new UndiciFormData();
+            form.append("model", config.model);
+            form.append("size", "1536x1024");
+            form.append("quality", config.quality);
+            let referenceMode = "style-single";
+            if (officialImageApi) {
+              form.append("output_format", "png");
+              if (guideBytes) form.append("image[]", new Blob([guideBytes], { type: "image/png" }), `style-${styleId}.png`);
+              references.forEach((reference, index) => {
+                const decoded = decodeDataUrl(reference.dataUrl);
+                form.append("image[]", new Blob([decoded.bytes], { type: decoded.mime }), `user-reference-${index + 1}.${mimeExtension(decoded.mime)}`);
+              });
+              referenceMode = guideBytes ? "style-and-user-multi" : "user-multi";
+            } else if (references.length) {
+              const decoded = decodeDataUrl(references[0].dataUrl);
+              form.append("image", new Blob([decoded.bytes], { type: decoded.mime }), `user-reference-1.${mimeExtension(decoded.mime)}`);
+              referenceMode = "user-single";
+            } else if (guideBytes) {
+              form.append("image", new Blob([guideBytes], { type: "image/png" }), `style-${styleId}.png`);
+            }
+            prompt = buildImagePrompt(job, guide, references.length, referenceMode);
+            form.append("prompt", prompt);
+            apiCalls += 1;
+            response = await fetchWithTimeout(`${config.baseUrl}/images/edits`, {
+              method: "POST",
+              headers: authHeaders(config),
+              body: form,
+            }, config.timeoutMs);
+          }
+          const payload = await readJson(response);
+          if (!response.ok) throw upstreamError(response.status, payload);
+          const item = payload?.data?.[0];
+          const url = await imageResultToDataUrl(item);
+          if (!url) throw new HttpError(502, "Image 2 没有返回可用图片。");
+          images.push({ slideIndex: job.slideIndex, url, prompt, revisedPrompt: item?.revised_prompt || "" });
+          break;
+        } catch (error) {
+          const canRetry = attempt < maxAttempts && isRetryableImageError(error);
+          if (canRetry) {
+            await delay(Math.min(6_000, 1_500 * attempt));
+            continue;
+          }
+          if (attempt > 1 && error instanceof HttpError) {
+            throw new HttpError(error.status, `${error.message}（已自动重试 ${attempt - 1} 次）`);
+          }
+          throw error;
         }
-        prompt = buildImagePrompt(job, guide, references.length, referenceMode);
-        form.append("prompt", prompt);
-        response = await fetchWithTimeout(`${config.baseUrl}/images/edits`, {
-          method: "POST",
-          headers: authHeaders(config),
-          body: form,
-        }, 240_000);
       }
-      const payload = await readJson(response);
-      if (!response.ok) throw upstreamError(response.status, payload);
-      const item = payload?.data?.[0];
-      const url = await imageResultToDataUrl(item);
-      if (!url) throw new HttpError(502, "Image 2 没有返回可用图片。");
-      images.push({ slideIndex: job.slideIndex, url, prompt, revisedPrompt: item?.revised_prompt || "" });
     }
 
-    res.json({ ok: true, images, meta: { model: config.model, apiCalls: images.length, keySource: config.keySource } });
+    res.json({ ok: true, images, meta: { model: config.model, apiCalls, keySource: config.keySource } });
   } catch (error) {
     sendApiError(res, error);
   }
@@ -354,10 +378,12 @@ function normalizeImageConfig(raw) {
     apiKey: raw.apiKey,
     allowNoKey: false,
     quality: ["low", "medium", "high"].includes(raw.quality) ? raw.quality : "medium",
+    timeoutMs: boundedInteger(raw.timeoutMs, 240_000, 900_000, configuredImageTimeoutMs),
+    maxRetries: boundedInteger(raw.maxRetries, 0, 2, configuredImageMaxRetries),
   });
 }
 
-function finishConfig({ provider, baseUrl, model, apiKey, allowNoKey, quality }) {
+function finishConfig({ provider, baseUrl, model, apiKey, allowNoKey, quality, timeoutMs, maxRetries }) {
   const normalizedBaseUrl = String(baseUrl || "").trim().replace(/\/+$/, "");
   let parsedUrl;
   try { parsedUrl = new URL(normalizedBaseUrl); } catch { throw new HttpError(400, "API Base URL 格式不正确。"); }
@@ -373,6 +399,8 @@ function finishConfig({ provider, baseUrl, model, apiKey, allowNoKey, quality })
     apiKey: resolvedKey,
     keySource: requestKey ? "session" : resolvedKey ? "environment" : "none",
     quality,
+    timeoutMs,
+    maxRetries,
   };
 }
 
@@ -775,9 +803,20 @@ async function fetchWithTimeout(url, options, timeoutMs) {
     return await undiciFetch(url, { ...options, dispatcher, signal: AbortSignal.timeout(timeoutMs) });
   }
   catch (error) {
-    if (error?.name === "TimeoutError") throw new HttpError(504, "模型服务响应超时。");
+    if (error?.name === "TimeoutError") throw new HttpError(504, `模型服务在 ${Math.round(timeoutMs / 60_000)} 分钟内未完成响应。`);
     throw new HttpError(502, `无法连接模型服务：${error?.message || "网络错误"}`);
   }
+}
+
+function isRetryableImageError(error) {
+  const status = Number(error?.status);
+  const message = String(error?.message || "").toLowerCase();
+  return [408, 429, 500, 502, 503, 504].includes(status)
+    || /timeout|timed out|aborted due to timeout|rate limit|temporar/.test(message);
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function readJson(response) {
@@ -798,6 +837,11 @@ function sendApiError(res, error) {
 }
 
 function cleanText(value, maxLength) { return String(value ?? "").replace(/\u0000/g, "").trim().slice(0, maxLength); }
+function boundedInteger(value, min, max, fallback) {
+  if (value == null || String(value).trim() === "") return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(min, Math.min(max, Math.round(parsed))) : fallback;
+}
 function cleanDisplayText(value, maxLength) {
   return cleanText(extractDisplayText(value), maxLength)
     .replace(/\[object Object\]/gi, "")

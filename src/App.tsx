@@ -89,7 +89,7 @@ type PipelineCheckpoint = {
 const stepOrder: StepId[] = ["logic", "image", "decompose", "assemble", "export"];
 
 const defaultApiConfig: ApiConfig = {
-  configVersion: 4,
+  configVersion: 5,
   provider: "openai",
   baseUrl: "https://api.openai.com/v1",
   model: "gpt-5.6-terra",
@@ -101,6 +101,8 @@ const defaultApiConfig: ApiConfig = {
   imageCount: 0,
   imageQuality: "high",
   imageTextMode: "integrated",
+  imageTimeoutSeconds: 600,
+  imageMaxRetries: 1,
 };
 
 const initialSteps: WorkflowStep[] = [
@@ -182,6 +184,8 @@ function App() {
           model: String(defaults.model || current.model),
           imageBaseUrl: String(defaults.imageBaseUrl || current.imageBaseUrl),
           imageModel: String(defaults.imageModel || current.imageModel),
+          imageTimeoutSeconds: clamp(Number(defaults.imageTimeoutMs) / 1_000, 240, 900),
+          imageMaxRetries: clamp(Number(defaults.imageMaxRetries), 0, 2),
         }));
       }
     }).catch(() => undefined);
@@ -1033,7 +1037,7 @@ function ApiSettings({ config, onChange, envKeyConfigured, connection, onTest }:
       <label><span>API Key {envKeyConfigured && <em>环境变量已配置</em>}</span><input type="password" autoComplete="off" value={config.apiKey} onChange={(event) => patch({ apiKey: event.target.value })} placeholder={envKeyConfigured ? "自动使用系统环境变量" : "sk-…"} /></label>
       <div className="api-note">页面 Key 只保存在当前浏览器会话，并由本机服务转发。留空时自动读取系统环境变量或项目根目录 <code>.env.local</code> 中的 <code>OPENAI_API_KEY</code>。</div>
       <label className="toggle-row"><span><strong>Image 2 视觉生成</strong><small>生成整页图或独立主视觉，按页面计费</small></span><input type="checkbox" checked={config.imageEnabled} onChange={(event) => patch({ imageEnabled: event.target.checked })} /></label>
-      {config.imageEnabled && <div className="image-config"><label className="wide"><span>图片 API Base URL</span><input value={config.imageBaseUrl || ""} onChange={(event) => patch({ imageBaseUrl: event.target.value })} /></label><label className="wide"><span>图片 API Key（留空则复用上方 Key）</span><input type="password" autoComplete="off" value={config.imageApiKey || ""} onChange={(event) => patch({ imageApiKey: event.target.value })} placeholder="可与文本服务分开" /></label><label className="wide"><span>成片模式</span><select value={config.imageTextMode} onChange={(event) => patch({ imageTextMode: event.target.value as ApiConfig["imageTextMode"] })}><option value="integrated">整页图文融合（推荐成片）</option><option value="native">原生分层（编辑优先）</option></select><small className="field-hint">整页融合让文字直接参与画面构图；原生分层便于编辑，但文字与图片的视觉融合度会降低。</small></label><label><span>图片模型</span><input value={config.imageModel} onChange={(event) => patch({ imageModel: event.target.value })} /></label><label><span>生图页数</span><select value={config.imageCount} onChange={(event) => patch({ imageCount: clamp(Number(event.target.value), 0, 50) })}><option value={0}>跟随 PPT 总页数</option>{Array.from({ length: 50 }, (_, index) => index + 1).map((count) => <option key={count} value={count}>{count} 页</option>)}</select></label><label><span>质量</span><select value={config.imageQuality} onChange={(event) => patch({ imageQuality: event.target.value as ApiConfig["imageQuality"] })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label></div>}
+      {config.imageEnabled && <div className="image-config"><label className="wide"><span>图片 API Base URL</span><input value={config.imageBaseUrl || ""} onChange={(event) => patch({ imageBaseUrl: event.target.value })} /></label><label className="wide"><span>图片 API Key（留空则复用上方 Key）</span><input type="password" autoComplete="off" value={config.imageApiKey || ""} onChange={(event) => patch({ imageApiKey: event.target.value })} placeholder="可与文本服务分开" /></label><label className="wide"><span>成片模式</span><select value={config.imageTextMode} onChange={(event) => patch({ imageTextMode: event.target.value as ApiConfig["imageTextMode"] })}><option value="integrated">整页图文融合（推荐成片）</option><option value="native">原生分层（编辑优先）</option></select><small className="field-hint">整页融合让文字直接参与画面构图；原生分层便于编辑，但文字与图片的视觉融合度会降低。</small></label><label><span>图片模型</span><input value={config.imageModel} onChange={(event) => patch({ imageModel: event.target.value })} /></label><label><span>生图页数</span><select value={config.imageCount} onChange={(event) => patch({ imageCount: clamp(Number(event.target.value), 0, 50) })}><option value={0}>跟随 PPT 总页数</option>{Array.from({ length: 50 }, (_, index) => index + 1).map((count) => <option key={count} value={count}>{count} 页</option>)}</select></label><label><span>质量</span><select value={config.imageQuality} onChange={(event) => patch({ imageQuality: event.target.value as ApiConfig["imageQuality"] })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label><label><span>单页最长等待</span><select value={config.imageTimeoutSeconds} onChange={(event) => patch({ imageTimeoutSeconds: clamp(Number(event.target.value), 240, 900) })}><option value={240}>4 分钟</option><option value={360}>6 分钟</option><option value={600}>10 分钟（推荐）</option><option value={900}>15 分钟</option></select></label><label><span>超时自动重试</span><select value={config.imageMaxRetries} onChange={(event) => patch({ imageMaxRetries: clamp(Number(event.target.value), 0, 2) })}><option value={0}>不重试</option><option value={1}>重试 1 次（推荐）</option><option value={2}>重试 2 次</option></select></label><small className="field-hint wide">第三方网关可能早于本地上限中止请求；自动重试耗尽后仍可从失败页继续。</small></div>}
       <button className={`connection-button ${connection}`} onClick={onTest} disabled={connection === "testing"}>{connection === "testing" ? <Loader2 className="spin" size={14} /> : <Cloud size={14} />}{connection === "success" ? "连接正常" : connection === "error" ? "重试连接" : "测试连接"}</button>
     </section>
   );
@@ -1206,7 +1210,11 @@ function loadApiConfig(): ApiConfig {
       parsed.imageTextMode = "integrated";
       parsed.imageQuality = "high";
     }
-    return { ...defaultApiConfig, ...parsed, configVersion: 4 };
+    if ((parsed.configVersion || 0) < 5) {
+      parsed.imageTimeoutSeconds = 600;
+      parsed.imageMaxRetries = 1;
+    }
+    return { ...defaultApiConfig, ...parsed, configVersion: 5 };
   } catch {
     return defaultApiConfig;
   }

@@ -16,6 +16,8 @@ export type ApiConfig = {
   imageCount: number;
   imageQuality: "low" | "medium" | "high";
   imageTextMode: ImageTextMode;
+  imageTimeoutSeconds: number;
+  imageMaxRetries: number;
 };
 
 export type ApiSourceImage = {
@@ -106,6 +108,8 @@ export async function generateAiImages(
       model: config.imageModel,
       apiKey: config.imageApiKey || config.apiKey,
       quality: config.imageQuality,
+      timeoutMs: config.imageTimeoutSeconds * 1_000,
+      maxRetries: config.imageMaxRetries,
     },
     jobs,
     referenceImages,
