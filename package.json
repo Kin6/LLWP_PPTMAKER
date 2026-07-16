@@ -11,6 +11,7 @@
     "test:attachments": "node --experimental-strip-types scripts/test-attachment-parser.mjs",
     "test:integrated-export": "node --experimental-strip-types scripts/test-integrated-export.mjs",
     "test:image-geometry": "node --experimental-strip-types scripts/test-image-geometry.mjs",
+    "test:image-prompt": "node scripts/test-image-prompt.mjs",
     "test:visual": "node --experimental-strip-types scripts/test-visual-decomposition.mjs",
     "preview": "vite preview --host 0.0.0.0"
   },

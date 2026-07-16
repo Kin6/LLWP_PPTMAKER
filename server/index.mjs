@@ -240,7 +240,7 @@ app.post("/api/ai/generate-images", async (req, res) => {
           title: cleanDisplayText(job?.title, 120),
           subtitle: cleanDisplayText(job?.subtitle, 180),
           claim: cleanDisplayText(job?.claim, 220),
-          bullets: Array.isArray(job?.bullets) ? job.bullets.map((item) => cleanDisplayText(item, 120)).filter(Boolean).slice(0, 4) : [],
+          bullets: Array.isArray(job?.bullets) ? job.bullets.map((item) => cleanDisplayText(item, 120)).filter(Boolean).slice(0, 5) : [],
           callouts: Array.isArray(job?.callouts) ? job.callouts.map((item) => ({
             label: cleanDisplayText(item?.label, 50),
             value: cleanDisplayText(item?.value, 50),
@@ -448,7 +448,7 @@ imageIndex 只引用从 1 开始的用户图片序号，没有合适图片时为
   const qualityRules = `【成片级内容约束】
 1. 先在内部完成“受众要改变什么看法 -> 需要什么证据 -> 每页如何推进”的推演，再输出 JSON；不要把素材按段落平均切页。
 2. 每页标题必须是结论句而不是栏目名。把所有 slides.title 按顺序单独读出来时，必须像一段完整、不可打乱的论证：上一句提供前提，下一句回答问题或推出后果。相邻页面必须构成因为、所以、但是、因此或下一步的关系，删除换词重复。
-3. 可见文案要符合演示页而不是海报：主标题尽量不超过 18 个汉字且最多两行，subtitle 不超过 26 个汉字，claim 不超过 30 个汉字；每页 0 到 3 个 bullets，每条尽量不超过 16 个汉字。详细解释放入 speakerNotes。
+3. 可见文案要达到高信息密度演示页：主标题尽量不超过 24 个汉字且最多两行，subtitle 不超过 34 个汉字，claim 不超过 48 个汉字；正文页提供 3 到 5 个 bullets，每条尽量不超过 22 个汉字，封面或章节页可适当减少。每个 bullet 必须补充新的证据、机制、对比或含义，不能换词重复标题。更长解释放入 speakerNotes。
 4. 三页演示严格使用“定义关键判断 -> 给出机制或证据 -> 推导结论与下一步”；更多页数则在中间增加必要的背景、机制、证据、对比、方案和影响，不得增加空泛过渡页。
 5. visualBrief 必须说明哪一种可见证据能证明本页观点。imagePrompt 必须写清主体、动作、环境、视觉隐喻、与文字发生关系的位置，以及贯穿全套的连续视觉母题；禁止只写科技感、未来感、高级感等空泛形容词。
 6. story.narrativeArc 要概括“起点认知 -> 新证据 -> 推导 -> 受众行动”的因果路径；每页 speakerNotes 必须分别写明“承接了什么、证明了什么、下一页为什么必要”。
@@ -472,7 +472,7 @@ function buildDeckRefinementPrompt(source, draft) {
 1. slides 必须恰好 ${source.slideCount} 页，保留所有有来源的关键事实，不得新增数字、案例、品牌或结论。
 2. 每页只推进一个判断，标题直接说结论；把所有标题连读时必须形成一段完整的因果论证，任意交换两页都会破坏逻辑。上一页建立的认知必须成为下一页的前提，最后一页必须回答第一页并给出受众可执行的结论。
 3. 删除重复观点和同义改写。${source.slideCount === 3 ? "三页分别承担：关键判断、机制或证据、由证据推出的结论与下一步。第二页必须证明第一页，第三页必须由第二页推出。" : "中间页只保留完成论证真正需要的背景、机制、证据、对比、方案或影响，并按认知依赖排序。"}
-4. 为演示页面压缩可见文字：title 尽量不超过 18 个汉字且最多两行，subtitle 不超过 26 个汉字，claim 不超过 30 个汉字；每页最多 3 条 bullets，每条尽量不超过 16 个汉字。长解释移入 speakerNotes。
+4. 为高信息密度演示页面组织可见文字：title 尽量不超过 24 个汉字且最多两行，subtitle 不超过 34 个汉字，claim 不超过 48 个汉字；正文页保留 3 到 5 条 bullets，每条尽量不超过 22 个汉字。每条必须承担不同证据、步骤、能力或影响，不能重复标题。长解释移入 speakerNotes。
 5. 每页 imagePrompt 都必须包含：与观点直接相关的主体、正在发生的动作、环境、可视化关系或隐喻、文字与主体穿插的构图机会、贯穿全套的连续视觉母题。禁止写成普通左文右图、卡片墙、白底信息框或模板化商务页面。
 6. speakerNotes 必须用“承接 -> 本页证明 -> 下一页必要性”的顺序说明过渡。story.narrativeArc 必须与最终页面顺序一致。可见标题和正文不得出现 DeckSpec、Image 2、API、提示词、PPT 制作流程或内部工作流。`,
   };
@@ -492,20 +492,20 @@ function buildImagePrompt(job, guide, userReferenceCount, referenceMode) {
   const integratedJob = {
     ...job,
     deckTitle: job.pageNumber === 1 ? job.deckTitle : "",
-    subtitle: job.pageNumber === 1 ? job.subtitle : "",
-    bullets: job.pageNumber === 1 ? [] : job.bullets.slice(0, 1),
-    callouts: job.callouts.slice(0, 1),
+    subtitle: job.subtitle,
+    bullets: job.bullets.slice(0, 5),
+    callouts: job.callouts.slice(0, 3),
   };
   return buildIntegratedTextImagePrompt(integratedJob, guide, referenceInstruction);
 }
 
 function buildIntegratedTextImagePrompt(job, guide, referenceInstruction) {
   const page = `${String(job.pageNumber).padStart(2, "0")}/${String(job.totalPages).padStart(2, "0")}`;
-  const bullets = job.bullets.slice(0, 2).map((item, index) => `${index + 1}. ${item}`).join("\n") || "（无）";
-  const callouts = job.callouts.slice(0, 2).map((item) => `${item.label}：${item.value}`).join("；") || "（无）";
+  const bullets = job.bullets.slice(0, 5).map((item, index) => `${index + 1}. ${item}`).join("\n") || "（无）";
+  const callouts = job.callouts.slice(0, 3).map((item) => `${item.label}：${item.value}`).join("；") || "（无）";
   const table = job.tableRows.length ? job.tableRows.slice(0, 4).map((row) => row.slice(0, 3).join(" | ")).join("\n") : "（无）";
   const archetype = imagePageArchetype(job.layout, job.pageNumber);
-  return `画一个完整协调、无边框、全画布的 16:9 高端 PowerPoint 成品页面，用于第 ${job.pageNumber} 页。第一眼必须明确看出这是经过专业信息设计的演示页，而不是电影海报、广告 KV、游戏宣传图、摄影作品或一张铺满文字的插画。背景、主视觉、光影、文字和少量标注必须属于同一个连续画面，不得把幻灯片画成白色纸张、相框、卡片或嵌套在另一张背景图中的矩形。页面使用不可见的演示文稿对齐网格组织标题、证据、解释与页码；文字与视觉互相说明，但可读性和论证层级优先于戏剧化效果。\n\n【整套叙事位置】\n${buildSequenceContext(job)}\n\n【页面文案，必须逐字呈现，不得改写、翻译或虚构】\n演示名称：${job.deckTitle || "（不显示）"}\n主标题：${job.title}\n副标题：${job.subtitle || "（无）"}\n核心句：${job.claim || "（无）"}\n短要点：\n${bullets}\n数据标注：${callouts}\n表格数据：\n${table}\n页码：${page}\n\n【内容与构图任务】\n${job.prompt}\n页面原型：${archetype}\n布局线索：${job.layout || "visual-right"}。\n${referenceInstruction}\n整体审美方向：${guide.direction}。\n\n【图文融合规则】\n1. 使用真正的 PPT 信息层级：主标题占页面高度约 10% 到 16%，最多两行，不得做成占满三分之一画布的海报巨字。只保留主标题、一个核心解释句、最多一个短要点或数据标注和页码，阅读顺序为“结论标题 -> 视觉证据 -> 含义或行动”。\n2. 背景与主视觉必须连续铺满整张画布，在内部使用低细节区域和负空间承载文字，而不是在画布四周绘制可见页边框。除封面外，主视觉通常占页面约 45% 到 65%。允许克制的左右布局、上下布局、中心证据布局或一图一结论布局，但禁止相框、描边画布、框中框、白纸页面、卡片墙、仪表盘外壳和密集 HUD。\n3. 每页只保留一个与观点直接相关的主视觉和最多一种辅助证据形态，例如一张照片加一处标注、一幅机制示意加一个关键数字、一个对比画面加一句结论。不要为了丰富而堆叠图标、光圈、箭头、装饰线和无关模块。\n4. 文字应直接落在画面的低细节负空间，并通过对齐、视线、动作方向或因果轴与视觉发生关系；不要给文字添加大面积矩形底板、独立卡片或可见外框。整套页面保持同一字体家族、色彩系统、图标线宽、页码位置、不可见安全区和连续视觉母题，构图随论证任务变化，但骨架必须像同一套 PPT。\n5. 只使用上面提供的文字。没有提供的品牌、统计数字、按钮、网址、免责声明和伪界面文案一律不要生成。禁止从风格参考图中抄写任何文字。除非本页文案明确包含，否则严禁出现 DeckSpec、Image 2、API、Prompt、工作流、生成 PPT、视觉拆解、页面组装等制作过程内容。若文字过多，优先完整呈现主标题、核心句、页码和一个最短要点，不得自行缩写或编造。\n6. 中文使用清晰、粗壮、现代的简体中文字体效果，笔画完整；数字和英文保持准确。小字号也要高对比，不要出现乱码、随机字符、[object Object] 或无意义占位文字。\n7. 风格参考图只用于学习色彩、材质、字体气质和图文层级，不要复制其中的题材、构图、边框和巨型标题比例。优先呈现“结论 + 证据 + 含义”的演示逻辑，不要做成品牌海报或宣传封面。\n8. 整张图就是幻灯片本身，不要画投影幕、电脑屏幕、PPT 编辑器边框、白色纸张、双层画布或页面外环境。背景必须自然延伸到四条边。所有文字、人物头部、机械主体、图表、图标和关键标注必须完整位于 x=7% 到 93%、y=10% 到 88% 的不可见安全区内；任何字形、页码或主体都不得接触或越过画布边缘。最上方 10% 和最下方 12% 只允许连续背景或可安全延展的纹理。`;
+  return `画一个完整协调、无边框、全画布的 16:9 高信息密度 PowerPoint 成品页面，用于第 ${job.pageNumber} 页。第一眼必须明确看出这是经过专业信息设计的演示页，而不是电影海报、广告 KV、游戏宣传图或一张铺满文字的插画。背景、主视觉、光影、文字、数据和解释性标注必须属于同一个连续画面，不得把幻灯片画成白色纸张、相框或嵌套在另一张背景图中的矩形。页面使用不可见的演示文稿网格组织标题、主场景、三到五项证据、数据与页码；信息丰富，但每块内容都必须服务于同一个观点。\n\n【整套叙事位置】\n${buildSequenceContext(job)}\n\n【页面文案，必须逐字呈现，不得改写、翻译或虚构】\n演示名称：${job.deckTitle || "（不显示）"}\n主标题：${job.title}\n副标题：${job.subtitle || "（无）"}\n核心句：${job.claim || "（无）"}\n短要点：\n${bullets}\n数据标注：${callouts}\n表格数据：\n${table}\n页码：${page}\n\n【内容与构图任务】\n${job.prompt}\n页面原型：${archetype}\n布局线索：${job.layout || "visual-right"}。\n${referenceInstruction}\n整体审美方向：${guide.direction}。\n\n【图文融合规则】\n1. 使用高信息密度 PPT 层级：顶部或上侧给出最多两行的结论标题，随后是副标题或核心解释句；围绕主视觉安排三到五个互不重复的证据点、步骤、能力、对比或影响，并允许一到两个关键数字或数据标注。阅读顺序必须是“结论 -> 主视觉 -> 分项证据 -> 含义或行动”。\n2. 背景与主视觉必须连续铺满整张画布，在内部使用低细节区域、透视线、半透明信息层和负空间承载文字，不在画布四周绘制可见页边框。可以使用两到四个内部证据模块、流程节点、图表、局部特写或标注区，但这些模块要直接依附于场景和统一网格，不能把整张幻灯片套进相框、白纸页面或第二层画布。\n3. 保留一个明确主视觉，并增加两到四种有内容依据的辅助信息形态，例如趋势图、关键数字、流程节点、能力标签、局部放大、状态对比或因果箭头。优先复用上面提供的 bullets、callouts 和表格数据；禁止为了显得丰富而编造数据、堆叠无关图标或生成无意义小字。\n4. 文字密度向高质量技术路演、咨询分析和竞赛答辩页面看齐。标题字号最大，核心句次之，证据点和数据标注使用清楚的小一级字体；可使用细分隔线、图标、低透明底色或局部暗角增强阅读，但不能形成整页外框、框中框或机械重复的卡片墙。\n5. 只使用上面提供的文字。没有提供的品牌、统计数字、按钮、网址、免责声明和伪界面文案一律不要生成。禁止从风格参考图中抄写任何文字。除非本页文案明确包含，否则严禁出现 DeckSpec、Image 2、API、Prompt、工作流、生成 PPT、视觉拆解、页面组装等制作过程内容。若空间不足，优先完整呈现主标题、核心句、三个最重要要点、关键数字和页码，不得自行缩写或编造。\n6. 中文使用清晰、粗壮、现代的简体中文字体效果，笔画完整；数字和英文保持准确。小字号仍需高对比和足够字重，不要出现乱码、随机字符、[object Object] 或无意义占位文字。\n7. 风格参考图只用于学习色彩、材质、字体气质、信息密度和图文层级，不要复制其中的题材、品牌、边框和巨型标题比例。目标是把“结论 + 主视觉 + 多项证据 + 含义”融合为一个完整页面。\n8. 整张图就是幻灯片本身，不要画投影幕、电脑屏幕、PPT 编辑器边框、白色纸张、双层画布或页面外环境。背景必须自然延伸到四条边。所有文字、人物头部、机械主体、图表、图标和关键标注必须完整位于 x=7% 到 93%、y=10% 到 88% 的不可见安全区内；任何字形、页码或主体都不得接触或越过画布边缘。最上方 10% 和最下方 12% 只允许连续背景或可安全延展的纹理。`;
 }
 
 function buildNativeTextImagePrompt(job, guide, referenceInstruction) {
@@ -525,10 +525,10 @@ function buildIntegratedArtDirection(job) {
     `本页叙事角色：${role}。${bridge}，${exit}。`,
     "用不可见对齐网格和内部负空间安排标题、视觉证据与解释；背景与主视觉必须自然延伸到四边，严禁可见页框、白色纸张、相框、框中框、卡片墙、仪表盘外壳和 SaaS 界面拼贴。",
     "标题与视觉通过对齐、留白、视线、动作方向或因果轴建立联系；可以有轻微的前后景穿插，但任何主体都不得遮挡完整字形，任何文字都不得触碰画布边缘。",
-    "画面只保留一个视觉焦点和一条主阅读路径。主标题先给结论，主视觉负责证明，核心句或最多两个短要点解释意义；不要把整页做成电影海报或沉浸式摄影背景。",
+    "画面保留一个主视觉焦点和一条清楚的主阅读路径。主标题先给结论，主视觉负责证明，三到五个短证据点分别解释机制、步骤、对比、能力或影响；证据点可以分布在场景周围，但必须共同服务于同一个结论。不要把整页做成只有大标题和氛围图的电影海报。",
     job.tableRows.length
-      ? "把表格提炼成一个关键对比、趋势或数量关系并嵌入场景，不要绘制电子表格式网格。"
-      : "辅助信息使用少量标注、符号、轨迹或局部数据，不要为了显得丰富而堆叠无关面板。",
+      ? "把表格提炼成一到两个关键对比、趋势或数量关系并嵌入场景，配合三到五个解释点形成证据链，不要照搬电子表格式网格。"
+      : "辅助信息使用三到五个有实质内容的标注、流程节点、能力标签、局部数据或状态对比；它们应依附于主场景和统一网格，不要堆叠无关面板。",
     "整套页面共享同一主体身份、环境、色彩、字体气质、标题基线、图标线宽、页码位置和连续视觉母题；下一页要像同一场景或同一系统状态的自然推进，而不是重新生成一张无关插画。把所有页缩略图并排时必须显然属于同一套 PPT。",
   ].join("\n");
 }
@@ -558,10 +558,10 @@ function buildSequenceContext(job) {
 function imagePageArchetype(layout, pageNumber) {
   if (layout === "cover" || pageNumber === 1) return "全画布演示封面：标题最多两行，稳定落在不可见安全区内；一个英雄主体或关键场景建立主题，副标题与价值句直接融入同一画面，不绘制任何页框或内嵌画布。";
   if (layout === "section") return "章节转折：一个短结论配一个核心视觉，用大面积留白改变节奏；标题与主体完整可见，不使用密集信息模块。";
-  if (layout === "takeaway") return "结论收束：清楚的结论标题、一个证明性或象征性视觉、最多两项行动；视觉方向把阅读路径收束到最终决定。";
-  if (layout === "visual-left") return "左侧证据页：主视觉占左侧约 55%，右侧放结论与解释；标题沿统一顶部基线，使用少量标注说明证据含义。";
-  if (layout === "visual-right") return "右侧证据页：标题与核心句在左侧负空间形成清楚层级，右侧主视觉负责证明；背景和光影贯穿全画布，只保留一条主阅读路径，不绘制可见页框。";
-  return "一图一结论页：顶部或左侧给出结论标题，一个主视觉占 45% 到 65%，辅以一句解释或一个关键数字；保持演示网格，不做满屏电影场景。";
+  if (layout === "takeaway") return "结论收束：清楚的结论标题、一个证明性或象征性主视觉、三个证据摘要与一到两项行动；视觉方向把前页推理收束到最终决定。";
+  if (layout === "visual-left") return "左侧证据页：主视觉占左侧约 50%，右侧用结论标题、核心句和三到五个证据点完成解释；关键数字、局部标注或短流程直接依附于主场景，不绘制整页外框。";
+  if (layout === "visual-right") return "右侧证据页：标题与核心句在左侧形成清楚层级，右侧主视觉负责证明；围绕视觉安排三到五个证据点以及一到两个关键数字，背景和光影贯穿全画布，不绘制可见页框。";
+  return "高信息密度证据页：顶部或左侧给出结论标题，一个主视觉占 45% 到 60%，三到五个短证据点、一个关键数字或小型关系图补足论证；所有内容遵循同一演示网格，不做满屏电影海报。";
 }
 
 function buildDecompositionPrompt(images) {
