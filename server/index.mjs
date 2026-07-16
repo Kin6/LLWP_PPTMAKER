@@ -68,8 +68,8 @@ const deckSchema = {
     },
     slides: {
       type: "array",
-      minItems: 4,
-      maxItems: 12,
+      minItems: 1,
+      maxItems: 50,
       items: {
         type: "object",
         additionalProperties: false,
@@ -141,6 +141,7 @@ const decompositionSchema = {
 };
 
 const styleGuides = {
+  blank: { file: null, label: "空白模板", direction: "content-led neutral composition with no prescribed palette or decorative style" },
   "product-calm": { file: "product-calm.png", label: "沉静产品", direction: "off-white product workspace, ink structure, electric blue and chartreuse accents" },
   "consulting-grid": { file: "consulting-grid.png", label: "咨询网格", direction: "Swiss business grid, white, charcoal, cobalt blue and signal red" },
   "editorial-tech": { file: "editorial-tech.png", label: "编辑科技", direction: "asymmetric technology editorial, black and white, cyan and vermilion" },
@@ -183,13 +184,13 @@ app.post("/api/ai/generate-deck", async (req, res) => {
     const config = normalizeTextConfig(req.body?.config || {});
     const source = normalizeSource(req.body?.source || {});
     const prompt = buildDeckPrompt(source);
-    const raw = config.provider === "openai"
+    const result = config.provider === "openai"
       ? await requestOpenAIResponses(config, prompt, deckSchema, "deck_spec", source.images)
-      : await requestChatCompletions(config, prompt, source.images);
+      : await requestChatCompletions(config, prompt, source.images, "deck_spec");
     res.json({
       ok: true,
-      deck: normalizeDeck(raw, source),
-      meta: { provider: config.provider, model: config.model, apiCalls: 1, keySource: config.keySource },
+      deck: normalizeDeck(result.value, source),
+      meta: { provider: config.provider, model: config.model, apiCalls: result.apiCalls, keySource: config.keySource },
     });
   } catch (error) {
     sendApiError(res, error);
@@ -210,38 +211,55 @@ app.post("/api/ai/generate-images", async (req, res) => {
     if (!jobs.length) throw new HttpError(400, "至少需要一个图片任务。");
     const references = normalizeImages(req.body?.referenceImages).slice(0, 3);
     const guide = styleGuides[styleId];
-    const guideBytes = await fs.readFile(path.join(root, "public", "style-guides", guide.file));
+    const guideBytes = guide.file ? await fs.readFile(path.join(root, "public", "style-guides", guide.file)) : null;
     const images = [];
 
     for (const job of jobs) {
-      const form = new UndiciFormData();
       const officialImageApi = isOfficialOpenAIBase(config.baseUrl);
-      form.append("model", config.model);
-      form.append("size", "1536x1024");
-      let referenceMode = "style-single";
-      if (officialImageApi) {
-        form.append("quality", config.quality);
-        form.append("output_format", "png");
-        form.append("image[]", new Blob([guideBytes], { type: "image/png" }), `style-${styleId}.png`);
-        references.forEach((reference, index) => {
-          const decoded = decodeDataUrl(reference.dataUrl);
-          form.append("image[]", new Blob([decoded.bytes], { type: decoded.mime }), `user-reference-${index + 1}.${mimeExtension(decoded.mime)}`);
-        });
-        referenceMode = "multi";
-      } else if (references.length) {
-        const decoded = decodeDataUrl(references[0].dataUrl);
-        form.append("image", new Blob([decoded.bytes], { type: decoded.mime }), `user-reference-1.${mimeExtension(decoded.mime)}`);
-        referenceMode = "user-single";
+      let response;
+      let prompt;
+      if (!guideBytes && !references.length) {
+        prompt = buildImagePrompt(job, guide, 0, "none");
+        const generationBody = {
+          model: config.model,
+          prompt,
+          size: "1536x1024",
+          ...(officialImageApi ? { quality: config.quality, output_format: "png" } : {}),
+        };
+        response = await fetchWithTimeout(`${config.baseUrl}/images/generations`, {
+          method: "POST",
+          headers: { ...authHeaders(config), "Content-Type": "application/json" },
+          body: JSON.stringify(generationBody),
+        }, 240_000);
       } else {
-        form.append("image", new Blob([guideBytes], { type: "image/png" }), `style-${styleId}.png`);
+        const form = new UndiciFormData();
+        form.append("model", config.model);
+        form.append("size", "1536x1024");
+        let referenceMode = "style-single";
+        if (officialImageApi) {
+          form.append("quality", config.quality);
+          form.append("output_format", "png");
+          if (guideBytes) form.append("image[]", new Blob([guideBytes], { type: "image/png" }), `style-${styleId}.png`);
+          references.forEach((reference, index) => {
+            const decoded = decodeDataUrl(reference.dataUrl);
+            form.append("image[]", new Blob([decoded.bytes], { type: decoded.mime }), `user-reference-${index + 1}.${mimeExtension(decoded.mime)}`);
+          });
+          referenceMode = guideBytes ? "style-and-user-multi" : "user-multi";
+        } else if (references.length) {
+          const decoded = decodeDataUrl(references[0].dataUrl);
+          form.append("image", new Blob([decoded.bytes], { type: decoded.mime }), `user-reference-1.${mimeExtension(decoded.mime)}`);
+          referenceMode = "user-single";
+        } else if (guideBytes) {
+          form.append("image", new Blob([guideBytes], { type: "image/png" }), `style-${styleId}.png`);
+        }
+        prompt = buildImagePrompt(job, guide, references.length, referenceMode);
+        form.append("prompt", prompt);
+        response = await fetchWithTimeout(`${config.baseUrl}/images/edits`, {
+          method: "POST",
+          headers: authHeaders(config),
+          body: form,
+        }, 240_000);
       }
-      const prompt = buildImagePrompt(job, guide, references.length, referenceMode);
-      form.append("prompt", prompt);
-      const response = await fetchWithTimeout(`${config.baseUrl}/images/edits`, {
-        method: "POST",
-        headers: authHeaders(config),
-        body: form,
-      }, 240_000);
       const payload = await readJson(response);
       if (!response.ok) throw upstreamError(response.status, payload);
       const item = payload?.data?.[0];
@@ -265,13 +283,13 @@ app.post("/api/ai/decompose-images", async (req, res) => {
       : [];
     if (!images.length) throw new HttpError(400, "没有可拆解的生成图。");
     const prompt = buildDecompositionPrompt(images);
-    const raw = config.provider === "openai"
+    const result = config.provider === "openai"
       ? await requestOpenAIResponses(config, prompt, decompositionSchema, "image_decomposition", images.map((item) => ({ name: `slide-${item.slideIndex}`, dataUrl: item.dataUrl, summary: "generated slide visual" })))
-      : await requestChatCompletions(config, prompt, images.map((item) => ({ name: `slide-${item.slideIndex}`, dataUrl: item.dataUrl, summary: "generated slide visual" })));
+      : await requestChatCompletions(config, prompt, images.map((item) => ({ name: `slide-${item.slideIndex}`, dataUrl: item.dataUrl, summary: "generated slide visual" })), "image_decomposition");
     res.json({
       ok: true,
-      decompositions: normalizeDecompositions(raw, images),
-      meta: { provider: config.provider, model: config.model, apiCalls: 1, keySource: config.keySource },
+      decompositions: normalizeDecompositions(result.value, images),
+      meta: { provider: config.provider, model: config.model, apiCalls: result.apiCalls, keySource: config.keySource },
     });
   } catch (error) {
     sendApiError(res, error);
@@ -316,10 +334,12 @@ function finishConfig({ provider, baseUrl, model, apiKey, allowNoKey, quality })
 }
 
 function normalizeSource(raw) {
+  const audience = cleanText(raw.audience, 180);
+  if (!audience) throw new HttpError(400, "请明确填写目标受众，例如：董事会、投资人、客户或内部团队。");
   return {
     topic: cleanText(raw.topic, 180) || "未命名演示文稿",
-    audience: cleanText(raw.audience, 180) || "通用受众",
-    slideCount: Math.max(4, Math.min(12, Number(raw.slideCount) || 7)),
+    audience,
+    slideCount: Math.max(1, Math.min(50, Math.round(Number(raw.slideCount) || 7))),
     textInput: cleanText(raw.textInput, 28_000),
     tableInput: cleanText(raw.tableInput, 14_000),
     imageBrief: cleanText(raw.imageBrief, 3_000),
@@ -341,15 +361,20 @@ function normalizeImages(raw) {
 function buildDeckPrompt(source) {
   const system = `你是资深演示文稿策略师和信息设计师。任务不是总结材料，而是建立一条可辩护的演示逻辑。先识别受众要做的决定，再区分事实、判断、证据和行动。使用“核心结论 -> 背景矛盾 -> 关键证据 -> 方案 -> 行动”的结构，但根据材料调整。不得编造数字、案例或来源；材料不足时写入 evidenceGaps。每页标题必须表达观点，每页只承担一个论证任务。图片只是证据和视觉参考，不要从图片中臆测看不清的信息。严格输出 JSON。`;
   const imageList = source.images.map((image, index) => `图片 ${index + 1}: ${image.name}；${image.summary || "用户上传的内容参考"}`).join("\n");
-  const user = `主题：${source.topic}\n受众：${source.audience}\n页数：严格 ${source.slideCount} 页\n选定风格：${source.styleId}\n\n文字材料：\n${source.textInput || "（无）"}\n\n表格材料：\n${source.tableInput || "（无）"}\n\n图片使用说明：\n${source.imageBrief || "（无）"}\n${imageList || "（未上传图片）"}\n\n请先在 story 中给出核心主张、受众洞察、叙事弧和证据缺口，再生成恰好 ${source.slideCount} 页。imageIndex 只引用从 1 开始的用户图片序号，没有合适图片时为 null。visualBrief 描述该页需要表达什么，imagePrompt 是给图像模型的中文提示词，必须要求 16:9、无文字、为原生文字保留清晰留白。`;
+  const styleLabel = source.styleId === "blank" ? "未指定，使用空白模板" : styleGuides[source.styleId].label;
+  const user = `主题：${source.topic}\n受众：${source.audience}\n页数：严格 ${source.slideCount} 页\n选定风格：${styleLabel}\n\n文字材料：\n${source.textInput || "（无）"}\n\n表格材料：\n${source.tableInput || "（无）"}\n\n图片使用说明：\n${source.imageBrief || "（无）"}\n${imageList || "（未上传图片）"}\n\n请先在 story 中给出核心主张、受众洞察、叙事弧和证据缺口，再生成恰好 ${source.slideCount} 页。imageIndex 只引用从 1 开始的用户图片序号，没有合适图片时为 null。visualBrief 描述该页需要表达什么，imagePrompt 是给图像模型的中文提示词，必须要求 16:9、无文字、为原生文字保留清晰留白。`;
   return { system, user };
 }
 
 function buildImagePrompt(job, guide, userReferenceCount, referenceMode) {
-  const referenceInstruction = referenceMode === "multi"
+  const referenceInstruction = referenceMode === "style-and-user-multi"
     ? `Image 1 是内置“${guide.label}”风格引导图，只学习其视觉语法，不复制具体内容。${userReferenceCount ? `Image 2 到 Image ${userReferenceCount + 1} 是用户内容参考，必须保留主体身份和事实属性。` : "没有用户内容参考。"}`
+    : referenceMode === "user-multi"
+      ? `所有输入图片都是用户内容参考，必须保留主体身份和事实属性；不要套用额外风格。`
     : referenceMode === "user-single"
-      ? `Image 1 是用户提供的内容参考，必须保留主体身份和事实属性。内置“${guide.label}”风格通过文字描述提供，不要改变用户主体。`
+      ? `Image 1 是用户提供的内容参考，必须保留主体身份和事实属性。${guide.file ? `内置“${guide.label}”风格通过文字描述提供，不要改变用户主体。` : "不要套用额外风格。"}`
+      : referenceMode === "none"
+        ? "没有风格图或用户参考图，请只根据内容任务组织中性、清楚的视觉。"
       : `Image 1 是内置“${guide.label}”风格引导图，只学习其视觉语法、构图节奏、配色关系和材质，不复制具体内容。`;
   return `画一个适合第 ${job.slideIndex + 1} 页的 16:9 高端演示视觉。\n内容任务：${job.prompt}\n页面布局：${job.layout || "visual-right"}。\n${referenceInstruction}\n整体方向：${guide.direction}。画面必须是可拆分的演示视觉素材，主体清楚，最多 3 个主要视觉区域。禁止任何文字、字母、数字、标志、水印和伪界面文案。为后续叠加原生 PowerPoint 标题与正文保留一块干净、低细节、高对比的负空间。`;
 }
@@ -381,10 +406,10 @@ async function requestOpenAIResponses(config, prompt, schema, schemaName, images
   }, 150_000);
   const payload = await readJson(response);
   if (!response.ok) throw upstreamError(response.status, payload);
-  return parseModelJson(extractResponseText(payload));
+  return { value: parseModelJson(extractResponseText(payload)), apiCalls: 1 };
 }
 
-async function requestChatCompletions(config, prompt, images = []) {
+async function requestChatCompletions(config, prompt, images = [], schemaName = "deck_spec") {
   const userContent = images.length
     ? [{ type: "text", text: prompt.user }, ...images.flatMap((image) => [
         { type: "text", text: `附件：${image.name}${image.summary ? `；${image.summary}` : ""}` },
@@ -409,7 +434,31 @@ async function requestChatCompletions(config, prompt, images = []) {
     payload = await readJson(response);
   }
   if (!response.ok) throw upstreamError(response.status, payload);
-  return parseModelJson(payload?.choices?.[0]?.message?.content || "");
+  let apiCalls = 1;
+  const firstText = extractChatCompletionText(payload);
+  const firstValue = tryParseModelJson(firstText);
+  if (hasStructuredContent(firstValue, schemaName)) return { value: firstValue, apiCalls };
+
+  const repairInstruction = schemaName === "deck_spec"
+    ? "请修复上一次输出。只返回一个有效 JSON 对象，根对象必须包含 title、theme、story 和非空 slides 数组。slides 必须严格遵守用户指定页数，每页包含 title、subtitle、layout、claim、bullets、speakerNotes、sourceNotes、imageIndex、callouts、visualBrief、imagePrompt。不要输出解释、Markdown 或代码围栏。"
+    : "请修复上一次输出。只返回一个有效 JSON 对象，根对象必须包含非空 slides 数组，每项包含 slideIndex、composition、safeArea 和 parts。不要输出解释、Markdown 或代码围栏。";
+  const repairMessages = [...body.messages];
+  if (firstText) repairMessages.push({ role: "assistant", content: firstText });
+  repairMessages.push({ role: "user", content: repairInstruction });
+  const repairBody = { ...body, messages: repairMessages, temperature: 0 };
+  response = await fetchWithTimeout(`${config.baseUrl}/chat/completions`, {
+    method: "POST", headers: { ...authHeaders(config), "Content-Type": "application/json" }, body: JSON.stringify(repairBody),
+  }, 150_000);
+  payload = await readJson(response);
+  if (!response.ok) throw upstreamError(response.status, payload);
+  apiCalls += 1;
+  const repairedValue = tryParseModelJson(extractChatCompletionText(payload));
+  if (!hasStructuredContent(repairedValue, schemaName)) {
+    throw new HttpError(502, schemaName === "deck_spec"
+      ? "模型连续两次没有返回可用的幻灯片结构。请确认文本模型支持 JSON 输出，或在 API 设置中更换模型。"
+      : "模型连续两次没有返回可用的视觉拆解结构。请更换支持图片理解和 JSON 输出的模型。");
+  }
+  return { value: repairedValue, apiCalls };
 }
 
 function normalizeDeck(raw, source) {
@@ -516,6 +565,37 @@ function clamp01(value) { return Number.isFinite(value) ? Math.max(0, Math.min(1
 function extractResponseText(payload) {
   if (typeof payload?.output_text === "string") return payload.output_text;
   return (payload?.output || []).flatMap((item) => item?.content || []).map((item) => item?.text || item?.value || "").filter(Boolean).join("\n");
+}
+
+function extractChatCompletionText(payload) {
+  const choice = payload?.choices?.[0] || {};
+  const message = choice.message || {};
+  const content = flattenTextContent(message.content);
+  if (content) return content;
+  const reasoning = flattenTextContent(message.reasoning_content);
+  if (reasoning) return reasoning;
+  if (typeof choice.text === "string") return choice.text;
+  return extractResponseText(payload);
+}
+
+function flattenTextContent(value) {
+  if (typeof value === "string") return value.trim();
+  if (Array.isArray(value)) return value.map(flattenTextContent).filter(Boolean).join("\n");
+  if (!value || typeof value !== "object") return "";
+  if (typeof value.text === "string") return value.text.trim();
+  if (typeof value.value === "string") return value.value.trim();
+  if (typeof value.content === "string") return value.content.trim();
+  return "";
+}
+
+function tryParseModelJson(text) {
+  try { return parseModelJson(text); } catch { return null; }
+}
+
+function hasStructuredContent(value, schemaName) {
+  if (!value || typeof value !== "object") return false;
+  if (schemaName === "deck_spec") return Array.isArray(value.slides) && value.slides.length > 0;
+  return Array.isArray(value.slides) && value.slides.length > 0;
 }
 
 function parseModelJson(text) {

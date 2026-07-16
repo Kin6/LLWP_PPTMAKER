@@ -69,6 +69,16 @@ const server = http.createServer(async (req, res) => {
     }
     return res.end(JSON.stringify({ data: [{ url: "http://127.0.0.1:4010/mock-image.png" }] }));
   }
+  if (req.method === "POST" && req.url === "/v1/images/generations") {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    const parsed = JSON.parse(body || "{}");
+    if (!String(parsed.prompt || "").includes("画一个")) {
+      res.statusCode = 400;
+      return res.end(JSON.stringify({ error: { message: "Prompt must contain an explicit drawing instruction" } }));
+    }
+    return res.end(JSON.stringify({ data: [{ url: "http://127.0.0.1:4010/mock-image.png" }] }));
+  }
   if (req.method === "POST" && req.url === "/v1/responses") {
     let body = "";
     for await (const chunk of req) body += chunk;
@@ -82,6 +92,9 @@ const server = http.createServer(async (req, res) => {
     for await (const chunk of req) body += chunk;
     const parsed = JSON.parse(body || "{}");
     const text = JSON.stringify(parsed?.messages || []);
+    if (text.includes("FORCE_EMPTY_DECK") && parsed.messages.length <= 2) {
+      return res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: [{ type: "text", text: JSON.stringify({ title: "empty", slides: [] }) }] } }] }));
+    }
     const payload = text.includes("依次分析所附") ? decomposition : deck;
     return res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: JSON.stringify(payload) } }] }));
   }

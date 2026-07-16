@@ -25,6 +25,7 @@ import {
   Sparkles,
   Table2,
   Upload,
+  Users,
   WandSparkles,
   X,
 } from "lucide-react";
@@ -91,7 +92,7 @@ const defaultApiConfig: ApiConfig = {
 
 const initialSteps: WorkflowStep[] = [
   { id: "logic", title: "理清内容逻辑", engine: "Responses · 结构化 DeckSpec", status: "idle", detail: "判断受众、结论、证据和叙事弧" },
-  { id: "image", title: "生成主题视觉", engine: "GPT Image 2 · 多参考图编辑", status: "idle", detail: "用户内容图 + 内置风格引导图" },
+  { id: "image", title: "生成主题视觉", engine: "GPT Image 2 · 参考图编辑", status: "idle", detail: "用户内容图 + 可选风格引导图" },
   { id: "decompose", title: "拆解视觉部件", engine: "视觉模型 + Canvas", status: "idle", detail: "识别安全区并裁出独立图片对象" },
   { id: "assemble", title: "组装页面对象", engine: "原生文字、表格与图片", status: "idle", detail: "把内容逻辑映射到可编辑页面" },
   { id: "export", title: "生成可编辑 PPTX", engine: "PptxGenJS", status: "idle", detail: "输出文本框、表格、图片与讲稿备注" },
@@ -127,21 +128,21 @@ function App() {
   const [mode, setMode] = useState<Mode>("local");
   const [sourceTab, setSourceTab] = useState<SourceTab>("text");
   const [topic, setTopic] = useState("AI PPT 五阶段工作流");
-  const [audience, setAudience] = useState("产品团队、创业者与内部决策者");
+  const [audience, setAudience] = useState("");
   const [slideCount, setSlideCount] = useState(7);
   const [textInput, setTextInput] = useState(sampleText);
   const [tableInput, setTableInput] = useState(sampleTable);
   const [imageBrief, setImageBrief] = useState("保留上传图片的主体身份；视觉需要专业、克制，并为原生文字留出干净空间。");
-  const [styleId, setStyleId] = useState("product-calm");
+  const [styleId, setStyleId] = useState("blank");
   const [assets, setAssets] = useState<GeneratedAsset[]>([]);
   const [deck, setDeck] = useState<NotebookDeckSpec>(() => buildLocalDeck({
     topic: "AI PPT 五阶段工作流",
-    audience: "产品团队、创业者与内部决策者",
+    audience: "通用受众",
     slideCount: 7,
     textInput: sampleText,
     tableInput: sampleTable,
     imageBrief: "专业、克制，为原生文字留出干净空间。",
-    styleId: "product-calm",
+    styleId: "blank",
     assets: [],
   }));
   const [steps, setSteps] = useState<WorkflowStep[]>(initialSteps);
@@ -157,7 +158,8 @@ function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const currentSlide = deck.slides[selectedSlide] || deck.slides[0];
-  const currentStyle = styleProfiles.find((style) => style.id === styleId) || styleProfiles[0];
+  const currentStyle = styleProfiles.find((style) => style.id === styleId)
+    || styleProfiles.find((style) => style.id === "product-calm")!;
   const uploadedAssets = useMemo(() => assets.filter((asset) => asset.kind === "upload"), [assets]);
   const generatedCount = assets.filter((asset) => asset.kind === "generated").length;
   const croppedCount = assets.filter((asset) => asset.kind === "crop").length;
@@ -196,6 +198,12 @@ function App() {
   }
 
   function runLocal(source: GenerationSource = { topic, audience, slideCount, textInput, tableInput, imageBrief, styleId, assets }) {
+    if (!source.audience.trim()) {
+      const detail = "请先填写目标受众，例如：董事会、投资人、客户或内部团队。";
+      setHomeMessage(detail);
+      setStatus(detail);
+      return;
+    }
     const next = buildLocalDeck(source);
     const sourceUploads = source.assets.filter((asset) => asset.kind === "upload");
     setDeck(next);
@@ -215,8 +223,15 @@ function App() {
     config: ApiConfig = apiConfig,
   ) {
     if (isRunning) return;
+    if (!source.audience.trim()) {
+      const detail = "请先填写目标受众，例如：董事会、投资人、客户或内部团队。";
+      setHomeMessage(detail);
+      setStatus(detail);
+      return;
+    }
     const sourceUploads = source.assets.filter((asset) => asset.kind === "upload");
-    const sourceStyle = styleProfiles.find((style) => style.id === source.styleId) || styleProfiles[0];
+    const sourceStyle = styleProfiles.find((style) => style.id === source.styleId)
+      || styleProfiles.find((style) => style.id === "product-calm")!;
     setRunning(true);
     setApiCalls(0);
     resetSteps();
@@ -244,8 +259,8 @@ function App() {
       let nextAssets = sourceUploads;
       if (config.imageEnabled) {
         activeStep = "image";
-        updateStep("image", "running", `正在用 ${sourceStyle.name} 引导 GPT Image 2`);
-        setStatus("正在将内置风格图与用户内容图一起送入 Image 2…");
+        updateStep("image", "running", source.styleId === "blank" ? "未套用风格图，正在按内容生成视觉" : `正在用 ${sourceStyle.name} 引导 GPT Image 2`);
+        setStatus(source.styleId === "blank" ? "正在按内容和用户参考图生成视觉，不套用内置风格…" : "正在将内置风格图与用户内容图一起送入 Image 2…");
         const jobs = createImageJobs(nextDeck, config.imageCount);
         const imageResponse = await generateAiImages(config, jobs, sourceImages, source.styleId);
         const startIndex = maxAssetIndex(nextAssets) + 1;
@@ -391,6 +406,10 @@ function App() {
       setHomeMessage("请描述演示主题，或先添加一份材料。");
       return;
     }
+    if (!audience.trim()) {
+      setHomeMessage("请指明目标受众，例如：董事会、投资人、客户或内部团队。");
+      return;
+    }
 
     const nextTopic = compactTopic(prompt || attachments[0]?.name || "导入材料演示文稿");
     const source: GenerationSource = {
@@ -463,6 +482,11 @@ function App() {
         attachments={attachments}
         onFiles={handleAttachmentFiles}
         onRemoveAttachment={removeHomeAttachment}
+        audience={audience}
+        onAudienceChange={(value) => {
+          setAudience(value);
+          if (value.trim()) setHomeMessage("");
+        }}
         styleId={styleId}
         onStyleChange={setStyleId}
         slideCount={slideCount}
@@ -505,8 +529,8 @@ function App() {
           <label className="field-label">演示主题</label>
           <input className="text-input title-input" value={topic} onChange={(event) => setTopic(event.target.value)} placeholder="这份 PPT 要说明什么？" />
           <div className="inline-fields">
-            <label><span>目标受众</span><input value={audience} onChange={(event) => setAudience(event.target.value)} /></label>
-            <label><span>页数</span><input type="number" min={4} max={12} value={slideCount} onChange={(event) => setSlideCount(clamp(Number(event.target.value), 4, 12))} /></label>
+            <label><span>目标受众（必填）</span><input value={audience} onChange={(event) => setAudience(event.target.value)} placeholder="例如：投资人" /></label>
+            <label><span>精确页数</span><input type="number" min={1} max={50} value={slideCount} onChange={(event) => setSlideCount(clamp(Number(event.target.value), 1, 50))} /></label>
           </div>
 
           <div className="source-tabs" role="tablist">
@@ -547,7 +571,9 @@ function App() {
             <div className="style-list">
               {styleProfiles.map((style) => (
                 <button key={style.id} className={`style-option ${styleId === style.id ? "active" : ""}`} onClick={() => setStyleId(style.id)}>
-                  <img src={style.image} alt={`${style.name}风格引导图`} />
+                  {style.image
+                    ? <img src={style.image} alt={`${style.name}风格引导图`} />
+                    : <b className="blank-style-swatch" aria-hidden="true"><i /><i /><i /></b>}
                   <span><strong>{style.name}</strong><small>{style.description}</small></span>
                   {styleId === style.id && <Check size={15} />}
                 </button>
@@ -641,6 +667,8 @@ function HomeScreen({
   attachments,
   onFiles,
   onRemoveAttachment,
+  audience,
+  onAudienceChange,
   styleId,
   onStyleChange,
   slideCount,
@@ -662,6 +690,8 @@ function HomeScreen({
   attachments: ParsedAttachment[];
   onFiles: (files: FileList | File[]) => void;
   onRemoveAttachment: (id: string) => void;
+  audience: string;
+  onAudienceChange: (value: string) => void;
   styleId: string;
   onStyleChange: (id: string) => void;
   slideCount: number;
@@ -704,8 +734,8 @@ function HomeScreen({
             onKeyDown={(event) => {
               if ((event.ctrlKey || event.metaKey) && event.key === "Enter") void onSubmit();
             }}
-            placeholder="描述您的演示文稿主题"
-            aria-label="描述您的演示文稿主题"
+            placeholder="描述主题、核心材料，以及希望受众做出的决定"
+            aria-label="描述演示主题和核心材料"
           />
 
           {!!attachments.length && (
@@ -719,6 +749,32 @@ function HomeScreen({
               ))}
             </div>
           )}
+
+          <div className="composer-brief">
+            <label className={!audience.trim() && message ? "needs-attention" : ""}>
+              <Users size={15} />
+              <span>目标受众</span>
+              <input
+                value={audience}
+                onChange={(event) => onAudienceChange(event.target.value)}
+                placeholder="例如：董事会、投资人、客户"
+                aria-label="目标受众，必填"
+                required
+              />
+            </label>
+            <label>
+              <Presentation size={15} />
+              <span>页数</span>
+              <input
+                type="number"
+                min={1}
+                max={50}
+                value={slideCount}
+                onChange={(event) => onSlideCountChange(clamp(Number(event.target.value), 1, 50))}
+                aria-label="精确页数，1 到 50"
+              />
+            </label>
+          </div>
 
           <div className="composer-footer">
             <div className="composer-tools">
@@ -768,12 +824,14 @@ function HomeScreen({
         </section>
 
         <section className="template-section">
-          <div className="template-heading"><h2>选择模板</h2><label><Presentation size={13} /><select value={slideCount <= 6 ? 6 : slideCount <= 8 ? 8 : slideCount <= 10 ? 10 : 12} onChange={(event) => onSlideCountChange(clamp(Number(event.target.value), 4, 12))}><option value={6}>4–6 页</option><option value={8}>7–8 页</option><option value={10}>9–10 页</option><option value={12}>11–12 页</option></select></label></div>
+          <div className="template-heading"><h2>选择模板（可选）</h2><span>不选风格也可以生成</span></div>
           <div className="home-template-grid">
-            <button className="import-template" onClick={() => pptRef.current?.click()}><FolderOpen size={19} /><span>导入示例 PPTX</span></button>
+            <button className="import-template" onClick={() => pptRef.current?.click()}><FolderOpen size={19} /><span>导入参考 PPTX</span></button>
             {styleProfiles.map((style) => (
               <button key={style.id} className={`home-template ${styleId === style.id ? "active" : ""}`} onClick={() => onStyleChange(style.id)}>
-                <img src={style.image} alt={`${style.name}模板`} />
+                {style.image
+                  ? <img src={style.image} alt={`${style.name}模板`} />
+                  : <b className="blank-template-preview" aria-hidden="true"><i /><i /><i /></b>}
                 <span>{style.name}</span>
                 {styleId === style.id && <i><Check size={12} /></i>}
               </button>

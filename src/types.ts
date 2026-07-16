@@ -74,6 +74,14 @@ export type StyleProfile = {
 
 export const styleProfiles: StyleProfile[] = [
   {
+    id: "blank",
+    name: "空白模板",
+    description: "不提供风格引导，只按内容组织中性版面。",
+    image: "",
+    palette: ["#FBFBF8", "#191B1D", "#D8D9D4", "#6E716F"],
+    prompt: "content-led neutral presentation composition with no prescribed palette or decorative style",
+  },
+  {
     id: "product-calm",
     name: "沉静产品",
     description: "智能工作台感，留白清楚，适合产品与方案汇报。",
@@ -106,4 +114,3 @@ export const styleProfiles: StyleProfile[] = [
     prompt: "cinematic executive data storytelling, graphite black, luminous cyan signals and restrained amber highlights",
   },
 ];
-

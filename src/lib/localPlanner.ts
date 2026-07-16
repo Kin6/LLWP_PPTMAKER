@@ -14,7 +14,7 @@ export type LocalSource = {
 export function buildLocalDeck(source: LocalSource): NotebookDeckSpec {
   const statements = splitStatements(source.textInput);
   const tableRows = parseTable(source.tableInput);
-  const count = clamp(source.slideCount, 4, 12);
+  const count = clamp(source.slideCount, 1, 50);
   const thesis = statements[0] || `${source.topic}需要一条从问题到行动的清晰叙事`;
   const evidence = statements.slice(1);
   const uploaded = source.assets.filter((asset) => asset.kind === "upload");
