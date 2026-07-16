@@ -22,7 +22,7 @@
 
 API 流程支持当前页面内的断点续跑。内容策划完成后会保存 DeckSpec，Image 2 改为逐页请求并在每页成功后立即保存检查点；某一页超时或某个后续环节失败时，可以从该环节继续，不会重复已经成功的文本规划和生图调用。刷新或关闭页面会清除这份临时检查点。
 
-单页生图默认最长等待 10 分钟。第三方兼容网关返回超时、限流或临时服务错误时默认自动重试 1 次；等待时间与重试次数可在页面 API 设置中调整，也可通过 `IMAGE_API_TIMEOUT_MS`、`IMAGE_API_MAX_RETRIES` 设置服务端默认值。
+单页生图默认最长等待 10 分钟。第三方兼容网关返回超时、限流或临时服务错误时默认自动重试 1 次；主线路为 `api.chatanywhere.org` 时，重试会自动切换到 `api.chatanywhere.tech`。等待时间与重试次数可在页面 API 设置中调整，也可通过 `IMAGE_API_TIMEOUT_MS`、`IMAGE_API_MAX_RETRIES` 设置服务端默认值。
 
 项目内置四套真实风格参考图：沉静产品、咨询网格、编辑科技、电影感数据。它们位于 `public/style-guides/`，可以继续增加或替换。
 
@@ -69,9 +69,11 @@ npm start
 ```dotenv
 OPENAI_API_KEY=你的_key
 OPENAI_API_BASE=https://api.chatanywhere.org/v1
+OPENAI_API_FALLBACK_BASE=https://api.chatanywhere.tech/v1
 TEXT_API_BASE_URL=
 TEXT_MODEL=gpt-5.6-terra
 IMAGE_API_BASE_URL=
+IMAGE_API_FALLBACK_BASE_URL=
 IMAGE_MODEL=gpt-image-2
 IMAGE_API_TIMEOUT_MS=600000
 IMAGE_API_MAX_RETRIES=1

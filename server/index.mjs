@@ -15,14 +15,17 @@ dotenv.config({ path: path.join(root, ".env"), quiet: true });
 
 const openAiApiKey = resolveEnvironmentSecret("OPENAI_API_KEY");
 const openAiApiBase = resolveEnvironmentSecret("OPENAI_API_BASE") || resolveEnvironmentSecret("OPENAI_BASE_URL");
+const explicitOpenAiApiFallbackBase = resolveEnvironmentSecret("OPENAI_API_FALLBACK_BASE");
 const explicitTextApiBase = resolveEnvironmentSecret("TEXT_API_BASE_URL");
 const explicitImageApiBase = resolveEnvironmentSecret("IMAGE_API_BASE_URL");
+const explicitImageApiFallbackBase = resolveEnvironmentSecret("IMAGE_API_FALLBACK_BASE_URL");
 const explicitTextModel = resolveEnvironmentSecret("TEXT_MODEL");
 const explicitImageModel = resolveEnvironmentSecret("IMAGE_MODEL");
 const configuredImageTimeoutMs = boundedInteger(resolveEnvironmentSecret("IMAGE_API_TIMEOUT_MS"), 240_000, 900_000, 600_000);
 const configuredImageMaxRetries = boundedInteger(resolveEnvironmentSecret("IMAGE_API_MAX_RETRIES"), 0, 2, 1);
 const textApiBaseUrl = explicitTextApiBase || openAiApiBase || "https://api.openai.com/v1";
 const imageApiBaseUrl = explicitImageApiBase || openAiApiBase || "https://api.openai.com/v1";
+const imageApiFallbackBaseUrl = explicitImageApiFallbackBase || explicitOpenAiApiFallbackBase || defaultGatewayFallback(imageApiBaseUrl);
 const textModel = explicitTextModel || "gpt-5.6-terra";
 const imageModel = explicitImageModel || "gpt-image-2";
 const apiDefaultsFromEnvironment = Boolean(openAiApiBase || explicitTextApiBase || explicitImageApiBase || explicitTextModel || explicitImageModel);
@@ -162,6 +165,7 @@ app.get("/api/health", (_req, res) => {
       baseUrl: textApiBaseUrl,
       model: textModel,
       imageBaseUrl: imageApiBaseUrl,
+      imageFallbackBaseUrl: imageApiFallbackBaseUrl,
       imageModel,
       imageTimeoutMs: configuredImageTimeoutMs,
       imageMaxRetries: configuredImageMaxRetries,
@@ -262,12 +266,14 @@ app.post("/api/ai/generate-images", async (req, res) => {
     let apiCalls = 0;
 
     for (const job of jobs) {
-      const officialImageApi = isOfficialOpenAIBase(config.baseUrl);
       let prompt;
       const maxAttempts = config.maxRetries + 1;
+      const fallbackBaseUrl = retryGatewayBase(config.baseUrl, imageApiFallbackBaseUrl);
 
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         try {
+          const attemptBaseUrl = attempt > 1 && fallbackBaseUrl ? fallbackBaseUrl : config.baseUrl;
+          const officialImageApi = isOfficialOpenAIBase(attemptBaseUrl);
           let response;
           if (!guideBytes && !references.length) {
             prompt = buildImagePrompt(job, guide, 0, "none");
@@ -279,7 +285,7 @@ app.post("/api/ai/generate-images", async (req, res) => {
               ...(officialImageApi ? { output_format: "png" } : {}),
             };
             apiCalls += 1;
-            response = await fetchWithTimeout(`${config.baseUrl}/images/generations`, {
+            response = await fetchWithTimeout(`${attemptBaseUrl}/images/generations`, {
               method: "POST",
               headers: { ...authHeaders(config), "Content-Type": "application/json" },
               body: JSON.stringify(generationBody),
@@ -308,7 +314,7 @@ app.post("/api/ai/generate-images", async (req, res) => {
             prompt = buildImagePrompt(job, guide, references.length, referenceMode);
             form.append("prompt", prompt);
             apiCalls += 1;
-            response = await fetchWithTimeout(`${config.baseUrl}/images/edits`, {
+            response = await fetchWithTimeout(`${attemptBaseUrl}/images/edits`, {
               method: "POST",
               headers: authHeaders(config),
               body: form,
@@ -328,7 +334,8 @@ app.post("/api/ai/generate-images", async (req, res) => {
             continue;
           }
           if (attempt > 1 && error instanceof HttpError) {
-            throw new HttpError(error.status, `${error.message}（已自动重试 ${attempt - 1} 次）`);
+            const prefix = fallbackBaseUrl ? "备用网关重试后仍失败" : `已自动重试 ${attempt - 1} 次`;
+            throw new HttpError(error.status, `${prefix}：${error.message}`);
           }
           throw error;
         }
@@ -822,11 +829,22 @@ function delay(ms) {
 async function readJson(response) {
   const text = await response.text();
   if (!text) return {};
-  try { return JSON.parse(text); } catch { return { error: { message: text.slice(0, 500) } }; }
+  try { return JSON.parse(text); } catch {
+    const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+    const looksLikeHtml = contentType.includes("text/html") || /^\s*(?:<!doctype\s+html|<html\b)/i.test(text);
+    return {
+      responseFormat: looksLikeHtml ? "html" : "text",
+      error: { message: looksLikeHtml ? "" : text.replace(/\s+/g, " ").trim().slice(0, 300) },
+    };
+  }
 }
 
 function upstreamError(status, payload) {
-  const message = payload?.error?.message || payload?.message || `模型服务返回 ${status}`;
+  const message = payload?.responseFormat === "html"
+    ? status === 524
+      ? "上游网关返回 524：长时间生图请求在边缘网关等待超时。"
+      : `上游网关返回 ${status} HTML 错误页。`
+    : payload?.error?.message || payload?.message || `模型服务返回 ${status}`;
   return new HttpError(status >= 500 ? 502 : status, cleanText(message, 500));
 }
 
@@ -864,6 +882,25 @@ function extractDisplayText(value, depth = 0) {
 function isOfficialOpenAIBase(value) {
   try { return new URL(value).hostname.toLowerCase() === "api.openai.com"; }
   catch { return false; }
+}
+function defaultGatewayFallback(primaryValue) {
+  try {
+    return new URL(primaryValue).hostname.toLowerCase() === "api.chatanywhere.org"
+      ? "https://api.chatanywhere.tech/v1"
+      : "";
+  } catch { return ""; }
+}
+function retryGatewayBase(primaryValue, fallbackValue) {
+  const primary = String(primaryValue || "").trim().replace(/\/+$/, "");
+  const fallback = String(fallbackValue || "").trim().replace(/\/+$/, "");
+  if (!fallback || fallback === primary) return "";
+  try {
+    const primaryHost = new URL(primary).hostname.toLowerCase();
+    const fallbackHost = new URL(fallback).hostname.toLowerCase();
+    if (primaryHost === "api.openai.com" && fallbackHost !== "api.openai.com") return "";
+    if (primaryHost === "api.chatanywhere.org" || explicitImageApiFallbackBase || explicitOpenAiApiFallbackBase) return fallback;
+  } catch { return ""; }
+  return "";
 }
 function preferredGatewayBase(requestedValue, fallbackValue) {
   const requested = String(requestedValue || "").trim();

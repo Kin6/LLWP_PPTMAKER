@@ -4,6 +4,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const port = Number(process.env.MOCK_PORT || 4010);
+const disableImageFailures = process.env.MOCK_DISABLE_IMAGE_FAILURES === "1";
+const forcedImageFailureMode = process.env.MOCK_IMAGE_FAILURE_MODE || "";
 const imageBase64 = (await fs.readFile(path.join(root, "public", "style-guides", "product-calm.png"))).toString("base64");
 const failedImageTokens = new Set();
 
@@ -67,11 +70,15 @@ function deckForRequest(text) {
   return { ...deck, slides };
 }
 
-function shouldFailImageOnce(prompt) {
-  const match = String(prompt || "").match(/FAIL_IMAGE_ONCE_PAGE_(\d+)/);
+function imageFailureMode(prompt) {
+  if (disableImageFailures) return "";
+  if (forcedImageFailureMode === "html-524" || forcedImageFailureMode === "json-timeout") return forcedImageFailureMode;
+  const text = String(prompt || "");
+  const htmlMatch = text.match(/FAIL_HTML_524_ONCE_PAGE_(\d+)/);
+  const match = htmlMatch || text.match(/FAIL_IMAGE_ONCE_PAGE_(\d+)/);
   if (!match || failedImageTokens.has(match[0])) return false;
   failedImageTokens.add(match[0]);
-  return true;
+  return htmlMatch ? "html-524" : "json-timeout";
 }
 
 const decomposition = {
@@ -104,7 +111,13 @@ const server = http.createServer(async (req, res) => {
     }
     const promptMatch = multipart.match(/name="prompt"\r\n\r\n([\s\S]*?)\r\n--/);
     const decodedPrompt = promptMatch ? Buffer.from(promptMatch[1], "latin1").toString("utf8") : "";
-    if (shouldFailImageOnce(decodedPrompt)) {
+    const failureMode = imageFailureMode(decodedPrompt);
+    if (failureMode === "html-524") {
+      res.statusCode = 524;
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      return res.end("<!DOCTYPE html><html><head><title>524: A timeout occurred</title></head><body>gateway timeout</body></html>");
+    }
+    if (failureMode === "json-timeout") {
       res.statusCode = 504;
       return res.end(JSON.stringify({ error: { message: "The operation was aborted due to timeout" } }));
     }
@@ -118,7 +131,13 @@ const server = http.createServer(async (req, res) => {
       res.statusCode = 400;
       return res.end(JSON.stringify({ error: { message: "Prompt must contain an explicit drawing instruction" } }));
     }
-    if (shouldFailImageOnce(parsed.prompt)) {
+    const failureMode = imageFailureMode(parsed.prompt);
+    if (failureMode === "html-524") {
+      res.statusCode = 524;
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      return res.end("<!DOCTYPE html><html><head><title>524: A timeout occurred</title></head><body>gateway timeout</body></html>");
+    }
+    if (failureMode === "json-timeout") {
       res.statusCode = 504;
       return res.end(JSON.stringify({ error: { message: "The operation was aborted due to timeout" } }));
     }
@@ -152,4 +171,4 @@ const server = http.createServer(async (req, res) => {
   res.end(JSON.stringify({ error: { message: "Mock route not found" } }));
 });
 
-server.listen(4010, "127.0.0.1", () => console.log("Mock OpenAI service running at http://127.0.0.1:4010/v1"));
+server.listen(port, "127.0.0.1", () => console.log(`Mock OpenAI service running at http://127.0.0.1:${port}/v1`));
