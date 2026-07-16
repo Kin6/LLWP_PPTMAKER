@@ -162,7 +162,7 @@ app.get("/api/health", (_req, res) => {
       imageBaseUrl: imageApiBaseUrl,
       imageModel,
     },
-    pipeline: ["logic-planner", "image-2-reference-edit", "object-validation", "native-assembly", "editable-pptx"],
+    pipeline: ["story-planner", "story-refinement", "image-2-art-direction", "full-slide-assembly", "pptx-export"],
   });
 });
 
@@ -184,27 +184,35 @@ app.post("/api/ai/generate-deck", async (req, res) => {
     const config = normalizeTextConfig(req.body?.config || {});
     const source = normalizeSource(req.body?.source || {});
     const prompt = buildDeckPrompt(source);
-    let result = config.provider === "openai"
-      ? await requestOpenAIResponses(config, prompt, deckSchema, "deck_spec", source.images)
-      : await requestChatCompletions(config, prompt, source.images, "deck_spec");
+    let result = await requestDeckModel(config, prompt, source.images);
     if (!hasExactSlideCount(result.value, source.slideCount)) {
       const retryPrompt = {
         ...prompt,
         user: `${prompt.user}\n\n纠错要求：上一次没有返回恰好 ${source.slideCount} 页。请重新规划完整叙事并返回恰好 ${source.slideCount} 个 slides；不要复用占位页，不要省略结尾，不要输出任何解释。`,
       };
-      const retry = config.provider === "openai"
-        ? await requestOpenAIResponses(config, retryPrompt, deckSchema, "deck_spec", source.images)
-        : await requestChatCompletions(config, retryPrompt, source.images, "deck_spec");
+      const retry = await requestDeckModel(config, retryPrompt, source.images);
       result = { value: retry.value, apiCalls: result.apiCalls + retry.apiCalls };
     }
     if (!hasExactSlideCount(result.value, source.slideCount)) {
       const returned = Array.isArray(result.value?.slides) ? result.value.slides.length : 0;
       throw new HttpError(502, `模型连续两次未返回指定的 ${source.slideCount} 页（当前 ${returned} 页），已停止生成以避免拼接无关页面。`);
     }
+    let refinementApplied = false;
+    try {
+      const draft = normalizeDeck(result.value, source);
+      const refined = await requestDeckModel(config, buildDeckRefinementPrompt(source, draft), []);
+      result = {
+        value: hasExactSlideCount(refined.value, source.slideCount) ? refined.value : result.value,
+        apiCalls: result.apiCalls + refined.apiCalls,
+      };
+      refinementApplied = hasExactSlideCount(refined.value, source.slideCount);
+    } catch (error) {
+      console.warn("Deck refinement skipped:", error instanceof Error ? error.message : error);
+    }
     res.json({
       ok: true,
       deck: normalizeDeck(result.value, source),
-      meta: { provider: config.provider, model: config.model, apiCalls: result.apiCalls, keySource: config.keySource },
+      meta: { provider: config.provider, model: config.model, apiCalls: result.apiCalls, keySource: config.keySource, refinementApplied },
     });
   } catch (error) {
     sendApiError(res, error);
@@ -258,7 +266,8 @@ app.post("/api/ai/generate-images", async (req, res) => {
           model: config.model,
           prompt,
           size: "1536x1024",
-          ...(officialImageApi ? { quality: config.quality, output_format: "png" } : {}),
+          quality: config.quality,
+          ...(officialImageApi ? { output_format: "png" } : {}),
         };
         response = await fetchWithTimeout(`${config.baseUrl}/images/generations`, {
           method: "POST",
@@ -269,9 +278,9 @@ app.post("/api/ai/generate-images", async (req, res) => {
         const form = new UndiciFormData();
         form.append("model", config.model);
         form.append("size", "1536x1024");
+        form.append("quality", config.quality);
         let referenceMode = "style-single";
         if (officialImageApi) {
-          form.append("quality", config.quality);
           form.append("output_format", "png");
           if (guideBytes) form.append("image[]", new Blob([guideBytes], { type: "image/png" }), `style-${styleId}.png`);
           references.forEach((reference, index) => {
@@ -401,7 +410,36 @@ function buildDeckPrompt(source) {
   const user = `主题：${source.topic}\n受众：${source.audience}\n页数：必须恰好 ${source.slideCount} 页，不得少页、补占位页或额外增加附录\n选定风格：${styleLabel}\n\n文字材料：\n${source.textInput || "（无）"}\n\n用户提供的表格材料：\n${source.tableInput || "（无，禁止自行创建表格内容）"}\n\n图片使用说明：\n${source.imageBrief || "（无）"}\n${imageList || "（未上传图片）"}\n\n先在 story 中给出唯一核心主张、受众洞察、完整叙事弧和证据缺口，再生成恰好 ${source.slideCount} 页。整套页面必须形成连续链条：第 1 页建立核心问题或判断；中间页面依次给出背景、机制、证据、影响或方案，每页都承接上一页并为下一页制造必要性；最后 1 页解决开场问题并收束为明确结论或行动。不要把同一个观点换词重复。speakerNotes 可以记录“承接上一页”和“引向下一页”的过渡逻辑，但这些制作说明不能进入可见标题、正文或图片文案。
 
 imageIndex 只引用从 1 开始的用户图片序号，没有合适图片时为 null。visualBrief 描述该页要用什么视觉证据支持当前观点；imagePrompt 只描述与当前页面直接相关的主体、场景、数据关系和视觉隐喻，不规定有字或无字，最终文字呈现由后续模式决定。`;
-  return { system, user };
+  const qualityRules = `【成片级内容约束】
+1. 先在内部完成“受众要改变什么看法 -> 需要什么证据 -> 每页如何推进”的推演，再输出 JSON；不要把素材按段落平均切页。
+2. 每页标题必须是结论句而不是栏目名。相邻页面必须构成因为、所以、但是、因此或下一步的关系，删除换词重复。
+3. 可见文案为图像生成服务：主标题尽量不超过 22 个汉字，subtitle 不超过 30 个汉字，claim 不超过 36 个汉字；每页 0 到 3 个 bullets，每条尽量不超过 18 个汉字。详细解释放入 speakerNotes。
+4. 三页演示严格使用“定义关键判断 -> 给出机制或证据 -> 推导结论与下一步”；更多页数则在中间增加必要的背景、机制、证据、对比、方案和影响，不得增加空泛过渡页。
+5. visualBrief 必须说明哪一种可见证据能证明本页观点。imagePrompt 必须写清主体、动作、环境、视觉隐喻、与文字发生关系的位置，以及贯穿全套的连续视觉母题；禁止只写科技感、未来感、高级感等空泛形容词。
+6. 除非用户给出表格数据，否则不要创建表格。数据页应优先提炼一个关键数字、一个趋势或一个对比，而不是把整张电子表格照搬进画面。`;
+  return { system, user: `${user}\n\n${qualityRules}` };
+}
+
+function buildDeckRefinementPrompt(source, draft) {
+  const sourceSummary = {
+    topic: source.topic,
+    audience: source.audience,
+    slideCount: source.slideCount,
+    textInput: source.textInput.slice(0, 14_000),
+    tableInput: source.tableInput.slice(0, 6_000),
+    imageBrief: source.imageBrief,
+    images: source.images.map((image) => ({ name: image.name, summary: image.summary })),
+  };
+  return {
+    system: `你是顶级演示文稿总编辑和视觉创意总监。你收到一份第一轮 DeckSpec 草案，需要在不虚构事实的前提下进行第二轮重写。你的首要目标是让整套演示形成不可打乱顺序的论证链，并让每页具备足够明确、可被图像模型执行的艺术导演意图。只返回严格 JSON。`,
+    user: `原始材料：\n${JSON.stringify(sourceSummary)}\n\n第一轮草案：\n${JSON.stringify(draft)}\n\n请返回完整改写后的 DeckSpec，并严格满足：
+1. slides 必须恰好 ${source.slideCount} 页，保留所有有来源的关键事实，不得新增数字、案例、品牌或结论。
+2. 每页只推进一个判断，标题直接说结论；上一页建立的认知必须成为下一页的前提，最后一页必须回答第一页并给出受众可执行的结论。
+3. 删除重复观点和同义改写。${source.slideCount === 3 ? "三页分别承担：核心判断、机制或证据、结论与下一步。" : "中间页只保留完成论证真正需要的背景、机制、证据、对比、方案或影响。"}
+4. 为整页图文融合压缩可见文字：title 尽量不超过 22 个汉字，subtitle 不超过 30 个汉字，claim 不超过 36 个汉字；每页最多 3 条 bullets，每条尽量不超过 18 个汉字。长解释移入 speakerNotes。
+5. 每页 imagePrompt 都必须包含：与观点直接相关的主体、正在发生的动作、环境、可视化关系或隐喻、文字与主体穿插的构图机会、贯穿全套的连续视觉母题。禁止写成普通左文右图、卡片墙、白底信息框或模板化商务页面。
+6. speakerNotes 必须说明本页如何承接上一页、这一页证明什么、如何引出下一页。可见标题和正文不得出现 DeckSpec、Image 2、API、提示词、PPT 制作流程或内部工作流。`,
+  };
 }
 
 function buildImagePrompt(job, guide, userReferenceCount, referenceMode) {
@@ -414,16 +452,22 @@ function buildImagePrompt(job, guide, userReferenceCount, referenceMode) {
       : referenceMode === "none"
         ? "没有风格图或用户参考图，请只根据内容任务组织中性、清楚的视觉。"
       : `Image 1 是内置“${guide.label}”风格引导图，只学习其视觉语法、构图节奏、配色关系和材质，不复制具体内容。`;
-  return job.textMode === "native"
-    ? buildNativeTextImagePrompt(job, guide, referenceInstruction)
-    : buildIntegratedTextImagePrompt(job, guide, referenceInstruction);
+  if (job.textMode === "native") return buildNativeTextImagePrompt(job, guide, referenceInstruction);
+  const integratedJob = {
+    ...job,
+    deckTitle: job.pageNumber === 1 ? job.deckTitle : "",
+    subtitle: job.pageNumber === 1 ? job.subtitle : "",
+    bullets: job.pageNumber === 1 ? [] : job.bullets.slice(0, 2),
+    layout: "scene-driven",
+  };
+  return buildIntegratedTextImagePrompt(integratedJob, guide, referenceInstruction);
 }
 
 function buildIntegratedTextImagePrompt(job, guide, referenceInstruction) {
   const page = `${String(job.pageNumber).padStart(2, "0")}/${String(job.totalPages).padStart(2, "0")}`;
-  const bullets = job.bullets.slice(0, 3).map((item, index) => `${index + 1}. ${item}`).join("\n") || "（无）";
-  const callouts = job.callouts.map((item) => `${item.label}：${item.value}`).join("；") || "（无）";
-  const table = job.tableRows.length ? job.tableRows.map((row) => row.join(" | ")).join("\n") : "（无）";
+  const bullets = job.bullets.slice(0, 2).map((item, index) => `${index + 1}. ${item}`).join("\n") || "（无）";
+  const callouts = job.callouts.slice(0, 2).map((item) => `${item.label}：${item.value}`).join("；") || "（无）";
+  const table = job.tableRows.length ? job.tableRows.slice(0, 4).map((row) => row.slice(0, 3).join(" | ")).join("\n") : "（无）";
   const archetype = imagePageArchetype(job.layout, job.pageNumber);
   return `画一个完整的 16:9 高端 PowerPoint 成品页面，用于第 ${job.pageNumber} 页。它属于同一套 ${job.totalPages} 页演示中的连续一页，不是独立海报。重点不是生成背景图，而是让文字本身参与构图：标题、关键词、图像、图标、数据和装饰结构必须共同讲清这一页的观点。视觉完成度要达到顶级发布会、竞赛路演或品牌提案主视觉的水准，但不要复制任何特定题材或现成作品。\n\n【整套叙事位置】\n${buildSequenceContext(job)}\n\n【页面文案，必须逐字呈现，不得改写、翻译或虚构】\n演示名称：${job.deckTitle || "（不显示）"}\n主标题：${job.title}\n副标题：${job.subtitle || "（无）"}\n核心句：${job.claim || "（无）"}\n短要点：\n${bullets}\n数据标注：${callouts}\n表格数据：\n${table}\n页码：${page}\n\n【内容与构图任务】\n${job.prompt}\n页面原型：${archetype}\n布局线索：${job.layout || "visual-right"}。\n${referenceInstruction}\n整体审美方向：${guide.direction}。\n\n【图文融合规则】\n1. 主标题是第一视觉元素，占据约 20% 到 30% 的页面，最多两到三行，按语义主动断行。选择一到两个关键词，通过明显的字号、重量、颜色、材质、描边或空间层级形成对比，但所有字仍需清晰可读。\n2. 不要把文字放进一个孤立的白框。让标题与主体轮廓、光影、构图轴线或信息图结构发生关系；短要点可以变成带图标的功能带、边注、标签、数据面板或因果链。文字和视觉必须互相解释。\n3. 至少包含一个与内容直接相关的强主视觉，以及两种辅助信息形态，例如真实摄影或高质量 3D 主体、示意图、数据曲线、图标、局部特写、流程箭头、对比面板。不能只有大字加抽象背景。\n4. 信息丰富但秩序清楚：一眼先读主标题，随后看到核心视觉，再读核心句与最多三个短要点。使用非对称网格、前中后景、尺度反差和精确对齐建立高级感。与整套其他页面保持同一字体家族、色彩系统、图标线宽、页码位置、边距和材质语言，但每页构图应随论证任务变化，不能机械复制同一模板。\n5. 只使用上面提供的文字。没有提供的品牌、统计数字、按钮、网址、免责声明和伪界面文案一律不要生成。禁止从风格参考图中抄写任何文字。除非本页文案明确包含，否则严禁出现 DeckSpec、Image 2、API、Prompt、工作流、生成 PPT、视觉拆解、页面组装等制作过程内容。若文字过多，优先完整呈现主标题、核心句、页码和最短的两个要点，不得自行缩写或编造。\n6. 中文使用清晰、粗壮、现代的简体中文字体效果，笔画完整；数字和英文保持准确。小字号也要高对比，不要出现乱码、随机字符、[object Object] 或无意义占位文字。\n7. 参考图式视觉机制是“巨型标题 + 叙事主视觉 + 模块化证据 + 底部总结带”，只借鉴其图文结合、材质和层级，不要固定使用扑克、红黑金、机械臂或赛事元素；题材、色彩和材质必须服从当前内容与选定风格。\n8. 整张图就是幻灯片本身，满画布、无白边。不要画投影幕、电脑屏幕、PPT 编辑器边框或页面外环境。关键文字与主体必须位于中央 16:9 安全裁切区；最上方和最下方只能放可被裁掉的延展背景。`;
 }
@@ -431,6 +475,35 @@ function buildIntegratedTextImagePrompt(job, guide, referenceInstruction) {
 function buildNativeTextImagePrompt(job, guide, referenceInstruction) {
   const visualSide = job.layout === "visual-left" ? "主体靠左构图" : "主体靠右构图";
   return `画一个用于 PowerPoint 第 ${job.pageNumber}/${job.totalPages} 页的高质量独立主视觉资产。它不是整页 PPT、不是带文字的信息图、不是界面截图，而是一张可以在 PowerPoint 中单独移动、缩放和裁切的视觉图片。\n\n【整套叙事位置】\n${buildSequenceContext(job)}\n\n【当前页视觉任务】\n${job.prompt}\n\n构图要求：${visualSide}，主体完整，轮廓清楚，背景简洁且容易与页面底色融合；为页面另一侧的原生标题、正文、表格和形状留出呼吸空间。\n${referenceInstruction}\n整体审美方向：${guide.direction}。\n\n根据内容选择真实摄影、高质量 3D、科学可视化或简洁概念场景，必须有一个明确主体和清晰视觉焦点。与整套其他页面保持相同的色彩系统、材质、光线方向、镜头语言和图标风格，但当前画面必须服务于这一页独有的论证任务。禁止生成任何可读文字、字母、数字、标志、水印、表格、卡片墙、按钮、伪界面文案、[object Object] 或 PPT 制作流程。不要画投影幕、电脑屏幕、PPT 编辑器边框或页面外环境。`;
+}
+
+function buildIntegratedArtDirection(job) {
+  const role = narrativeRole(job.pageNumber, job.totalPages);
+  const bridge = job.previousSlideTitle
+    ? `把上一页“${job.previousSlideTitle}”留下的认知转化为本页画面的起点`
+    : "用一个瞬间可懂的强场景建立整套演示的核心冲突与期待";
+  const exit = job.nextSlideTitle
+    ? `并用视线、动作、路径或未完成的视觉关系自然引向下一页“${job.nextSlideTitle}”`
+    : "并让最终画面形成明确闭环与可执行的结束感";
+  return [
+    `本页叙事角色：${role}。${bridge}，${exit}。`,
+    "禁止使用左边一列文字、右边一张图片的分屏模板；禁止把正文塞进白色矩形、卡片墙、仪表盘外壳或常规商务信息框。",
+    "标题必须成为场景的一部分：让主体局部遮挡一小部分字、让关键词跨越前景与背景、沿主体轮廓或透视轴排布，或让光线、轨迹、箭头和材质穿过文字；至少使用一种真实的前后景遮挡关系，但不能牺牲可读性。",
+    "画面只保留一个视觉焦点和一条主阅读路径。主标题、核心句、最多两个短要点需要依附于场景中的结构、动作或证据，不得像后贴上去的文本图层。",
+    job.tableRows.length
+      ? "把表格提炼成一个关键对比、趋势或数量关系并嵌入场景，不要绘制电子表格式网格。"
+      : "辅助信息使用少量标注、符号、轨迹或局部数据，不要为了显得丰富而堆叠无关面板。",
+    "整套页面共享同一色彩、字体气质、光线方向、材质、页码位置和连续视觉母题；本页构图必须服务于本页论证，不能机械复制上一页。",
+  ].join("\n");
+}
+
+function narrativeRole(pageNumber, totalPages) {
+  if (pageNumber === 1) return "开场定题，用一个清楚判断建立冲突、价值与观看期待";
+  if (pageNumber === totalPages) return "结论收束，回答第一页并把证据推导为决定或下一步";
+  if (totalPages === 3) return "核心证明，用机制、证据或因果关系支撑第一页的判断";
+  if (pageNumber === 2) return "问题深化，解释为什么旧认知或当前状态不足";
+  if (pageNumber === totalPages - 1) return "综合推导，把前面证据汇聚为方案、影响或选择";
+  return "论证推进，只增加一项完成整套推理不可缺少的新证据或机制";
 }
 
 function buildSequenceContext(job) {
@@ -442,15 +515,16 @@ function buildSequenceContext(job) {
     `当前页：${job.title}`,
     `下一页：${job.nextSlideTitle || "这是收束页，需要解决开场并给出结论或行动"}`,
     "当前页必须承接上一页的已知信息，并自然制造阅读下一页的必要性；不得重复上一页，也不得提前讲完下一页。",
+    ...(job.textMode === "integrated" ? ["本页艺术导演指令：", buildIntegratedArtDirection(job)] : []),
   ].join("\n");
 }
 
 function imagePageArchetype(layout, pageNumber) {
-  if (layout === "cover" || pageNumber === 1) return "封面型：巨型主标题与英雄主体互相穿插，副标题紧贴标题，底部用一条能力或价值总结带收束。";
-  if (layout === "section") return "章节型：单一核心判断占主导，中央场景建立情绪，四周只有少量方向性注释与章节标记。";
-  if (layout === "takeaway") return "结论型：一个强象征画面承载最终判断，核心句成为视觉锚点，底部用两到三个行动或指标收束。";
-  if (layout === "visual-left") return "证据型：左侧主视觉或数据场景占主导，右侧用短要点和数据标注解释证据，形成清楚的阅读路径。";
-  return "叙事型：主标题与核心句建立观点，中央或右侧强主视觉承担故事，周围用模块化证据、图标和底部因果链补足信息。";
+  if (layout === "cover" || pageNumber === 1) return "沉浸式封面：巨型标题与英雄主体发生前后景穿插，关键词成为场景材质或运动轨迹的一部分，副标题和价值句顺着同一构图轴自然落位。";
+  if (layout === "section") return "章节转折：单一核心判断与中央场景共同占据视觉中心，用尺度、光影和留白改变节奏，不使用单独的文字栏。";
+  if (layout === "takeaway") return "结论收束：一个强象征动作承载最终判断，让核心句成为画面锚点，少量行动词沿动作方向或场景结构收束。";
+  if (layout === "visual-left") return "证据叙事：证据场景跨越画面中心，标题与关键数据嵌入主体轮廓、透视线或因果轨迹，形成一条连续阅读路径。";
+  return "场景化论证：以一个正在发生的动作或关系作为主视觉，标题、核心句和少量证据围绕同一视觉焦点穿插排布，避免分栏和卡片拼贴。";
 }
 
 function buildDecompositionPrompt(images) {
@@ -458,6 +532,12 @@ function buildDecompositionPrompt(images) {
     system: "你是演示文稿视觉拆解器。请分析每张生成图的构图，不做内容改写。所有坐标使用 0 到 1 的归一化值。",
     user: `依次分析所附的 ${images.length} 张图片，对应 slideIndex：${images.map((item) => item.slideIndex).join(", ")}。为每张图返回：1) composition，一句话说明构图；2) safeArea，可叠加原生文字的最大低细节矩形；3) parts，最多三个值得独立裁出的主体区域。裁剪框必须在画布内，不能过小，尽量不重叠。parts 的 role 使用 hero、evidence、detail 或 texture。不要把文字区域作为视觉部件。`,
   };
+}
+
+function requestDeckModel(config, prompt, images = []) {
+  return config.provider === "openai"
+    ? requestOpenAIResponses(config, prompt, deckSchema, "deck_spec", images)
+    : requestChatCompletions(config, prompt, images, "deck_spec");
 }
 
 async function requestOpenAIResponses(config, prompt, schema, schemaName, images = []) {

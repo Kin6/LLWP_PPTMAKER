@@ -73,6 +73,7 @@ type ApiMeta = {
   model?: string;
   apiCalls: number;
   keySource?: "session" | "environment" | "none";
+  refinementApplied?: boolean;
 };
 
 export async function testApiConnection(config: ApiConfig) {

@@ -74,7 +74,7 @@ type GenerationSource = {
 };
 
 const defaultApiConfig: ApiConfig = {
-  configVersion: 3,
+  configVersion: 4,
   provider: "openai",
   baseUrl: "https://api.openai.com/v1",
   model: "gpt-5.6-terra",
@@ -84,16 +84,16 @@ const defaultApiConfig: ApiConfig = {
   imageApiKey: "",
   imageModel: "gpt-image-2",
   imageCount: 0,
-  imageQuality: "medium",
-  imageTextMode: "native",
+  imageQuality: "high",
+  imageTextMode: "integrated",
 };
 
 const initialSteps: WorkflowStep[] = [
-  { id: "logic", title: "理清内容逻辑", engine: "Responses · 结构化 DeckSpec", status: "idle", detail: "判断受众、结论、证据和叙事弧" },
+  { id: "logic", title: "策划整套叙事", engine: "双轮 Story Planner", status: "idle", detail: "建立主张、证据链、页间因果和收束动作" },
   { id: "image", title: "生成主题视觉", engine: "GPT Image 2 · 参考图编辑", status: "idle", detail: "用户内容图 + 可选风格引导图" },
-  { id: "decompose", title: "验证视觉对象", engine: "对象优先 / 区域识别", status: "idle", detail: "避免把矩形截图误当成真正可编辑对象" },
-  { id: "assemble", title: "组装页面对象", engine: "整页图文 / 原生对象", status: "idle", detail: "按文字模式组装视觉、表格、图片与内容源" },
-  { id: "export", title: "生成可编辑 PPTX", engine: "PptxGenJS", status: "idle", detail: "输出文本框、表格、图片与讲稿备注" },
+  { id: "decompose", title: "校验成片一致性", engine: "页序 / 风格 / 画幅", status: "idle", detail: "检查页数、叙事承接、视觉语言和 16:9 画幅" },
+  { id: "assemble", title: "组装整页成片", engine: "Image 2 + PPTX", status: "idle", detail: "优先保留完整图文构图和连续视觉节奏" },
+  { id: "export", title: "生成演示 PPTX", engine: "PptxGenJS", status: "idle", detail: "输出完整成片、内容源与讲稿备注" },
 ];
 
 const examplePrompts = [
@@ -106,7 +106,7 @@ const examplePrompts = [
 function App() {
   const [screen, setScreen] = useState<Screen>("home");
   const [prompt, setPrompt] = useState("");
-  const [preset, setPreset] = useState<GenerationPreset>("api-standard");
+  const [preset, setPreset] = useState<GenerationPreset>("api-visual");
   const [attachments, setAttachments] = useState<ParsedAttachment[]>([]);
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const [presetMenuOpen, setPresetMenuOpen] = useState(false);
@@ -239,7 +239,9 @@ function App() {
       setDeck(nextDeck);
       setSelectedSlide(0);
       setApiCalls((value) => value + response.meta.apiCalls);
-      updateStep("logic", "done", `已形成 ${nextDeck.slides.length} 页叙事，发现 ${nextDeck.story.evidenceGaps.length} 个证据缺口`);
+      updateStep("logic", "done", response.meta.refinementApplied
+        ? `双轮策划完成：${nextDeck.slides.length} 页因果叙事，${nextDeck.story.evidenceGaps.length} 个证据缺口`
+        : `已形成 ${nextDeck.slides.length} 页叙事，发现 ${nextDeck.story.evidenceGaps.length} 个证据缺口`);
 
       let nextAssets = sourceUploads;
       if (config.imageEnabled) {
@@ -288,9 +290,9 @@ function App() {
 
         activeStep = "decompose";
         if (config.imageTextMode === "integrated") {
-          updateStep("decompose", "skipped", "整页图是单张画面，不再用矩形截图冒充可编辑对象");
+          updateStep("decompose", "done", `已校验 ${generatedAssets.length} 张连续成片：页数一致、16:9 画幅、统一风格语言`);
         } else {
-          updateStep("decompose", "done", "每页主视觉是独立图片；文字、表格和形状保持原生对象");
+          updateStep("decompose", "done", "原生分层模式已保留独立图片与文字对象");
         }
       } else {
         updateStep("image", "skipped", "图片生成已关闭，保留用户上传图片");
@@ -298,12 +300,12 @@ function App() {
       }
 
       activeStep = "assemble";
-      updateStep("assemble", "running", config.imageTextMode === "integrated" ? "正在组装图文融合页面、独立裁图和内容源" : "正在映射原生文字、表格、图片和讲稿备注");
+      updateStep("assemble", "running", config.imageTextMode === "integrated" ? "正在按原始构图装入整页融合成片" : "正在映射原生文字、表格、图片和讲稿备注");
       setStatus(config.imageEnabled && config.imageTextMode === "integrated" ? "正在组装图文页面并保存可追溯内容源…" : "正在组装可编辑页面对象…");
       await sleep(240);
       setDeck(nextDeck);
       updateStep("assemble", "done", config.imageEnabled && config.imageTextMode === "integrated"
-        ? `${nextDeck.slides.length} 页已组装，融合页保留内容源与独立裁图`
+        ? `${nextDeck.slides.length} 页已组装，完整保留 Image 2 的图文构图`
         : `${nextDeck.slides.length} 页已组装，文字和表格保持原生可编辑`);
 
       activeStep = "export";
@@ -434,6 +436,8 @@ function App() {
     const nextConfig: ApiConfig = {
       ...apiConfig,
       imageEnabled: preset === "api-visual",
+      imageTextMode: preset === "api-visual" ? "integrated" : apiConfig.imageTextMode,
+      imageQuality: preset === "api-visual" ? "high" : apiConfig.imageQuality,
     };
     setMode("ai");
     setApiConfig(nextConfig);
@@ -623,7 +627,7 @@ function App() {
         <section className="artifact-pane">
           <div className="artifact-toolbar">
             <div><span className="eyebrow">ARTIFACT</span><h2>{deck.title}</h2></div>
-            <div className="artifact-meta"><span>{deck.slides.length} 页</span><span>{currentStyle.name}</span><span>可编辑 PPTX</span></div>
+            <div className="artifact-meta"><span>{deck.slides.length} 页</span><span>{currentStyle.name}</span><span>{apiConfig.imageEnabled && apiConfig.imageTextMode === "integrated" ? "融合成片" : "可编辑 PPTX"}</span></div>
           </div>
 
           <div className="story-strip">
@@ -702,7 +706,7 @@ function HomeScreen({
   const imageRef = useRef<HTMLInputElement>(null);
   const tableRef = useRef<HTMLInputElement>(null);
   const pptRef = useRef<HTMLInputElement>(null);
-  const presetLabel = preset === "local" ? "本地" : preset === "api-visual" ? "视觉" : "标准";
+  const presetLabel = preset === "local" ? "本地" : preset === "api-visual" ? "融合成片" : "标准";
 
   return (
     <main className="home-shell">
@@ -790,11 +794,11 @@ function HomeScreen({
                 <button className="preset-trigger" onClick={onTogglePreset}><span>{presetLabel}</span><ChevronDown size={14} /></button>
                 {presetMenuOpen && (
                   <div className="preset-menu" role="menu">
-                    <button className={preset === "api-standard" ? "selected" : ""} onClick={() => onPresetChange("api-standard")}>
-                      <Cloud size={16} /><span><strong>标准</strong><small>API 理清逻辑并生成原生可编辑 PPTX</small></span>{preset === "api-standard" && <Check size={15} />}
-                    </button>
                     <button className={preset === "api-visual" ? "selected" : ""} onClick={() => onPresetChange("api-visual")}>
-                      <ImageIcon size={16} /><span><strong>视觉增强</strong><small>标准流程 + GPT Image 2 + 视觉拆解</small></span>{preset === "api-visual" && <Check size={15} />}
+                      <ImageIcon size={16} /><span><strong>融合成片</strong><small>双轮叙事 + GPT Image 2 整页图文艺术构图</small></span>{preset === "api-visual" && <Check size={15} />}
+                    </button>
+                    <button className={preset === "api-standard" ? "selected" : ""} onClick={() => onPresetChange("api-standard")}>
+                      <Cloud size={16} /><span><strong>标准</strong><small>只调用文本模型，生成原生分层 PPTX</small></span>{preset === "api-standard" && <Check size={15} />}
                     </button>
                     <button className={preset === "local" ? "selected" : ""} onClick={() => onPresetChange("local")}>
                       <MonitorUp size={16} /><span><strong>本地</strong><small>不调用 API，直接组装可编辑演示文稿</small></span>{preset === "local" && <Check size={15} />}
@@ -868,7 +872,7 @@ function ApiSettings({ config, onChange, envKeyConfigured, connection, onTest }:
       <label><span>API Key {envKeyConfigured && <em>环境变量已配置</em>}</span><input type="password" autoComplete="off" value={config.apiKey} onChange={(event) => patch({ apiKey: event.target.value })} placeholder={envKeyConfigured ? "自动使用系统环境变量" : "sk-…"} /></label>
       <div className="api-note">页面 Key 只保存在当前浏览器会话，并由本机服务转发。留空时自动读取系统环境变量或项目根目录 <code>.env.local</code> 中的 <code>OPENAI_API_KEY</code>。</div>
       <label className="toggle-row"><span><strong>Image 2 视觉生成</strong><small>生成整页图或独立主视觉，按页面计费</small></span><input type="checkbox" checked={config.imageEnabled} onChange={(event) => patch({ imageEnabled: event.target.checked })} /></label>
-      {config.imageEnabled && <div className="image-config"><label className="wide"><span>图片 API Base URL</span><input value={config.imageBaseUrl || ""} onChange={(event) => patch({ imageBaseUrl: event.target.value })} /></label><label className="wide"><span>图片 API Key（留空则复用上方 Key）</span><input type="password" autoComplete="off" value={config.imageApiKey || ""} onChange={(event) => patch({ imageApiKey: event.target.value })} placeholder="可与文本服务分开" /></label><label className="wide"><span>交付方式</span><select value={config.imageTextMode} onChange={(event) => patch({ imageTextMode: event.target.value as ApiConfig["imageTextMode"] })}><option value="native">原生可拆版（推荐交付）</option><option value="integrated">图文融合整页图（视觉优先）</option></select><small className="field-hint">原生可拆版使用独立图片、文字框、表格和形状；整页图中的画面文字不可逐字编辑。</small></label><label><span>图片模型</span><input value={config.imageModel} onChange={(event) => patch({ imageModel: event.target.value })} /></label><label><span>生图页数</span><select value={config.imageCount} onChange={(event) => patch({ imageCount: clamp(Number(event.target.value), 0, 50) })}><option value={0}>跟随 PPT 总页数</option>{Array.from({ length: 50 }, (_, index) => index + 1).map((count) => <option key={count} value={count}>{count} 页</option>)}</select></label><label><span>质量</span><select value={config.imageQuality} onChange={(event) => patch({ imageQuality: event.target.value as ApiConfig["imageQuality"] })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label></div>}
+      {config.imageEnabled && <div className="image-config"><label className="wide"><span>图片 API Base URL</span><input value={config.imageBaseUrl || ""} onChange={(event) => patch({ imageBaseUrl: event.target.value })} /></label><label className="wide"><span>图片 API Key（留空则复用上方 Key）</span><input type="password" autoComplete="off" value={config.imageApiKey || ""} onChange={(event) => patch({ imageApiKey: event.target.value })} placeholder="可与文本服务分开" /></label><label className="wide"><span>成片模式</span><select value={config.imageTextMode} onChange={(event) => patch({ imageTextMode: event.target.value as ApiConfig["imageTextMode"] })}><option value="integrated">整页图文融合（推荐成片）</option><option value="native">原生分层（编辑优先）</option></select><small className="field-hint">整页融合让文字直接参与画面构图；原生分层便于编辑，但文字与图片的视觉融合度会降低。</small></label><label><span>图片模型</span><input value={config.imageModel} onChange={(event) => patch({ imageModel: event.target.value })} /></label><label><span>生图页数</span><select value={config.imageCount} onChange={(event) => patch({ imageCount: clamp(Number(event.target.value), 0, 50) })}><option value={0}>跟随 PPT 总页数</option>{Array.from({ length: 50 }, (_, index) => index + 1).map((count) => <option key={count} value={count}>{count} 页</option>)}</select></label><label><span>质量</span><select value={config.imageQuality} onChange={(event) => patch({ imageQuality: event.target.value as ApiConfig["imageQuality"] })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label></div>}
       <button className={`connection-button ${connection}`} onClick={onTest} disabled={connection === "testing"}>{connection === "testing" ? <Loader2 className="spin" size={14} /> : <Cloud size={14} />}{connection === "success" ? "连接正常" : connection === "error" ? "重试连接" : "测试连接"}</button>
     </section>
   );
@@ -941,9 +945,9 @@ function createImageJobs(deck: NotebookDeckSpec, count: number, textMode: ApiCon
     title: slide.title,
     subtitle: slide.subtitle || "",
     claim: slide.claim || "",
-    bullets: (slide.bullets || []).slice(0, 4),
-    callouts: (slide.callouts || []).slice(0, 3),
-    tableRows: (slide.tableRows || []).slice(0, 5).map((row) => row.slice(0, 4)),
+    bullets: (slide.bullets || []).slice(0, textMode === "integrated" ? 2 : 4),
+    callouts: (slide.callouts || []).slice(0, textMode === "integrated" ? 2 : 3),
+    tableRows: (slide.tableRows || []).slice(0, textMode === "integrated" ? 4 : 5).map((row) => row.slice(0, textMode === "integrated" ? 3 : 4)),
     pageNumber: slideIndex + 1,
     totalPages: deck.slides.length,
     textMode,
@@ -1037,7 +1041,11 @@ function loadApiConfig(): ApiConfig {
     if ((parsed.configVersion || 0) < 3) {
       parsed.imageTextMode = "native";
     }
-    return { ...defaultApiConfig, ...parsed, configVersion: 3 };
+    if ((parsed.configVersion || 0) < 4) {
+      parsed.imageTextMode = "integrated";
+      parsed.imageQuality = "high";
+    }
+    return { ...defaultApiConfig, ...parsed, configVersion: 4 };
   } catch {
     return defaultApiConfig;
   }
