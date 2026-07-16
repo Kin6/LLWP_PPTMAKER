@@ -35,7 +35,9 @@ export async function exportNotebookDeck(deck: NotebookDeckSpec, assets: Generat
   const cache = new Map<string, string>();
   for (const [index, item] of deck.slides.entries()) {
     const layout = item.layout || (index === 0 ? "cover" : "two-column");
-    const slide = layout === "cover" || layout === "section" ? pptx.addSlide() : pptx.addSlide("CONTENT");
+    const primaryAsset = item.imageIndex == null ? undefined : assets.find((asset) => asset.index === item.imageIndex);
+    const fullSlideVisual = item.visualMode === "full-slide" && primaryAsset?.kind === "generated";
+    const slide = (fullSlideVisual || layout === "cover" || layout === "section") ? pptx.addSlide() : pptx.addSlide("CONTENT");
     const partData = await getVisualParts(item, assets, cache);
     const primary = await getPrimaryImage(item, assets, cache);
     slide.addNotes([
@@ -47,13 +49,96 @@ export async function exportNotebookDeck(deck: NotebookDeckSpec, assets: Generat
       ...partData.map((part) => `- 独立图片对象：${part.asset.filename} (${part.role})`),
     ].filter(Boolean).join("\n"));
 
-    if (layout === "cover") addCover(pptx, slide, item, primary, partData, index);
+    if (fullSlideVisual && primary) addFullSlideVisual(pptx, slide, item, primary, partData, index, deck.theme);
+    else if (layout === "cover") addCover(pptx, slide, item, primary, partData, index);
     else if (layout === "section") addSection(pptx, slide, item, index);
     else addContent(pptx, slide, item, primary, partData, index, layout === "visual-left" ? "left" : "right");
   }
 
   addAppendix(pptx, deck, assets);
   await pptx.writeFile({ fileName: `${sanitizeFileName(deck.title)}.pptx` });
+}
+
+function addFullSlideVisual(
+  pptx: any,
+  slide: any,
+  item: NotebookSlideSpec,
+  imageData: string,
+  parts: ResolvedPart[],
+  index: number,
+  theme?: NotebookDeckSpec["theme"],
+) {
+  const slideW = 13.333;
+  const slideH = 7.5;
+  slide.addImage({ data: imageData, x: 0, y: 0, w: slideW, h: slideH, sizing: { type: "cover", w: slideW, h: slideH } });
+  parts.forEach((part) => {
+    slide.addImage({
+      data: part.data,
+      x: part.x * slideW,
+      y: part.y * slideH,
+      w: Math.max(0.6, Math.min(part.w * slideW, slideW - part.x * slideW)),
+      h: Math.max(0.5, Math.min(part.h * slideH, slideH - part.y * slideH)),
+    });
+  });
+
+  const safe = item.safeArea || defaultSafeArea(item.layout);
+  const panelX = safe.x * slideW;
+  const panelY = safe.y * slideH;
+  const panelW = safe.w * slideW;
+  const panelH = safe.h * slideH;
+  const dark = theme === "dark-executive" || item.layout === "cover" || item.layout === "section";
+  const textColor = dark ? colors.white : colors.ink;
+  const mutedColor = dark ? "D6DDE1" : colors.muted;
+  const panelColor = dark ? colors.ink : colors.paper;
+  const pad = Math.min(0.28, panelW * 0.05);
+  const innerX = panelX + pad;
+  const innerW = panelW - pad * 2;
+
+  slide.addShape(pptx.ShapeType.rect, {
+    x: panelX, y: panelY, w: panelW, h: panelH,
+    fill: { color: panelColor, transparency: dark ? 20 : 12 },
+    line: { color: panelColor, transparency: 100 },
+  });
+  slide.addText(String(index + 1).padStart(2, "0"), {
+    x: innerX, y: panelY + 0.2, w: 0.52, h: 0.22,
+    fontSize: 10, bold: true, color: dark ? colors.lime : colors.blue, margin: 0,
+  });
+  slide.addText(item.title, {
+    x: innerX, y: panelY + 0.55, w: innerW, h: Math.min(1.08, panelH * 0.22),
+    fontFace: "Microsoft YaHei", fontSize: item.layout === "section" ? 29 : 24,
+    bold: true, color: textColor, fit: "shrink", margin: 0,
+  });
+  let cursorY = panelY + Math.min(1.76, panelH * 0.34);
+  if (item.subtitle) {
+    slide.addText(item.subtitle, { x: innerX, y: cursorY, w: innerW, h: 0.34, fontSize: 10.5, color: mutedColor, fit: "shrink", margin: 0 });
+    cursorY += 0.46;
+  }
+  if (item.claim) {
+    slide.addText(item.claim, { x: innerX, y: cursorY, w: innerW, h: 0.52, fontSize: 14.5, bold: true, color: textColor, fit: "shrink", margin: 0 });
+    cursorY += 0.68;
+  }
+  const bulletRoom = Math.max(0.45, panelY + panelH - cursorY - 0.55);
+  const bulletStep = Math.min(0.44, bulletRoom / Math.max(1, Math.min(5, item.bullets?.length || 0)));
+  (item.bullets || []).slice(0, 5).forEach((bullet, bulletIndex) => {
+    slide.addText(bullet, {
+      x: innerX, y: cursorY + bulletIndex * bulletStep, w: innerW, h: Math.max(0.24, bulletStep - 0.05),
+      fontSize: 10.5, color: textColor, bullet: { type: "bullet" }, fit: "shrink", margin: 0.02,
+    });
+  });
+
+  if (item.tableRows?.length) {
+    const tableX = safe.x < 0.5 ? 7.15 : 0.68;
+    addTable(slide, item.tableRows, tableX, 1.72, 5.5, 4.25);
+  }
+  slide.addText("LLWP PPTMAKER · Image 2 full-slide art + native editable text", {
+    x: 0.5, y: 7.12, w: 5.6, h: 0.16, fontSize: 6.5, color: dark ? "C6CFD3" : colors.muted, margin: 0,
+  });
+}
+
+function defaultSafeArea(layout: NotebookSlideSpec["layout"]) {
+  if (layout === "visual-left") return { x: 0.53, y: 0.1, w: 0.41, h: 0.8 };
+  if (layout === "section") return { x: 0.12, y: 0.2, w: 0.76, h: 0.56 };
+  return { x: 0.06, y: 0.1, w: 0.41, h: 0.8 };
 }
 
 function addCover(

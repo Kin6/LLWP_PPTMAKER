@@ -92,6 +92,10 @@ const server = http.createServer(async (req, res) => {
     for await (const chunk of req) body += chunk;
     const parsed = JSON.parse(body || "{}");
     const text = JSON.stringify(parsed?.messages || []);
+    if (parsed.model === "mock-timeout" && text.includes("依次分析所附")) {
+      res.statusCode = 504;
+      return res.end(JSON.stringify({ error: { message: "Model service timed out" } }));
+    }
     if (text.includes("FORCE_EMPTY_DECK") && parsed.messages.length <= 2) {
       return res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: [{ type: "text", text: JSON.stringify({ title: "empty", slides: [] }) }] } }] }));
     }

@@ -376,7 +376,12 @@ function buildImagePrompt(job, guide, userReferenceCount, referenceMode) {
       : referenceMode === "none"
         ? "没有风格图或用户参考图，请只根据内容任务组织中性、清楚的视觉。"
       : `Image 1 是内置“${guide.label}”风格引导图，只学习其视觉语法、构图节奏、配色关系和材质，不复制具体内容。`;
-  return `画一个适合第 ${job.slideIndex + 1} 页的 16:9 高端演示视觉。\n内容任务：${job.prompt}\n页面布局：${job.layout || "visual-right"}。\n${referenceInstruction}\n整体方向：${guide.direction}。画面必须是可拆分的演示视觉素材，主体清楚，最多 3 个主要视觉区域。禁止任何文字、字母、数字、标志、水印和伪界面文案。为后续叠加原生 PowerPoint 标题与正文保留一块干净、低细节、高对比的负空间。`;
+  const textZone = job.layout === "visual-left"
+    ? "右侧 40% 是原生文字安全区，左侧承担主要视觉冲击"
+    : job.layout === "section"
+      ? "中央保留宽阔的原生标题安全区，视觉从四周建立氛围与空间"
+      : "左侧 40% 是原生文字安全区，右侧承担主要视觉冲击";
+  return `画一个完整的 16:9 高端 PowerPoint 成品页面视觉底稿，用于第 ${job.slideIndex + 1} 页。它必须看起来像顶级设计师已经完成整页构图，而不是一张插图、背景图、局部素材或常规模板。\n\n内容任务：\n${job.prompt}\n\n页面结构：${textZone}；布局类型为 ${job.layout || "visual-right"}。\n${referenceInstruction}\n整体审美方向：${guide.direction}。\n\n请大胆发挥：建立强烈主视觉、清楚的信息层级、非对称网格、富有张力的尺度对比、精确留白和具有叙事性的构图。根据内容主动选择摄影、3D、信息图、数据形态、材质或空间场景，不要默认生成软件界面、卡片墙或平庸商务模板。整页都要被设计，视觉可以跨越画布、裁切出界、形成前后景和大胆构图。所有关键主体与文字安全区必须位于画面中央的 16:9 安全裁切范围内，允许最上方和最下方仅出现可被裁掉的延展背景。\n\n这是给原生 PowerPoint 文字叠加的视觉底稿：禁止生成任何可读文字、字母、数字、标志、水印和伪界面文案，但文字安全区本身也必须像成品页面的一部分，保持干净、低细节、对比明确。输出一张完整满画布的幻灯片，不要留白边，不要画投影幕、电脑屏幕、PPT 编辑器边框或页面外环境。`;
 }
 
 function buildDecompositionPrompt(images) {
@@ -387,6 +392,7 @@ function buildDecompositionPrompt(images) {
 }
 
 async function requestOpenAIResponses(config, prompt, schema, schemaName, images = []) {
+  const timeoutMs = schemaName === "image_decomposition" ? 60_000 : 150_000;
   const userContent = [{ type: "input_text", text: prompt.user }];
   images.forEach((image) => {
     userContent.push({ type: "input_text", text: `附件：${image.name}${image.summary ? `；${image.summary}` : ""}` });
@@ -403,13 +409,14 @@ async function requestOpenAIResponses(config, prompt, schema, schemaName, images
       ],
       text: { format: { type: "json_schema", name: schemaName, strict: true, schema } },
     }),
-  }, 150_000);
+  }, timeoutMs);
   const payload = await readJson(response);
   if (!response.ok) throw upstreamError(response.status, payload);
   return { value: parseModelJson(extractResponseText(payload)), apiCalls: 1 };
 }
 
 async function requestChatCompletions(config, prompt, images = [], schemaName = "deck_spec") {
+  const timeoutMs = schemaName === "image_decomposition" ? 60_000 : 150_000;
   const userContent = images.length
     ? [{ type: "text", text: prompt.user }, ...images.flatMap((image) => [
         { type: "text", text: `附件：${image.name}${image.summary ? `；${image.summary}` : ""}` },
@@ -424,13 +431,13 @@ async function requestChatCompletions(config, prompt, images = [], schemaName = 
   };
   let response = await fetchWithTimeout(`${config.baseUrl}/chat/completions`, {
     method: "POST", headers: { ...authHeaders(config), "Content-Type": "application/json" }, body: JSON.stringify(body),
-  }, 150_000);
+  }, timeoutMs);
   let payload = await readJson(response);
   if (!response.ok && response.status === 400) {
     delete body.response_format;
     response = await fetchWithTimeout(`${config.baseUrl}/chat/completions`, {
       method: "POST", headers: { ...authHeaders(config), "Content-Type": "application/json" }, body: JSON.stringify(body),
-    }, 150_000);
+    }, timeoutMs);
     payload = await readJson(response);
   }
   if (!response.ok) throw upstreamError(response.status, payload);
@@ -448,7 +455,7 @@ async function requestChatCompletions(config, prompt, images = [], schemaName = 
   const repairBody = { ...body, messages: repairMessages, temperature: 0 };
   response = await fetchWithTimeout(`${config.baseUrl}/chat/completions`, {
     method: "POST", headers: { ...authHeaders(config), "Content-Type": "application/json" }, body: JSON.stringify(repairBody),
-  }, 150_000);
+  }, timeoutMs);
   payload = await readJson(response);
   if (!response.ok) throw upstreamError(response.status, payload);
   apiCalls += 1;

@@ -325,6 +325,18 @@ h1, h2, h3, p { margin: 0; }
   box-shadow: var(--shadow);
 }
 .slide-canvas.dark { background: #111820; color: white; }
+.slide-background-visual { position: absolute; z-index: 0; inset: 0; width: 100%; height: 100%; display: block; object-fit: cover; }
+.full-slide-art .slide-copy { padding: 2.4%; overflow: hidden; }
+.full-slide-art.light .slide-copy { background: rgba(251, 251, 248, 0.88); box-shadow: 0 12px 34px rgba(17, 24, 32, 0.12); }
+.full-slide-art.dark .slide-copy { background: rgba(17, 24, 32, 0.82); box-shadow: 0 12px 34px rgba(0, 0, 0, 0.2); }
+.full-slide-art .slide-copy h3 { font-size: clamp(12px, 1.4vw, 22px); }
+.full-slide-art .slide-subtitle { font-size: clamp(6px, 0.62vw, 9px); }
+.full-slide-art .slide-claim { margin-top: 4%; font-size: clamp(7px, 0.76vw, 11px); }
+.full-slide-art .slide-copy ul { gap: clamp(2px, 0.35vw, 5px); margin-top: 3.5%; font-size: clamp(6px, 0.62vw, 9px); line-height: 1.34; }
+.full-slide-table { position: absolute; z-index: 3; overflow: hidden; border: 1px solid rgba(220, 224, 226, 0.82); box-shadow: 0 12px 32px rgba(17, 24, 32, 0.14); }
+.full-slide-table table { width: 100%; height: 100%; border-collapse: collapse; table-layout: fixed; background: rgba(251, 251, 248, 0.94); font-size: clamp(5px, 0.55vw, 8px); }
+.full-slide-table th, .full-slide-table td { padding: 2%; border: 1px solid #dfe2e4; overflow: hidden; text-overflow: ellipsis; }
+.full-slide-table th { background: #e9effa; color: #1a3f78; }
 .slide-number { position: absolute; z-index: 4; left: 5.2%; top: 6%; color: var(--blue); font-size: clamp(7px, 0.75vw, 11px); font-weight: 800; }
 .dark .slide-number { color: var(--lime); }
 .slide-copy { position: absolute; z-index: 2; left: 5.2%; top: 20%; width: 45%; max-height: 68%; overflow: hidden; }
