@@ -9,7 +9,6 @@ import {
   ChevronRight,
   Circle,
   Cloud,
-  Crop,
   FileText,
   FileSpreadsheet,
   FolderOpen,
@@ -32,16 +31,13 @@ import {
 import { parseAttachment, type ParsedAttachment } from "./lib/attachmentParser";
 import { exportNotebookDeck } from "./lib/exportDeck";
 import { buildLocalDeck, parseTable } from "./lib/localPlanner";
-import { buildLocalDecompositions } from "./lib/visualDecomposition";
 import {
-  decomposeAiImages,
   generateAiDeck,
   generateAiImages,
   testApiConnection,
   type ApiConfig,
   type ApiProvider,
   type ApiSourceImage,
-  type DecompositionResult,
   type ImageJob,
 } from "./lib/apiClient";
 import {
@@ -49,7 +45,6 @@ import {
   type GeneratedAsset,
   type NotebookDeckSpec,
   type NotebookSlideSpec,
-  type NormalizedRect,
 } from "./types";
 
 type Mode = "local" | "ai";
@@ -79,6 +74,7 @@ type GenerationSource = {
 };
 
 const defaultApiConfig: ApiConfig = {
+  configVersion: 3,
   provider: "openai",
   baseUrl: "https://api.openai.com/v1",
   model: "gpt-5.6-terra",
@@ -87,30 +83,18 @@ const defaultApiConfig: ApiConfig = {
   imageBaseUrl: "https://api.openai.com/v1",
   imageApiKey: "",
   imageModel: "gpt-image-2",
-  imageCount: 2,
+  imageCount: 0,
   imageQuality: "medium",
-  imageTextMode: "integrated",
+  imageTextMode: "native",
 };
 
 const initialSteps: WorkflowStep[] = [
   { id: "logic", title: "理清内容逻辑", engine: "Responses · 结构化 DeckSpec", status: "idle", detail: "判断受众、结论、证据和叙事弧" },
   { id: "image", title: "生成主题视觉", engine: "GPT Image 2 · 参考图编辑", status: "idle", detail: "用户内容图 + 可选风格引导图" },
-  { id: "decompose", title: "拆解视觉部件", engine: "视觉模型 / 本地 Canvas", status: "idle", detail: "识别安全区并裁出独立图片对象，超时自动降级" },
+  { id: "decompose", title: "验证视觉对象", engine: "对象优先 / 区域识别", status: "idle", detail: "避免把矩形截图误当成真正可编辑对象" },
   { id: "assemble", title: "组装页面对象", engine: "整页图文 / 原生对象", status: "idle", detail: "按文字模式组装视觉、表格、图片与内容源" },
   { id: "export", title: "生成可编辑 PPTX", engine: "PptxGenJS", status: "idle", detail: "输出文本框、表格、图片与讲稿备注" },
 ];
-
-const sampleText = `我们希望建立一个真正可交付的 AI PPT 制作器。它必须先理解受众要做什么决定，再把零散材料整理成核心结论、证据链和行动建议。
-
-视觉质量不能只依赖固定模板。系统可以让图像模型参考用户图片，同时从内置风格知识库中选择一张高质量引导图，统一构图、色彩和材质。
-
-最终交付必须是可编辑 PPTX：标题、正文、表格和图片都应保持为独立对象，不能把整页内容压成一张图。`;
-
-const sampleTable = `阶段,输入,处理,输出
-内容规划,文字与表格,受众判断与论证链,DeckSpec
-主题视觉,文字与用户图片,Image 2 多参考图编辑,16:9 主视觉
-视觉拆解,生成图,安全区与主体区域识别,独立裁图
-页面组装,DeckSpec 与视觉部件,原生对象排版,可编辑 PPTX`;
 
 const examplePrompts = [
   "设计带预测数据的投资者推介材料",
@@ -129,20 +113,20 @@ function App() {
   const [homeMessage, setHomeMessage] = useState("");
   const [mode, setMode] = useState<Mode>("local");
   const [sourceTab, setSourceTab] = useState<SourceTab>("text");
-  const [topic, setTopic] = useState("AI PPT 五阶段工作流");
+  const [topic, setTopic] = useState("新建演示文稿");
   const [audience, setAudience] = useState("");
   const [slideCount, setSlideCount] = useState(7);
-  const [textInput, setTextInput] = useState(sampleText);
-  const [tableInput, setTableInput] = useState(sampleTable);
+  const [textInput, setTextInput] = useState("");
+  const [tableInput, setTableInput] = useState("");
   const [imageBrief, setImageBrief] = useState("保留上传图片的主体身份；让核心文字与主视觉相互解释，形成完整页面构图。");
   const [styleId, setStyleId] = useState("blank");
   const [assets, setAssets] = useState<GeneratedAsset[]>([]);
   const [deck, setDeck] = useState<NotebookDeckSpec>(() => buildLocalDeck({
-    topic: "AI PPT 五阶段工作流",
+    topic: "新建演示文稿",
     audience: "通用受众",
     slideCount: 7,
-    textInput: sampleText,
-    tableInput: sampleTable,
+    textInput: "",
+    tableInput: "",
     imageBrief: "专业、克制，让文字与视觉相互配合。",
     styleId: "blank",
     assets: [],
@@ -164,7 +148,6 @@ function App() {
     || styleProfiles.find((style) => style.id === "product-calm")!;
   const uploadedAssets = useMemo(() => assets.filter((asset) => asset.kind === "upload"), [assets]);
   const generatedCount = assets.filter((asset) => asset.kind === "generated").length;
-  const croppedCount = assets.filter((asset) => asset.kind === "crop").length;
 
   useEffect(() => {
     sessionStorage.setItem("llwp-ppt-api-config", JSON.stringify(apiConfig));
@@ -263,8 +246,12 @@ function App() {
         activeStep = "image";
         updateStep("image", "running", source.styleId === "blank" ? "未套用风格图，正在按内容生成视觉" : `正在用 ${sourceStyle.name} 引导 GPT Image 2`);
         setStatus(source.styleId === "blank" ? "正在按内容和用户参考图生成视觉，不套用内置风格…" : "正在将内置风格图与用户内容图一起送入 Image 2…");
-        const jobs = createImageJobs(nextDeck, config.imageCount, config.imageTextMode);
+        const requestedImageCount = config.imageCount === 0 ? nextDeck.slides.length : Math.min(config.imageCount, nextDeck.slides.length);
+        const jobs = createImageJobs(nextDeck, requestedImageCount, config.imageTextMode);
         const imageResponse = await generateAiImages(config, jobs, sourceImages, source.styleId);
+        if (imageResponse.images.length !== jobs.length) {
+          throw new Error(`图片服务只返回 ${imageResponse.images.length}/${jobs.length} 张，已停止导出，避免生成页数不完整的 PPTX。`);
+        }
         const slideImages = await Promise.all(imageResponse.images.map(normalizeGeneratedSlideImage));
         const startIndex = maxAssetIndex(nextAssets) + 1;
         const generatedAssets: GeneratedAsset[] = slideImages.map((image, index) => ({
@@ -276,7 +263,9 @@ function App() {
           kind: "generated",
           width: image.width,
           height: image.height,
-          summary: `Image 2 为第 ${image.slideIndex + 1} 页生成的完整页面视觉底稿`,
+          summary: config.imageTextMode === "integrated"
+            ? `Image 2 为第 ${image.slideIndex + 1} 页生成的整页图文画面`
+            : `Image 2 为第 ${image.slideIndex + 1} 页生成的独立主视觉资产`,
         }));
         nextAssets = [...nextAssets, ...generatedAssets];
         nextDeck = {
@@ -286,39 +275,23 @@ function App() {
             return position >= 0 ? {
               ...slide,
               imageIndex: generatedAssets[position].index,
-              visualMode: config.imageTextMode === "integrated" ? "full-slide-text" : "full-slide",
+              visualMode: config.imageTextMode === "integrated" ? "full-slide-text" : "panel",
             } : slide;
           }),
         };
         setAssets(nextAssets);
         setDeck(nextDeck);
         setApiCalls((value) => value + imageResponse.meta.apiCalls);
-        updateStep("image", "done", `生成 ${generatedAssets.length} 张完整 16:9 页面视觉底稿`);
+        updateStep("image", "done", config.imageTextMode === "integrated"
+          ? `按要求生成 ${generatedAssets.length}/${requestedImageCount} 张连续整页图文画面`
+          : `按要求生成 ${generatedAssets.length}/${requestedImageCount} 张独立主视觉资产`);
 
         activeStep = "decompose";
-        updateStep("decompose", "running", "视觉模型正在识别文字安全区和主体区域");
-        setStatus("正在压缩视觉分析副本，并识别文字安全区与可移动部件…");
-        const visionInputs = await Promise.all(slideImages.map(prepareImageForVision));
-        let decompositions: DecompositionResult[];
-        let decompositionApiCalls = 0;
-        let fallbackDetail = "";
-        try {
-          const decompositionResponse = await decomposeAiImages(config, visionInputs);
-          decompositions = decompositionResponse.decompositions;
-          decompositionApiCalls = decompositionResponse.meta.apiCalls;
-        } catch (error) {
-          decompositions = buildLocalDecompositions(nextDeck, slideImages);
-          fallbackDetail = error instanceof Error ? error.message : "视觉模型不可用";
+        if (config.imageTextMode === "integrated") {
+          updateStep("decompose", "skipped", "整页图是单张画面，不再用矩形截图冒充可编辑对象");
+        } else {
+          updateStep("decompose", "done", "每页主视觉是独立图片；文字、表格和形状保持原生对象");
         }
-        const cropResult = await createCropAssets(generatedAssets, decompositions, nextAssets);
-        nextAssets = cropResult.assets;
-        nextDeck = applyDecomposition(nextDeck, decompositions, cropResult.partsBySlide);
-        setAssets(nextAssets);
-        setDeck(nextDeck);
-        setApiCalls((value) => value + decompositionApiCalls);
-        updateStep("decompose", "done", fallbackDetail
-          ? `视觉模型未及时返回，已用本地 Canvas 拆出 ${cropResult.cropCount} 个对象`
-          : `视觉模型分析完成，已拆出 ${cropResult.cropCount} 个独立图片对象`);
       } else {
         updateStep("image", "skipped", "图片生成已关闭，保留用户上传图片");
         updateStep("decompose", "skipped", "没有生成图需要拆解");
@@ -426,7 +399,7 @@ function App() {
     const attachmentText = attachments.map((attachment) => attachment.extractedText).filter(Boolean).join("\n\n");
     const attachmentTables = attachments.map((attachment) => attachment.tableText).filter(Boolean).join("\n");
     const combinedText = [prompt.trim(), attachmentText].filter(Boolean).join("\n\n");
-    const combinedTable = attachmentTables || tableInput;
+    const combinedTable = attachmentTables;
     if (!combinedText && !combinedTable && !uploadedAssets.length) {
       setHomeMessage("请描述演示主题，或先添加一份材料。");
       return;
@@ -631,7 +604,6 @@ function App() {
           <div className="run-summary">
             <span><BrainCircuit size={14} />{apiCalls} 次 API 调用</span>
             <span><ImageIcon size={14} />{generatedCount} 张生成图</span>
-            <span><Crop size={14} />{croppedCount} 个裁图</span>
           </div>
 
           <div className="run-area">
@@ -895,8 +867,8 @@ function ApiSettings({ config, onChange, envKeyConfigured, connection, onTest }:
       <label><span>文本 / 视觉模型</span><input value={config.model} onChange={(event) => patch({ model: event.target.value })} placeholder="gpt-5.6-terra" /></label>
       <label><span>API Key {envKeyConfigured && <em>环境变量已配置</em>}</span><input type="password" autoComplete="off" value={config.apiKey} onChange={(event) => patch({ apiKey: event.target.value })} placeholder={envKeyConfigured ? "自动使用系统环境变量" : "sk-…"} /></label>
       <div className="api-note">页面 Key 只保存在当前浏览器会话，并由本机服务转发。留空时自动读取系统环境变量或项目根目录 <code>.env.local</code> 中的 <code>OPENAI_API_KEY</code>。</div>
-      <label className="toggle-row"><span><strong>Image 2 完整页面</strong><small>生成整页视觉底稿，按页面计费</small></span><input type="checkbox" checked={config.imageEnabled} onChange={(event) => patch({ imageEnabled: event.target.checked })} /></label>
-      {config.imageEnabled && <div className="image-config"><label className="wide"><span>图片 API Base URL</span><input value={config.imageBaseUrl || ""} onChange={(event) => patch({ imageBaseUrl: event.target.value })} /></label><label className="wide"><span>图片 API Key（留空则复用上方 Key）</span><input type="password" autoComplete="off" value={config.imageApiKey || ""} onChange={(event) => patch({ imageApiKey: event.target.value })} placeholder="可与文本服务分开" /></label><label className="wide"><span>文字呈现</span><select value={config.imageTextMode} onChange={(event) => patch({ imageTextMode: event.target.value as ApiConfig["imageTextMode"] })}><option value="integrated">图文融合（视觉优先）</option><option value="native">原生文字（编辑优先）</option></select><small className="field-hint">图文融合由 Image 2 设计文字与视觉；原生文字可逐字编辑。</small></label><label><span>图片模型</span><input value={config.imageModel} onChange={(event) => patch({ imageModel: event.target.value })} /></label><label><span>视觉页数</span><input type="number" min={1} max={4} value={config.imageCount} onChange={(event) => patch({ imageCount: clamp(Number(event.target.value), 1, 4) })} /></label><label><span>质量</span><select value={config.imageQuality} onChange={(event) => patch({ imageQuality: event.target.value as ApiConfig["imageQuality"] })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label></div>}
+      <label className="toggle-row"><span><strong>Image 2 视觉生成</strong><small>生成整页图或独立主视觉，按页面计费</small></span><input type="checkbox" checked={config.imageEnabled} onChange={(event) => patch({ imageEnabled: event.target.checked })} /></label>
+      {config.imageEnabled && <div className="image-config"><label className="wide"><span>图片 API Base URL</span><input value={config.imageBaseUrl || ""} onChange={(event) => patch({ imageBaseUrl: event.target.value })} /></label><label className="wide"><span>图片 API Key（留空则复用上方 Key）</span><input type="password" autoComplete="off" value={config.imageApiKey || ""} onChange={(event) => patch({ imageApiKey: event.target.value })} placeholder="可与文本服务分开" /></label><label className="wide"><span>交付方式</span><select value={config.imageTextMode} onChange={(event) => patch({ imageTextMode: event.target.value as ApiConfig["imageTextMode"] })}><option value="native">原生可拆版（推荐交付）</option><option value="integrated">图文融合整页图（视觉优先）</option></select><small className="field-hint">原生可拆版使用独立图片、文字框、表格和形状；整页图中的画面文字不可逐字编辑。</small></label><label><span>图片模型</span><input value={config.imageModel} onChange={(event) => patch({ imageModel: event.target.value })} /></label><label><span>生图页数</span><select value={config.imageCount} onChange={(event) => patch({ imageCount: clamp(Number(event.target.value), 0, 50) })}><option value={0}>跟随 PPT 总页数</option>{Array.from({ length: 50 }, (_, index) => index + 1).map((count) => <option key={count} value={count}>{count} 页</option>)}</select></label><label><span>质量</span><select value={config.imageQuality} onChange={(event) => patch({ imageQuality: event.target.value as ApiConfig["imageQuality"] })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label></div>}
       <button className={`connection-button ${connection}`} onClick={onTest} disabled={connection === "testing"}>{connection === "testing" ? <Loader2 className="spin" size={14} /> : <Cloud size={14} />}{connection === "success" ? "连接正常" : connection === "error" ? "重试连接" : "测试连接"}</button>
     </section>
   );
@@ -956,9 +928,7 @@ function SlideEditor({ slide, onChange }: { slide: NotebookSlideSpec; onChange: 
 }
 
 function createImageJobs(deck: NotebookDeckSpec, count: number, textMode: ApiConfig["imageTextMode"]): ImageJob[] {
-  const candidates = deck.slides.map((slide, slideIndex) => ({ slide, slideIndex })).filter(({ slide }) => Boolean(slide.imagePrompt || slide.visualBrief));
-  const ordered = [...candidates.filter(({ slide }) => slide.layout === "cover"), ...candidates.filter(({ slide }) => slide.layout !== "cover")];
-  return ordered.slice(0, clamp(count, 1, 4)).map(({ slide, slideIndex }) => ({
+  return deck.slides.slice(0, clamp(count, 1, 50)).map((slide, slideIndex) => ({
     slideIndex,
     prompt: [
       `页面观点：${slide.title}`,
@@ -977,6 +947,11 @@ function createImageJobs(deck: NotebookDeckSpec, count: number, textMode: ApiCon
     pageNumber: slideIndex + 1,
     totalPages: deck.slides.length,
     textMode,
+    deckThesis: deck.story.thesis,
+    audienceInsight: deck.story.audienceInsight,
+    narrativeArc: deck.story.narrativeArc,
+    previousSlideTitle: deck.slides[slideIndex - 1]?.title || "",
+    nextSlideTitle: deck.slides[slideIndex + 1]?.title || "",
   }));
 }
 
@@ -996,45 +971,6 @@ function remapUploadedImageIndexes(deck: NotebookDeckSpec, uploads: GeneratedAss
       return { ...slide, imageIndex: upload?.index };
     }),
   };
-}
-
-async function createCropAssets(generated: GeneratedAsset[], decompositions: DecompositionResult[], existing: GeneratedAsset[]) {
-  const assets = [...existing];
-  const partsBySlide = new Map<number, { imageIndex: number; role: string; x: number; y: number; w: number; h: number }[]>();
-  let nextIndex = maxAssetIndex(assets) + 1;
-  let cropCount = 0;
-  for (const decomposition of decompositions) {
-    const source = generated.find((asset) => asset.filename.includes(`slide-${decomposition.slideIndex + 1}.`));
-    if (!source) continue;
-    const usableParts = decomposition.parts.length ? decomposition.parts : [{ label: "主视觉", role: "hero", x: 0, y: 0, w: 1, h: 1 }];
-    const slideParts = [];
-    for (const part of usableParts) {
-      const crop = await cropImage(source.url, part);
-      const asset: GeneratedAsset = {
-        id: makeId("crop"), filename: `slide-${decomposition.slideIndex + 1}-${part.role}-${cropCount + 1}.png`,
-        url: crop.url, prompt: part.label, index: nextIndex, kind: "crop", parentId: source.id,
-        width: crop.width, height: crop.height, summary: `${part.role} 独立视觉部件`,
-      };
-      assets.push(asset);
-      slideParts.push({ imageIndex: nextIndex, role: part.role, x: part.x, y: part.y, w: part.w, h: part.h });
-      nextIndex += 1;
-      cropCount += 1;
-    }
-    partsBySlide.set(decomposition.slideIndex, slideParts);
-  }
-  return { assets, partsBySlide, cropCount };
-}
-
-function applyDecomposition(deck: NotebookDeckSpec, decompositions: DecompositionResult[], partsBySlide: Map<number, { imageIndex: number; role: string; x: number; y: number; w: number; h: number }[]>) {
-  return {
-    ...deck,
-    slides: deck.slides.map((slide, index) => {
-      const decomposition = decompositions.find((item) => item.slideIndex === index);
-      if (!decomposition) return slide;
-      const layout = index === 0 ? slide.layout : decomposition.safeArea.x < 0.5 ? "visual-right" : "visual-left";
-      return { ...slide, layout, safeArea: decomposition.safeArea, visualParts: partsBySlide.get(index) || [] };
-    }),
-  } as NotebookDeckSpec;
 }
 
 async function assetToApiImage(asset: GeneratedAsset): Promise<ApiSourceImage> {
@@ -1074,39 +1010,11 @@ async function normalizeGeneratedSlideImage(image: { slideIndex: number; url: st
   return { ...image, url: canvas.toDataURL("image/png"), width: canvas.width, height: canvas.height };
 }
 
-async function prepareImageForVision(image: { slideIndex: number; url: string }) {
-  const source = await loadImage(image.url);
-  const maxSide = 960;
-  const scale = Math.min(1, maxSide / Math.max(source.naturalWidth, source.naturalHeight));
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.max(1, Math.round(source.naturalWidth * scale));
-  canvas.height = Math.max(1, Math.round(source.naturalHeight * scale));
-  const context = canvas.getContext("2d");
-  if (!context) throw new Error("浏览器无法创建视觉分析副本。");
-  context.drawImage(source, 0, 0, canvas.width, canvas.height);
-  return { slideIndex: image.slideIndex, url: canvas.toDataURL("image/jpeg", 0.74) };
-}
-
 async function inspectImage(file: File, index: number, brief: string): Promise<GeneratedAsset> {
   const url = URL.createObjectURL(file);
   const image = await loadImage(url);
   const orientation = image.naturalWidth / Math.max(image.naturalHeight, 1) > 1.25 ? "横图" : image.naturalHeight > image.naturalWidth ? "竖图" : "方图";
   return { id: makeId("upload"), filename: file.name, url, prompt: brief, index, kind: "upload", width: image.naturalWidth, height: image.naturalHeight, summary: `${image.naturalWidth}×${image.naturalHeight} ${orientation}，用户内容参考` };
-}
-
-async function cropImage(url: string, rect: NormalizedRect) {
-  const image = await loadImage(url);
-  const sx = Math.round(clamp01(rect.x) * image.naturalWidth);
-  const sy = Math.round(clamp01(rect.y) * image.naturalHeight);
-  const sw = Math.max(1, Math.round(Math.min(rect.w, 1 - rect.x) * image.naturalWidth));
-  const sh = Math.max(1, Math.round(Math.min(rect.h, 1 - rect.y) * image.naturalHeight));
-  const canvas = document.createElement("canvas");
-  canvas.width = sw;
-  canvas.height = sh;
-  const context = canvas.getContext("2d");
-  if (!context) throw new Error("浏览器无法创建裁图画布。");
-  context.drawImage(image, sx, sy, sw, sh, 0, 0, sw, sh);
-  return { url: canvas.toDataURL("image/png"), width: sw, height: sh };
 }
 
 function loadImage(url: string) {
@@ -1121,7 +1029,15 @@ function loadImage(url: string) {
 function loadApiConfig(): ApiConfig {
   try {
     const stored = sessionStorage.getItem("llwp-ppt-api-config");
-    return stored ? { ...defaultApiConfig, ...JSON.parse(stored) } : defaultApiConfig;
+    if (!stored) return defaultApiConfig;
+    const parsed = JSON.parse(stored) as Partial<ApiConfig>;
+    if ((parsed.configVersion || 0) < 2) {
+      parsed.imageCount = 0;
+    }
+    if ((parsed.configVersion || 0) < 3) {
+      parsed.imageTextMode = "native";
+    }
+    return { ...defaultApiConfig, ...parsed, configVersion: 3 };
   } catch {
     return defaultApiConfig;
   }
@@ -1133,7 +1049,6 @@ function compactTopic(value: string) {
   return line.length > 54 ? `${line.slice(0, 53)}…` : line;
 }
 function clamp(value: number, min: number, max: number) { return Math.max(min, Math.min(max, Number.isFinite(value) ? Math.round(value) : min)); }
-function clamp01(value: number) { return Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0)); }
 function makeId(prefix: string) { return `${prefix}-${crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`; }
 function sleep(ms: number) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 

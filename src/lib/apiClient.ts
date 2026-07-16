@@ -4,6 +4,7 @@ export type ApiProvider = "openai" | "compatible" | "ollama";
 export type ImageTextMode = "integrated" | "native";
 
 export type ApiConfig = {
+  configVersion: number;
   provider: ApiProvider;
   baseUrl: string;
   model: string;
@@ -48,6 +49,11 @@ export type ImageJob = {
   pageNumber: number;
   totalPages: number;
   textMode: ImageTextMode;
+  deckThesis: string;
+  audienceInsight: string;
+  narrativeArc: string[];
+  previousSlideTitle: string;
+  nextSlideTitle: string;
 };
 
 export type DecompositionPart = NormalizedRect & {

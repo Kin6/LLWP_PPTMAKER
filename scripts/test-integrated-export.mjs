@@ -66,8 +66,10 @@ const pptx = await fs.readFile(path.join(artifacts, filename));
 const zip = await JSZip.loadAsync(pptx);
 const slideXml = await zip.file("ppt/slides/slide1.xml")?.async("string");
 const notesXml = await zip.file("ppt/notesSlides/notesSlide1.xml")?.async("string");
+const slideFiles = Object.keys(zip.files).filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name));
 
 if (!slideXml || !notesXml) throw new Error("PPTX 缺少第一页或讲稿备注 XML。");
+if (slideFiles.length !== 1) throw new Error(`指定 1 页却导出了 ${slideFiles.length} 页。`);
 if ((slideXml.match(/<a:t>/g) || []).length !== 0) throw new Error("融合页面不应叠加重复文字框。");
 if ((slideXml.match(/<p:pic>/g) || []).length < 1) throw new Error("融合页面缺少整页图片对象。");
 for (const expected of ["文字本身就是主视觉", "图像、标题与证据共同叙事", "完整页面不是背景图加文本框", "巨型标题建立层级"]) {
@@ -75,4 +77,22 @@ for (const expected of ["文字本身就是主视觉", "图像、标题与证据
 }
 
 await fs.unlink(path.join(artifacts, filename));
-console.log("Integrated export smoke test passed: image-only page with complete source text in speaker notes.");
+
+const nativeTitle = "原生可拆版导出验收";
+const nativeDeck = {
+  ...deck,
+  title: nativeTitle,
+  slides: [{ ...deck.slides[0], title: "原生对象可以逐项编辑", visualMode: "panel" }],
+};
+await exportNotebookDeck(nativeDeck, assets);
+const nativePptx = await fs.readFile(path.join(artifacts, `${nativeTitle}.pptx`));
+const nativeZip = await JSZip.loadAsync(nativePptx);
+const nativeSlideXml = await nativeZip.file("ppt/slides/slide1.xml")?.async("string");
+const nativeSlideFiles = Object.keys(nativeZip.files).filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name));
+if (!nativeSlideXml) throw new Error("原生可拆版缺少第一页 XML。");
+if (nativeSlideFiles.length !== 1) throw new Error(`原生可拆版指定 1 页却导出了 ${nativeSlideFiles.length} 页。`);
+if (!nativeSlideXml.includes("原生对象可以逐项编辑")) throw new Error("原生可拆版缺少可编辑标题文字框。");
+if ((nativeSlideXml.match(/<p:pic>/g) || []).length < 1) throw new Error("原生可拆版缺少独立主视觉图片对象。");
+await fs.unlink(path.join(artifacts, `${nativeTitle}.pptx`));
+
+console.log("Export smoke test passed: exact slide count, integrated image page, and native editable object page.");

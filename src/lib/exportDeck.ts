@@ -59,7 +59,6 @@ export async function exportNotebookDeck(deck: NotebookDeckSpec, assets: Generat
     else addContent(pptx, slide, item, primary, partData, index, layout === "visual-left" ? "left" : "right");
   }
 
-  addAppendix(pptx, deck, assets);
   await pptx.writeFile({ fileName: `${sanitizeFileName(deck.title)}.pptx` });
 }
 
@@ -75,6 +74,7 @@ function addFullSlideVisual(
   const slideW = 13.333;
   const slideH = 7.5;
   slide.addImage({ data: imageData, x: 0, y: 0, w: slideW, h: slideH, sizing: { type: "cover", w: slideW, h: slideH } });
+  if (item.visualMode === "full-slide-text") return;
   parts.forEach((part) => {
     slide.addImage({
       data: part.data,
@@ -84,8 +84,6 @@ function addFullSlideVisual(
       h: Math.max(0.5, Math.min(part.h * slideH, slideH - part.y * slideH)),
     });
   });
-
-  if (item.visualMode === "full-slide-text") return;
 
   const safe = item.safeArea || defaultSafeArea(item.layout);
   const panelX = safe.x * slideW;
@@ -169,7 +167,7 @@ function addCover(
       });
     });
   } else if (imageData) {
-    slide.addImage({ data: imageData, x: 6.75, y: 0, w: 6.58, h: 7.5 });
+    slide.addImage({ data: imageData, x: 6.75, y: 0, w: 6.58, h: 7.5, sizing: { type: "cover", w: 6.58, h: 7.5 } });
   }
   if (parts.length || imageData) {
     slide.addShape(pptx.ShapeType.rect, {
@@ -228,7 +226,7 @@ function addContent(
       slide.addImage({ data: part.data, x, y, w: Math.min(w, visualX + visualW - x), h: Math.min(h, visualY + visualH - y) });
     });
   } else if (primary) {
-    slide.addImage({ data: primary, x: visualX, y: visualY, w: visualW, h: visualH });
+    slide.addImage({ data: primary, x: visualX, y: visualY, w: visualW, h: visualH, sizing: { type: "cover", w: visualW, h: visualH } });
   } else if (item.tableRows?.length) {
     addTable(slide, item.tableRows, visualX, visualY, visualW, visualH);
   } else {
@@ -277,18 +275,6 @@ function addTable(slide: any, rows: string[][], x: number, y: number, w: number,
     margin: 0.04, valign: "mid", fit: "shrink", autoFit: true, rowH: h / Math.max(values.length, 1),
     bold: false,
   });
-}
-
-function addAppendix(pptx: any, deck: NotebookDeckSpec, assets: GeneratedAsset[]) {
-  const slide = pptx.addSlide("CONTENT");
-  slide.background = { color: colors.paper };
-  slide.addText("附录：论证与素材索引", { x: 0.68, y: 0.72, w: 6.5, h: 0.45, fontSize: 25, bold: true, color: colors.ink, margin: 0 });
-  slide.addText(deck.story.thesis, { x: 0.7, y: 1.42, w: 11.6, h: 0.48, fontSize: 12, bold: true, color: colors.blue, fit: "shrink", margin: 0 });
-  deck.slides.slice(0, 10).forEach((item, index) => {
-    slide.addText(`${index + 1}. ${item.title}`, { x: 0.72, y: 2.1 + index * 0.38, w: 5.7, h: 0.22, fontSize: 8.7, bold: true, color: colors.ink, fit: "shrink", margin: 0 });
-    slide.addText((item.sourceNotes || []).join(" · "), { x: 6.65, y: 2.1 + index * 0.38, w: 5.55, h: 0.22, fontSize: 7.2, color: colors.muted, fit: "shrink", margin: 0 });
-  });
-  slide.addText(`素材对象：${assets.length} 个；独立裁图：${assets.filter((asset) => asset.kind === "crop").length} 个`, { x: 0.72, y: 6.35, w: 6, h: 0.24, fontSize: 8, color: colors.muted });
 }
 
 type ResolvedPart = VisualPart & { data: string; asset: GeneratedAsset };

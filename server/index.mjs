@@ -162,7 +162,7 @@ app.get("/api/health", (_req, res) => {
       imageBaseUrl: imageApiBaseUrl,
       imageModel,
     },
-    pipeline: ["logic-planner", "image-2-reference-edit", "vision-decomposition", "native-assembly", "editable-pptx"],
+    pipeline: ["logic-planner", "image-2-reference-edit", "object-validation", "native-assembly", "editable-pptx"],
   });
 });
 
@@ -184,9 +184,23 @@ app.post("/api/ai/generate-deck", async (req, res) => {
     const config = normalizeTextConfig(req.body?.config || {});
     const source = normalizeSource(req.body?.source || {});
     const prompt = buildDeckPrompt(source);
-    const result = config.provider === "openai"
+    let result = config.provider === "openai"
       ? await requestOpenAIResponses(config, prompt, deckSchema, "deck_spec", source.images)
       : await requestChatCompletions(config, prompt, source.images, "deck_spec");
+    if (!hasExactSlideCount(result.value, source.slideCount)) {
+      const retryPrompt = {
+        ...prompt,
+        user: `${prompt.user}\n\n纠错要求：上一次没有返回恰好 ${source.slideCount} 页。请重新规划完整叙事并返回恰好 ${source.slideCount} 个 slides；不要复用占位页，不要省略结尾，不要输出任何解释。`,
+      };
+      const retry = config.provider === "openai"
+        ? await requestOpenAIResponses(config, retryPrompt, deckSchema, "deck_spec", source.images)
+        : await requestChatCompletions(config, retryPrompt, source.images, "deck_spec");
+      result = { value: retry.value, apiCalls: result.apiCalls + retry.apiCalls };
+    }
+    if (!hasExactSlideCount(result.value, source.slideCount)) {
+      const returned = Array.isArray(result.value?.slides) ? result.value.slides.length : 0;
+      throw new HttpError(502, `模型连续两次未返回指定的 ${source.slideCount} 页（当前 ${returned} 页），已停止生成以避免拼接无关页面。`);
+    }
     res.json({
       ok: true,
       deck: normalizeDeck(result.value, source),
@@ -204,24 +218,29 @@ app.post("/api/ai/generate-images", async (req, res) => {
     const jobs = Array.isArray(req.body?.jobs)
       ? req.body.jobs.map((job) => ({
           slideIndex: Number(job?.slideIndex),
-          prompt: cleanText(job?.prompt, 1_800),
-          layout: cleanText(job?.layout, 40),
-          deckTitle: cleanText(job?.deckTitle, 120),
-          title: cleanText(job?.title, 120),
-          subtitle: cleanText(job?.subtitle, 180),
-          claim: cleanText(job?.claim, 220),
-          bullets: Array.isArray(job?.bullets) ? job.bullets.map((item) => cleanText(item, 120)).filter(Boolean).slice(0, 4) : [],
+          prompt: cleanDisplayText(job?.prompt, 1_800),
+          layout: cleanDisplayText(job?.layout, 40),
+          deckTitle: cleanDisplayText(job?.deckTitle, 120),
+          title: cleanDisplayText(job?.title, 120),
+          subtitle: cleanDisplayText(job?.subtitle, 180),
+          claim: cleanDisplayText(job?.claim, 220),
+          bullets: Array.isArray(job?.bullets) ? job.bullets.map((item) => cleanDisplayText(item, 120)).filter(Boolean).slice(0, 4) : [],
           callouts: Array.isArray(job?.callouts) ? job.callouts.map((item) => ({
-            label: cleanText(item?.label, 50),
-            value: cleanText(item?.value, 50),
+            label: cleanDisplayText(item?.label, 50),
+            value: cleanDisplayText(item?.value, 50),
           })).filter((item) => item.label || item.value).slice(0, 3) : [],
           tableRows: Array.isArray(job?.tableRows) ? job.tableRows.slice(0, 5).map((row) => Array.isArray(row)
-            ? row.slice(0, 4).map((cell) => cleanText(cell, 60))
+            ? row.slice(0, 4).map((cell) => cleanDisplayText(cell, 60))
             : []) : [],
           pageNumber: Math.max(1, Number(job?.pageNumber) || Number(job?.slideIndex) + 1),
           totalPages: Math.max(1, Number(job?.totalPages) || 1),
           textMode: job?.textMode === "native" ? "native" : "integrated",
-        })).filter((job) => Number.isInteger(job.slideIndex) && job.prompt).slice(0, 4)
+          deckThesis: cleanDisplayText(job?.deckThesis, 400),
+          audienceInsight: cleanDisplayText(job?.audienceInsight, 400),
+          narrativeArc: Array.isArray(job?.narrativeArc) ? job.narrativeArc.map((item) => cleanDisplayText(item, 100)).filter(Boolean).slice(0, 12) : [],
+          previousSlideTitle: cleanDisplayText(job?.previousSlideTitle, 120),
+          nextSlideTitle: cleanDisplayText(job?.nextSlideTitle, 120),
+        })).filter((job) => Number.isInteger(job.slideIndex) && job.prompt).slice(0, 50)
       : [];
     if (!jobs.length) throw new HttpError(400, "至少需要一个图片任务。");
     const references = normalizeImages(req.body?.referenceImages).slice(0, 3);
@@ -374,10 +393,14 @@ function normalizeImages(raw) {
 }
 
 function buildDeckPrompt(source) {
-  const system = `你是资深演示文稿策略师和信息设计师。任务不是总结材料，而是建立一条可辩护的演示逻辑。先识别受众要做的决定，再区分事实、判断、证据和行动。使用“核心结论 -> 背景矛盾 -> 关键证据 -> 方案 -> 行动”的结构，但根据材料调整。不得编造数字、案例或来源；材料不足时写入 evidenceGaps。每页标题必须表达观点，每页只承担一个论证任务。图片只是证据和视觉参考，不要从图片中臆测看不清的信息。严格输出 JSON。`;
+  const system = `你是资深演示文稿策略师和信息设计师。先定义沟通任务：演示结束时，目标受众应该理解、相信、选择或行动什么，以及为什么。任务不是逐段总结材料，而是建立一条累积推进、可被证据支持的叙事链。每页只承担一个论证任务，标题必须是受众能直接理解的观点。上一页提出的问题必须由下一页回答或推进，开场建立问题与价值，结尾必须解决开场并给出结论、决策或行动。不得编造数字、案例、来源和用户没有提供的表格。
+
+所有可见文案只能面向演示受众，禁止泄露制作过程、模型指令和内部脚手架。除非用户材料本身明确讨论这些概念，否则不要出现 DeckSpec、Image 2、API、提示词、工作流、如何生成 PPT、页面组装、视觉拆解等生产术语。图片只是证据和视觉参考，不要从图片中臆测看不清的信息。严格输出 JSON。`;
   const imageList = source.images.map((image, index) => `图片 ${index + 1}: ${image.name}；${image.summary || "用户上传的内容参考"}`).join("\n");
   const styleLabel = source.styleId === "blank" ? "未指定，使用空白模板" : styleGuides[source.styleId].label;
-  const user = `主题：${source.topic}\n受众：${source.audience}\n页数：严格 ${source.slideCount} 页\n选定风格：${styleLabel}\n\n文字材料：\n${source.textInput || "（无）"}\n\n表格材料：\n${source.tableInput || "（无）"}\n\n图片使用说明：\n${source.imageBrief || "（无）"}\n${imageList || "（未上传图片）"}\n\n请先在 story 中给出核心主张、受众洞察、叙事弧和证据缺口，再生成恰好 ${source.slideCount} 页。imageIndex 只引用从 1 开始的用户图片序号，没有合适图片时为 null。visualBrief 描述该页需要表达什么，imagePrompt 只描述与页面观点直接相关的主体、场景、数据关系和视觉隐喻；不要在 imagePrompt 中规定有字或无字，最终文字呈现由后续模式决定。`;
+  const user = `主题：${source.topic}\n受众：${source.audience}\n页数：必须恰好 ${source.slideCount} 页，不得少页、补占位页或额外增加附录\n选定风格：${styleLabel}\n\n文字材料：\n${source.textInput || "（无）"}\n\n用户提供的表格材料：\n${source.tableInput || "（无，禁止自行创建表格内容）"}\n\n图片使用说明：\n${source.imageBrief || "（无）"}\n${imageList || "（未上传图片）"}\n\n先在 story 中给出唯一核心主张、受众洞察、完整叙事弧和证据缺口，再生成恰好 ${source.slideCount} 页。整套页面必须形成连续链条：第 1 页建立核心问题或判断；中间页面依次给出背景、机制、证据、影响或方案，每页都承接上一页并为下一页制造必要性；最后 1 页解决开场问题并收束为明确结论或行动。不要把同一个观点换词重复。speakerNotes 可以记录“承接上一页”和“引向下一页”的过渡逻辑，但这些制作说明不能进入可见标题、正文或图片文案。
+
+imageIndex 只引用从 1 开始的用户图片序号，没有合适图片时为 null。visualBrief 描述该页要用什么视觉证据支持当前观点；imagePrompt 只描述与当前页面直接相关的主体、场景、数据关系和视觉隐喻，不规定有字或无字，最终文字呈现由后续模式决定。`;
   return { system, user };
 }
 
@@ -402,16 +425,24 @@ function buildIntegratedTextImagePrompt(job, guide, referenceInstruction) {
   const callouts = job.callouts.map((item) => `${item.label}：${item.value}`).join("；") || "（无）";
   const table = job.tableRows.length ? job.tableRows.map((row) => row.join(" | ")).join("\n") : "（无）";
   const archetype = imagePageArchetype(job.layout, job.pageNumber);
-  return `画一个完整的 16:9 高端 PowerPoint 成品页面，用于第 ${job.pageNumber} 页。重点不是生成背景图，而是让文字本身参与构图：标题、关键词、图像、图标、数据和装饰结构必须共同讲清这一页的观点。视觉完成度要达到顶级发布会、竞赛路演或品牌提案主视觉的水准，但不要复制任何特定题材或现成作品。\n\n【页面文案，必须逐字呈现，不得改写、翻译或虚构】\n演示名称：${job.deckTitle || "（不显示）"}\n主标题：${job.title}\n副标题：${job.subtitle || "（无）"}\n核心句：${job.claim || "（无）"}\n短要点：\n${bullets}\n数据标注：${callouts}\n表格数据：\n${table}\n页码：${page}\n\n【内容与构图任务】\n${job.prompt}\n页面原型：${archetype}\n布局线索：${job.layout || "visual-right"}。\n${referenceInstruction}\n整体审美方向：${guide.direction}。\n\n【图文融合规则】\n1. 主标题是第一视觉元素，占据约 20% 到 30% 的页面，最多两到三行，按语义主动断行。选择一到两个关键词，通过明显的字号、重量、颜色、材质、描边或空间层级形成对比，但所有字仍需清晰可读。\n2. 不要把文字放进一个孤立的白框。让标题与主体轮廓、光影、构图轴线或信息图结构发生关系；短要点可以变成带图标的功能带、边注、标签、数据面板或因果链。文字和视觉必须互相解释。\n3. 至少包含一个与内容直接相关的强主视觉，以及两种辅助信息形态，例如真实摄影或高质量 3D 主体、示意图、数据曲线、图标、局部特写、流程箭头、对比面板。不能只有大字加抽象背景。\n4. 信息丰富但秩序清楚：一眼先读主标题，随后看到核心视觉，再读核心句与最多三个短要点。使用非对称网格、前中后景、尺度反差和精确对齐建立高级感。\n5. 只使用上面提供的文字。没有提供的品牌、统计数字、按钮、网址、免责声明和伪界面文案一律不要生成。若文字过多，优先完整呈现主标题、核心句、页码和最短的两个要点，不得自行缩写或编造。\n6. 中文使用清晰、粗壮、现代的简体中文字体效果，笔画完整；数字和英文保持准确。小字号也要高对比，不要出现乱码、随机字符或无意义占位文字。\n7. 参考图式视觉机制是“巨型标题 + 叙事主视觉 + 模块化证据 + 底部总结带”，只借鉴其图文结合、材质和层级，不要固定使用扑克、红黑金、机械臂或赛事元素；题材、色彩和材质必须服从当前内容与选定风格。\n8. 整张图就是幻灯片本身，满画布、无白边。不要画投影幕、电脑屏幕、PPT 编辑器边框或页面外环境。关键文字与主体必须位于中央 16:9 安全裁切区；最上方和最下方只能放可被裁掉的延展背景。`;
+  return `画一个完整的 16:9 高端 PowerPoint 成品页面，用于第 ${job.pageNumber} 页。它属于同一套 ${job.totalPages} 页演示中的连续一页，不是独立海报。重点不是生成背景图，而是让文字本身参与构图：标题、关键词、图像、图标、数据和装饰结构必须共同讲清这一页的观点。视觉完成度要达到顶级发布会、竞赛路演或品牌提案主视觉的水准，但不要复制任何特定题材或现成作品。\n\n【整套叙事位置】\n${buildSequenceContext(job)}\n\n【页面文案，必须逐字呈现，不得改写、翻译或虚构】\n演示名称：${job.deckTitle || "（不显示）"}\n主标题：${job.title}\n副标题：${job.subtitle || "（无）"}\n核心句：${job.claim || "（无）"}\n短要点：\n${bullets}\n数据标注：${callouts}\n表格数据：\n${table}\n页码：${page}\n\n【内容与构图任务】\n${job.prompt}\n页面原型：${archetype}\n布局线索：${job.layout || "visual-right"}。\n${referenceInstruction}\n整体审美方向：${guide.direction}。\n\n【图文融合规则】\n1. 主标题是第一视觉元素，占据约 20% 到 30% 的页面，最多两到三行，按语义主动断行。选择一到两个关键词，通过明显的字号、重量、颜色、材质、描边或空间层级形成对比，但所有字仍需清晰可读。\n2. 不要把文字放进一个孤立的白框。让标题与主体轮廓、光影、构图轴线或信息图结构发生关系；短要点可以变成带图标的功能带、边注、标签、数据面板或因果链。文字和视觉必须互相解释。\n3. 至少包含一个与内容直接相关的强主视觉，以及两种辅助信息形态，例如真实摄影或高质量 3D 主体、示意图、数据曲线、图标、局部特写、流程箭头、对比面板。不能只有大字加抽象背景。\n4. 信息丰富但秩序清楚：一眼先读主标题，随后看到核心视觉，再读核心句与最多三个短要点。使用非对称网格、前中后景、尺度反差和精确对齐建立高级感。与整套其他页面保持同一字体家族、色彩系统、图标线宽、页码位置、边距和材质语言，但每页构图应随论证任务变化，不能机械复制同一模板。\n5. 只使用上面提供的文字。没有提供的品牌、统计数字、按钮、网址、免责声明和伪界面文案一律不要生成。禁止从风格参考图中抄写任何文字。除非本页文案明确包含，否则严禁出现 DeckSpec、Image 2、API、Prompt、工作流、生成 PPT、视觉拆解、页面组装等制作过程内容。若文字过多，优先完整呈现主标题、核心句、页码和最短的两个要点，不得自行缩写或编造。\n6. 中文使用清晰、粗壮、现代的简体中文字体效果，笔画完整；数字和英文保持准确。小字号也要高对比，不要出现乱码、随机字符、[object Object] 或无意义占位文字。\n7. 参考图式视觉机制是“巨型标题 + 叙事主视觉 + 模块化证据 + 底部总结带”，只借鉴其图文结合、材质和层级，不要固定使用扑克、红黑金、机械臂或赛事元素；题材、色彩和材质必须服从当前内容与选定风格。\n8. 整张图就是幻灯片本身，满画布、无白边。不要画投影幕、电脑屏幕、PPT 编辑器边框或页面外环境。关键文字与主体必须位于中央 16:9 安全裁切区；最上方和最下方只能放可被裁掉的延展背景。`;
 }
 
 function buildNativeTextImagePrompt(job, guide, referenceInstruction) {
-  const textZone = job.layout === "visual-left"
-    ? "右侧 40% 是原生文字安全区，左侧承担主要视觉冲击"
-    : job.layout === "section"
-      ? "中央保留宽阔的原生标题安全区，视觉从四周建立氛围与空间"
-      : "左侧 40% 是原生文字安全区，右侧承担主要视觉冲击";
-  return `画一个完整的 16:9 高端 PowerPoint 成品页面视觉底稿，用于第 ${job.pageNumber} 页。它必须看起来像顶级设计师已经完成整页构图，而不是一张插图、背景图、局部素材或常规模板。\n\n内容任务：\n${job.prompt}\n\n页面结构：${textZone}；布局类型为 ${job.layout || "visual-right"}。\n${referenceInstruction}\n整体审美方向：${guide.direction}。\n\n请大胆发挥：建立强烈主视觉、清楚的信息层级、非对称网格、富有张力的尺度对比、精确留白和具有叙事性的构图。根据内容主动选择摄影、3D、信息图、数据形态、材质或空间场景，不要默认生成软件界面、卡片墙或平庸商务模板。整页都要被设计，视觉可以跨越画布、裁切出界、形成前后景和大胆构图。所有关键主体与文字安全区必须位于画面中央的 16:9 安全裁切范围内，允许最上方和最下方仅出现可被裁掉的延展背景。\n\n这是给原生 PowerPoint 文字叠加的视觉底稿：禁止生成任何可读文字、字母、数字、标志、水印和伪界面文案，但文字安全区本身也必须像成品页面的一部分，保持干净、低细节、对比明确。输出一张完整满画布的幻灯片，不要留白边，不要画投影幕、电脑屏幕、PPT 编辑器边框或页面外环境。`;
+  const visualSide = job.layout === "visual-left" ? "主体靠左构图" : "主体靠右构图";
+  return `画一个用于 PowerPoint 第 ${job.pageNumber}/${job.totalPages} 页的高质量独立主视觉资产。它不是整页 PPT、不是带文字的信息图、不是界面截图，而是一张可以在 PowerPoint 中单独移动、缩放和裁切的视觉图片。\n\n【整套叙事位置】\n${buildSequenceContext(job)}\n\n【当前页视觉任务】\n${job.prompt}\n\n构图要求：${visualSide}，主体完整，轮廓清楚，背景简洁且容易与页面底色融合；为页面另一侧的原生标题、正文、表格和形状留出呼吸空间。\n${referenceInstruction}\n整体审美方向：${guide.direction}。\n\n根据内容选择真实摄影、高质量 3D、科学可视化或简洁概念场景，必须有一个明确主体和清晰视觉焦点。与整套其他页面保持相同的色彩系统、材质、光线方向、镜头语言和图标风格，但当前画面必须服务于这一页独有的论证任务。禁止生成任何可读文字、字母、数字、标志、水印、表格、卡片墙、按钮、伪界面文案、[object Object] 或 PPT 制作流程。不要画投影幕、电脑屏幕、PPT 编辑器边框或页面外环境。`;
+}
+
+function buildSequenceContext(job) {
+  return [
+    `整套核心主张：${job.deckThesis || job.deckTitle}`,
+    `受众需要：${job.audienceInsight || "理解当前观点并知道下一步"}`,
+    `叙事弧：${job.narrativeArc.join(" → ") || "问题 → 证据 → 结论"}`,
+    `上一页：${job.previousSlideTitle || "这是开场页，需要建立问题与期待"}`,
+    `当前页：${job.title}`,
+    `下一页：${job.nextSlideTitle || "这是收束页，需要解决开场并给出结论或行动"}`,
+    "当前页必须承接上一页的已知信息，并自然制造阅读下一页的必要性；不得重复上一页，也不得提前讲完下一页。",
+  ].join("\n");
 }
 
 function imagePageArchetype(layout, pageNumber) {
@@ -508,37 +539,33 @@ async function requestChatCompletions(config, prompt, images = [], schemaName = 
 
 function normalizeDeck(raw, source) {
   const rawSlides = Array.isArray(raw?.slides) ? raw.slides : [];
-  if (!rawSlides.length) throw new HttpError(502, "模型没有返回幻灯片内容。");
+  if (rawSlides.length !== source.slideCount) throw new HttpError(502, `模型没有返回恰好 ${source.slideCount} 页。`);
   const layouts = new Set(["cover", "two-column", "visual-left", "visual-right", "section", "takeaway"]);
   const slides = rawSlides.slice(0, source.slideCount).map((slide, index) => ({
-    title: cleanText(slide?.title, 120) || `第 ${index + 1} 页`,
-    subtitle: cleanText(slide?.subtitle, 220),
+    title: cleanDisplayText(slide?.title, 120) || `第 ${index + 1} 页`,
+    subtitle: cleanDisplayText(slide?.subtitle, 220),
     layout: layouts.has(slide?.layout) ? slide.layout : index === 0 ? "cover" : "two-column",
-    claim: cleanText(slide?.claim, 320),
-    bullets: Array.isArray(slide?.bullets) ? slide.bullets.map((item) => cleanText(item, 240)).filter(Boolean).slice(0, 6) : [],
-    speakerNotes: cleanText(slide?.speakerNotes, 1_500),
-    sourceNotes: Array.isArray(slide?.sourceNotes) ? slide.sourceNotes.map((item) => cleanText(item, 240)).filter(Boolean).slice(0, 5) : [],
+    claim: cleanDisplayText(slide?.claim, 320),
+    bullets: Array.isArray(slide?.bullets) ? slide.bullets.map((item) => cleanDisplayText(item, 240)).filter(Boolean).slice(0, 6) : [],
+    speakerNotes: cleanDisplayText(slide?.speakerNotes, 1_500),
+    sourceNotes: Array.isArray(slide?.sourceNotes) ? slide.sourceNotes.map((item) => cleanDisplayText(item, 240)).filter(Boolean).slice(0, 5) : [],
     imageIndex: Number.isInteger(slide?.imageIndex) && slide.imageIndex > 0 ? slide.imageIndex : undefined,
-    callouts: Array.isArray(slide?.callouts) ? slide.callouts.slice(0, 3).map((item) => ({ label: cleanText(item?.label, 40), value: cleanText(item?.value, 80) })).filter((item) => item.label || item.value) : [],
-    visualBrief: cleanText(slide?.visualBrief, 800),
-    imagePrompt: cleanText(slide?.imagePrompt, 1_200),
+    callouts: Array.isArray(slide?.callouts) ? slide.callouts.slice(0, 3).map((item) => ({
+      label: cleanDisplayText(item?.label, 40),
+      value: cleanDisplayText(item?.value ?? item, 80),
+    })).filter((item) => item.label || item.value) : [],
+    visualBrief: cleanDisplayText(slide?.visualBrief, 800),
+    imagePrompt: cleanDisplayText(slide?.imagePrompt, 1_200),
   }));
-  while (slides.length < source.slideCount) {
-    slides.push({
-      title: `补充页 ${slides.length + 1}`, subtitle: "用于承接上一页并补足行动信息", layout: "two-column",
-      claim: "需要补充材料以完成这一页", bullets: ["请在预览区编辑这一页"], speakerNotes: "模型返回页数不足，已创建可编辑占位页。",
-      sourceNotes: ["系统补页"], callouts: [], visualBrief: "简洁的过渡视觉", imagePrompt: `${source.topic}，简洁过渡视觉，无文字`,
-    });
-  }
   const rawStory = raw?.story || {};
   return {
-    title: cleanText(raw?.title, 180) || source.topic,
+    title: cleanDisplayText(raw?.title, 180) || source.topic,
     theme: ["dark-executive", "light-consulting", "editorial-visual"].includes(raw?.theme) ? raw.theme : "light-consulting",
     story: {
-      thesis: cleanText(rawStory.thesis, 500) || slides[0].claim || source.topic,
-      audienceInsight: cleanText(rawStory.audienceInsight, 500) || `${source.audience}需要清楚的结论和行动。`,
-      narrativeArc: Array.isArray(rawStory.narrativeArc) ? rawStory.narrativeArc.map((item) => cleanText(item, 80)).filter(Boolean).slice(0, 8) : [],
-      evidenceGaps: Array.isArray(rawStory.evidenceGaps) ? rawStory.evidenceGaps.map((item) => cleanText(item, 240)).filter(Boolean).slice(0, 6) : [],
+      thesis: cleanDisplayText(rawStory.thesis, 500) || slides[0].claim || source.topic,
+      audienceInsight: cleanDisplayText(rawStory.audienceInsight, 500) || `${source.audience}需要清楚的结论和行动。`,
+      narrativeArc: Array.isArray(rawStory.narrativeArc) ? rawStory.narrativeArc.map((item) => cleanDisplayText(item, 80)).filter(Boolean).slice(0, 12) : [],
+      evidenceGaps: Array.isArray(rawStory.evidenceGaps) ? rawStory.evidenceGaps.map((item) => cleanDisplayText(item, 240)).filter(Boolean).slice(0, 6) : [],
       styleId: source.styleId,
     },
     slides,
@@ -551,10 +578,10 @@ function normalizeDecompositions(raw, images) {
     const item = values.find((candidate) => Number(candidate?.slideIndex) === image.slideIndex) || values[index] || {};
     return {
       slideIndex: image.slideIndex,
-      composition: cleanText(item?.composition, 500) || "视觉主体与文字留白分区",
+      composition: cleanDisplayText(item?.composition, 500) || "视觉主体与文字留白分区",
       safeArea: normalizeRect(item?.safeArea, { x: 0.06, y: 0.08, w: 0.4, h: 0.82 }),
       parts: Array.isArray(item?.parts) ? item.parts.slice(0, 3).map((part, partIndex) => ({
-        label: cleanText(part?.label, 80) || `视觉部件 ${partIndex + 1}`,
+        label: cleanDisplayText(part?.label, 80) || `视觉部件 ${partIndex + 1}`,
         role: ["hero", "evidence", "detail", "texture"].includes(part?.role) ? part.role : "detail",
         ...normalizeRect(part, { x: 0.5, y: 0.12 + partIndex * 0.24, w: 0.42, h: 0.22 }),
       })) : [],
@@ -643,6 +670,10 @@ function hasStructuredContent(value, schemaName) {
   return Array.isArray(value.slides) && value.slides.length > 0;
 }
 
+function hasExactSlideCount(value, expected) {
+  return Array.isArray(value?.slides) && value.slides.length === expected;
+}
+
 function parseModelJson(text) {
   const cleaned = String(text || "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
   try { return JSON.parse(cleaned); } catch {
@@ -687,6 +718,25 @@ function sendApiError(res, error) {
 }
 
 function cleanText(value, maxLength) { return String(value ?? "").replace(/\u0000/g, "").trim().slice(0, maxLength); }
+function cleanDisplayText(value, maxLength) {
+  return cleanText(extractDisplayText(value), maxLength)
+    .replace(/\[object Object\]/gi, "")
+    .replace(/\b(?:undefined|null)\b/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+function extractDisplayText(value, depth = 0) {
+  if (depth > 3 || value == null) return "";
+  if (["string", "number", "boolean"].includes(typeof value)) return String(value);
+  if (Array.isArray(value)) return value.map((item) => extractDisplayText(item, depth + 1)).filter(Boolean).join("；");
+  if (typeof value !== "object") return "";
+  const preferredKeys = ["text", "content", "title", "point", "claim", "description", "name", "value", "label"];
+  for (const key of preferredKeys) {
+    const text = extractDisplayText(value[key], depth + 1);
+    if (text) return text;
+  }
+  return Object.values(value).map((item) => extractDisplayText(item, depth + 1)).filter(Boolean).slice(0, 2).join("：");
+}
 function isOfficialOpenAIBase(value) {
   try { return new URL(value).hostname.toLowerCase() === "api.openai.com"; }
   catch { return false; }

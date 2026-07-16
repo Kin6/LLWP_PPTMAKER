@@ -39,6 +39,30 @@ const deck = {
   })),
 };
 
+function deckForRequest(text) {
+  const match = String(text || "").match(/(?:必须恰好|严格)\s*(\d+)\s*页/);
+  const count = Math.max(1, Math.min(50, Number(match?.[1]) || deck.slides.length));
+  const slides = Array.from({ length: count }, (_, index) => {
+    const base = deck.slides[index % deck.slides.length];
+    const isLast = index === count - 1;
+    return {
+      ...base,
+      title: isLast && count > 1 ? "把前述证据收束为下一步行动" : base.title,
+      subtitle: `模拟服务返回的第 ${index + 1}/${count} 页`,
+      speakerNotes: `承接第 ${Math.max(1, index)} 页，并引向第 ${Math.min(count, index + 2)} 页。`,
+    };
+  });
+  if (String(text).includes("RETURN_OBJECT_FIELDS")) {
+    slides[0] = {
+      ...slides[0],
+      title: { text: "对象字段已安全转成标题" },
+      bullets: [{ text: "对象要点一" }, { content: "对象要点二" }, { label: "对象要点三" }],
+      sourceNotes: [{ text: "对象来源" }],
+    };
+  }
+  return { ...deck, slides };
+}
+
 const decomposition = {
   slides: [
     { slideIndex: 0, composition: "左侧留白，右侧为界面主体", safeArea: { x: 0.05, y: 0.12, w: 0.42, h: 0.74 }, parts: [{ label: "主界面", role: "hero", x: 0.48, y: 0.08, w: 0.47, h: 0.78 }, { label: "数据卡片", role: "detail", x: 0.08, y: 0.12, w: 0.27, h: 0.3 }] },
@@ -84,7 +108,8 @@ const server = http.createServer(async (req, res) => {
     for await (const chunk of req) body += chunk;
     const parsed = JSON.parse(body || "{}");
     const name = parsed?.text?.format?.name;
-    const payload = name === "image_decomposition" ? decomposition : deck;
+    const requestText = JSON.stringify(parsed?.input || []);
+    const payload = name === "image_decomposition" ? decomposition : deckForRequest(requestText);
     return res.end(JSON.stringify({ output_text: JSON.stringify(payload) }));
   }
   if (req.method === "POST" && req.url === "/v1/chat/completions") {
@@ -99,7 +124,7 @@ const server = http.createServer(async (req, res) => {
     if (text.includes("FORCE_EMPTY_DECK") && parsed.messages.length <= 2) {
       return res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: [{ type: "text", text: JSON.stringify({ title: "empty", slides: [] }) }] } }] }));
     }
-    const payload = text.includes("依次分析所附") ? decomposition : deck;
+    const payload = text.includes("依次分析所附") ? decomposition : deckForRequest(text);
     return res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: JSON.stringify(payload) } }] }));
   }
   res.statusCode = 404;
