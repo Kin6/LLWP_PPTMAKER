@@ -30,7 +30,7 @@ import {
   X,
 } from "lucide-react";
 import { parseAttachment, type ParsedAttachment } from "./lib/attachmentParser";
-import { containImageRect, coverImageRect } from "./lib/imageGeometry";
+import { coverImageRect } from "./lib/imageGeometry";
 import { exportNotebookDeck } from "./lib/exportDeck";
 import { buildLocalDeck, parseTable } from "./lib/localPlanner";
 import {
@@ -1169,16 +1169,8 @@ async function normalizeGeneratedSlideImage(image: { slideIndex: number; url: st
   if (Math.abs(sourceRatio - targetRatio) < 0.01) {
     context.drawImage(source, 0, 0, canvas.width, canvas.height);
   } else {
-    const background = coverImageRect(source.naturalWidth, source.naturalHeight, canvas.width, canvas.height);
-    context.save();
-    context.filter = "blur(30px) brightness(0.58) saturate(0.82)";
-    context.drawImage(source, background.x - 28, background.y - 28, background.width + 56, background.height + 56);
-    context.restore();
-    context.fillStyle = "rgba(8, 10, 12, 0.12)";
-    context.fillRect(0, 0, canvas.width, canvas.height);
-
-    const foreground = containImageRect(source.naturalWidth, source.naturalHeight, canvas.width, canvas.height, 0.015);
-    context.drawImage(source, foreground.x, foreground.y, foreground.width, foreground.height);
+    const fullBleed = coverImageRect(source.naturalWidth, source.naturalHeight, canvas.width, canvas.height);
+    context.drawImage(source, fullBleed.x, fullBleed.y, fullBleed.width, fullBleed.height);
   }
   return { ...image, url: canvas.toDataURL("image/png"), width: canvas.width, height: canvas.height };
 }

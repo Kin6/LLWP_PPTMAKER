@@ -16,4 +16,4 @@ assert.equal(covered.y, -80);
 assert.equal(covered.width, 1536);
 assert.equal(covered.height, 1024);
 
-console.log("Image geometry test passed: 3:2 slide art is contained without top or bottom cropping.");
+console.log("Image geometry test passed: 3:2 art supports both safe containment and single-layer full-bleed output.");
