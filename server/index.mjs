@@ -367,13 +367,13 @@ function normalizeTextConfig(raw) {
   const provider = ["openai", "compatible", "ollama"].includes(raw.provider) ? raw.provider : "openai";
   const fallbackBase = provider === "ollama" ? "http://127.0.0.1:11434/v1" : textApiBaseUrl;
   const fallbackModel = provider === "ollama" ? "qwen3:8b" : textModel;
-  return finishConfig({ provider, baseUrl: raw.baseUrl || fallbackBase, model: raw.model || fallbackModel, apiKey: raw.apiKey, allowNoKey: provider === "ollama" });
+  return finishConfig({ provider, baseUrl: preferredGatewayBase(raw.baseUrl, fallbackBase), model: raw.model || fallbackModel, apiKey: raw.apiKey, allowNoKey: provider === "ollama" });
 }
 
 function normalizeImageConfig(raw) {
   return finishConfig({
     provider: "openai",
-    baseUrl: raw.baseUrl || imageApiBaseUrl,
+    baseUrl: preferredGatewayBase(raw.baseUrl, imageApiBaseUrl),
     model: raw.model || imageModel,
     apiKey: raw.apiKey,
     allowNoKey: false,
@@ -864,6 +864,16 @@ function extractDisplayText(value, depth = 0) {
 function isOfficialOpenAIBase(value) {
   try { return new URL(value).hostname.toLowerCase() === "api.openai.com"; }
   catch { return false; }
+}
+function preferredGatewayBase(requestedValue, fallbackValue) {
+  const requested = String(requestedValue || "").trim();
+  const fallback = String(fallbackValue || "").trim();
+  try {
+    const requestedHost = new URL(requested).hostname.toLowerCase();
+    const fallbackHost = new URL(fallback).hostname.toLowerCase();
+    if (requestedHost === "api.chatanywhere.tech" && fallbackHost === "api.chatanywhere.org") return fallback;
+  } catch { /* finishConfig reports malformed URLs */ }
+  return requested || fallback;
 }
 function resolveEnvironmentSecret(name) {
   const inherited = String(process.env[name] || "").trim();
