@@ -297,11 +297,16 @@ h1, h2, h3, p { margin: 0; }
 .workflow-row p { grid-column: 2; margin-top: 5px; color: var(--faint); font-size: 8px; line-height: 1.4; }
 .workflow-row.running strong { color: var(--blue); }
 .workflow-row.error p { color: var(--red); }
+.step-retry { grid-column: 2; justify-self: start; display: inline-flex; align-items: center; gap: 5px; min-height: 28px; margin-top: 8px; padding: 0 10px; border: 1px solid #e5a197; background: #fff8f6; color: #c33b2c; font-size: 9px; font-weight: 750; }
+.step-retry:hover { border-color: var(--red); background: #fff1ee; }
 .run-summary { flex-wrap: wrap; gap: 7px 10px; padding: 13px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .run-summary span { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 8px; }
 .run-area { display: grid; gap: 11px; margin-top: 17px; }
 .run-area p { min-height: 44px; color: #4f5555; font-size: 9px; line-height: 1.55; }
 .run-area small { color: var(--faint); font-size: 8px; text-align: center; }
+.run-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
+.restart-button { min-height: 43px; padding: 0 12px; border: 1px solid var(--line-strong); background: white; color: var(--muted); font-size: 9px; font-weight: 700; }
+.restart-button:hover { border-color: #aeb5ba; color: var(--ink); }
 
 .artifact-toolbar { justify-content: space-between; gap: 14px; padding: 0 2px; }
 .artifact-toolbar h2 { max-width: 640px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

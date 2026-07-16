@@ -20,6 +20,7 @@ import {
   MonitorUp,
   Plus,
   Presentation,
+  RotateCcw,
   Settings2,
   Sparkles,
   Table2,
@@ -72,6 +73,20 @@ type GenerationSource = {
   styleId: string;
   assets: GeneratedAsset[];
 };
+
+type PipelineCheckpoint = {
+  source: GenerationSource;
+  config: ApiConfig;
+  sourceImages: ApiSourceImage[];
+  sourceUploads: GeneratedAsset[];
+  deck?: NotebookDeckSpec;
+  assets: GeneratedAsset[];
+  generatedBySlide: Record<number, GeneratedAsset>;
+  requestedImageCount: number;
+  resumeFrom: StepId;
+};
+
+const stepOrder: StepId[] = ["logic", "image", "decompose", "assemble", "export"];
 
 const defaultApiConfig: ApiConfig = {
   configVersion: 4,
@@ -140,8 +155,10 @@ function App() {
   const [connection, setConnection] = useState<"idle" | "testing" | "success" | "error">("idle");
   const [envKeyConfigured, setEnvKeyConfigured] = useState(false);
   const [apiCalls, setApiCalls] = useState(0);
+  const [failedStep, setFailedStep] = useState<StepId | null>(null);
   const [status, setStatus] = useState("本地闭环可直接运行；开启 API 模式可完成五阶段增强。");
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const pipelineCheckpointRef = useRef<PipelineCheckpoint | null>(null);
 
   const currentSlide = deck.slides[selectedSlide] || deck.slides[0];
   const currentStyle = styleProfiles.find((style) => style.id === styleId)
@@ -189,6 +206,8 @@ function App() {
       setStatus(detail);
       return;
     }
+    pipelineCheckpointRef.current = null;
+    setFailedStep(null);
     const next = buildLocalDeck(source);
     const sourceUploads = source.assets.filter((asset) => asset.kind === "upload");
     setDeck(next);
@@ -206,124 +225,213 @@ function App() {
   async function runAiPipeline(
     source: GenerationSource = { topic, audience, slideCount, textInput, tableInput, imageBrief, styleId, assets },
     config: ApiConfig = apiConfig,
+    resume = false,
   ) {
     if (isRunning) return;
+    const savedCheckpoint = resume ? pipelineCheckpointRef.current : null;
+    source = savedCheckpoint?.source || source;
+    config = savedCheckpoint?.config || config;
     if (!source.audience.trim()) {
       const detail = "请先填写目标受众，例如：董事会、投资人、客户或内部团队。";
       setHomeMessage(detail);
       setStatus(detail);
       return;
     }
-    const sourceUploads = source.assets.filter((asset) => asset.kind === "upload");
+    const sourceUploads = savedCheckpoint?.sourceUploads || source.assets.filter((asset) => asset.kind === "upload");
     const sourceStyle = styleProfiles.find((style) => style.id === source.styleId)
       || styleProfiles.find((style) => style.id === "product-calm")!;
     setRunning(true);
-    setApiCalls(0);
-    resetSteps();
-    let activeStep: StepId = "logic";
+    setFailedStep(null);
+    if (!resume) {
+      setApiCalls(0);
+      resetSteps();
+      setAssets(sourceUploads);
+    }
+    let checkpoint: PipelineCheckpoint = savedCheckpoint || {
+      source,
+      config,
+      sourceImages: [],
+      sourceUploads,
+      assets: sourceUploads,
+      generatedBySlide: {},
+      requestedImageCount: 0,
+      resumeFrom: "logic",
+    };
+    const startFrom = checkpoint.resumeFrom;
+    let activeStep: StepId = startFrom;
+    let nextDeck = checkpoint.deck;
+    let nextAssets = checkpoint.assets;
+    let sourceImages = checkpoint.sourceImages;
+    if (resume) {
+      updateStep(startFrom, "running", `正在从“${stepTitle(startFrom)}”继续，前序结果已保留`);
+      setStatus(`正在从第 ${String(stepOrder.indexOf(startFrom) + 1).padStart(2, "0")} 步继续，不会重复已完成的 API 调用…`);
+    }
     try {
-      setStatus("正在读取文字、表格和图片，并建立演示论证链…");
-      updateStep("logic", "running", "模型正在区分结论、证据、缺口与行动");
-      const sourceImages = await Promise.all(sourceUploads.slice(0, 3).map(assetToApiImage));
-      const response = await generateAiDeck(config, {
-        topic: source.topic,
-        audience: source.audience,
-        slideCount: source.slideCount,
-        textInput: source.textInput,
-        tableInput: source.tableInput,
-        imageBrief: source.imageBrief,
-        styleId: source.styleId,
-        images: sourceImages,
-      });
-      let nextDeck = attachEditableTable(remapUploadedImageIndexes(response.deck, sourceUploads), source.tableInput);
-      setDeck(nextDeck);
-      setSelectedSlide(0);
-      setApiCalls((value) => value + response.meta.apiCalls);
-      updateStep("logic", "done", response.meta.refinementApplied
-        ? `双轮策划完成：${nextDeck.slides.length} 页因果叙事，${nextDeck.story.evidenceGaps.length} 个证据缺口`
-        : `已形成 ${nextDeck.slides.length} 页叙事，发现 ${nextDeck.story.evidenceGaps.length} 个证据缺口`);
-
-      let nextAssets = sourceUploads;
-      if (config.imageEnabled) {
-        activeStep = "image";
-        updateStep("image", "running", source.styleId === "blank" ? "未套用风格图，正在按内容生成视觉" : `正在用 ${sourceStyle.name} 引导 GPT Image 2`);
-        setStatus(source.styleId === "blank" ? "正在按内容和用户参考图生成视觉，不套用内置风格…" : "正在将内置风格图与用户内容图一起送入 Image 2…");
-        const requestedImageCount = config.imageCount === 0 ? nextDeck.slides.length : Math.min(config.imageCount, nextDeck.slides.length);
-        const jobs = createImageJobs(nextDeck, requestedImageCount, config.imageTextMode);
-        const imageResponse = await generateAiImages(config, jobs, sourceImages, source.styleId);
-        if (imageResponse.images.length !== jobs.length) {
-          throw new Error(`图片服务只返回 ${imageResponse.images.length}/${jobs.length} 张，已停止导出，避免生成页数不完整的 PPTX。`);
-        }
-        const slideImages = await Promise.all(imageResponse.images.map(normalizeGeneratedSlideImage));
-        const startIndex = maxAssetIndex(nextAssets) + 1;
-        const generatedAssets: GeneratedAsset[] = slideImages.map((image, index) => ({
-          id: makeId("generated"),
-          filename: `image2-slide-${image.slideIndex + 1}.png`,
-          url: image.url,
-          prompt: image.prompt,
-          index: startIndex + index,
-          kind: "generated",
-          width: image.width,
-          height: image.height,
-          summary: config.imageTextMode === "integrated"
-            ? `Image 2 为第 ${image.slideIndex + 1} 页生成的整页图文画面`
-            : `Image 2 为第 ${image.slideIndex + 1} 页生成的独立主视觉资产`,
-        }));
-        nextAssets = [...nextAssets, ...generatedAssets];
-        nextDeck = {
-          ...nextDeck,
-          slides: nextDeck.slides.map((slide, index) => {
-            const position = slideImages.findIndex((image) => image.slideIndex === index);
-            return position >= 0 ? {
-              ...slide,
-              imageIndex: generatedAssets[position].index,
-              visualMode: config.imageTextMode === "integrated" ? "full-slide-text" : "panel",
-            } : slide;
-          }),
+      if (shouldRunFrom(startFrom, "logic")) {
+        activeStep = "logic";
+        setStatus("正在读取文字、表格和图片，并建立演示论证链…");
+        updateStep("logic", "running", "模型正在区分结论、证据、缺口与行动");
+        sourceImages = await Promise.all(sourceUploads.slice(0, 3).map(assetToApiImage));
+        const response = await generateAiDeck(config, {
+          topic: source.topic,
+          audience: source.audience,
+          slideCount: source.slideCount,
+          textInput: source.textInput,
+          tableInput: source.tableInput,
+          imageBrief: source.imageBrief,
+          styleId: source.styleId,
+          images: sourceImages,
+        });
+        nextDeck = attachEditableTable(remapUploadedImageIndexes(response.deck, sourceUploads), source.tableInput);
+        nextAssets = sourceUploads;
+        checkpoint = {
+          ...checkpoint,
+          sourceImages,
+          deck: nextDeck,
+          assets: nextAssets,
+          generatedBySlide: {},
+          resumeFrom: "image",
         };
-        setAssets(nextAssets);
+        pipelineCheckpointRef.current = checkpoint;
         setDeck(nextDeck);
-        setApiCalls((value) => value + imageResponse.meta.apiCalls);
-        updateStep("image", "done", config.imageTextMode === "integrated"
-          ? `按要求生成 ${generatedAssets.length}/${requestedImageCount} 张连续整页图文画面`
-          : `按要求生成 ${generatedAssets.length}/${requestedImageCount} 张独立主视觉资产`);
+        setAssets(nextAssets);
+        setSelectedSlide(0);
+        setApiCalls((value) => value + response.meta.apiCalls);
+        updateStep("logic", "done", response.meta.refinementApplied
+          ? `双轮策划完成：${nextDeck.slides.length} 页因果叙事，${nextDeck.story.evidenceGaps.length} 个证据缺口`
+          : `已形成 ${nextDeck.slides.length} 页叙事，发现 ${nextDeck.story.evidenceGaps.length} 个证据缺口`);
+      }
+      if (!nextDeck) throw new Error("没有可继续使用的演示结构，请从内容策划重新开始。");
+      if (shouldRunFrom(startFrom, "image")) {
+        activeStep = "image";
+        if (config.imageEnabled) {
+          const requestedImageCount = config.imageCount === 0 ? nextDeck.slides.length : Math.min(config.imageCount, nextDeck.slides.length);
+          const jobs = createImageJobs(nextDeck, requestedImageCount, config.imageTextMode);
+          checkpoint.requestedImageCount = requestedImageCount;
+          updateStep("image", "running", imageProgressDetail(checkpoint.generatedBySlide, requestedImageCount));
+          for (const job of jobs) {
+            if (checkpoint.generatedBySlide[job.slideIndex]) continue;
+            const completed = Object.keys(checkpoint.generatedBySlide).length;
+            setStatus(source.styleId === "blank"
+              ? `正在生成第 ${job.slideIndex + 1}/${requestedImageCount} 页；已完成 ${completed} 页，成功结果会立即保存…`
+              : `正在用 ${sourceStyle.name} 生成第 ${job.slideIndex + 1}/${requestedImageCount} 页；已完成 ${completed} 页…`);
+            updateStep("image", "running", `正在生成第 ${job.slideIndex + 1}/${requestedImageCount} 页；已保存 ${completed}/${requestedImageCount} 页`);
+            let imageResponse;
+            try {
+              imageResponse = await generateAiImages(config, [job], sourceImages, source.styleId);
+            } catch (error) {
+              const message = error instanceof Error ? error.message : "图片服务请求失败";
+              throw new Error(`第 ${job.slideIndex + 1}/${requestedImageCount} 页生图失败：${message}`);
+            }
+            if (imageResponse.images.length !== 1) {
+              throw new Error(`第 ${job.slideIndex + 1}/${requestedImageCount} 页没有返回完整图片`);
+            }
+            const image = await normalizeGeneratedSlideImage(imageResponse.images[0]);
+            const generatedAsset: GeneratedAsset = {
+              id: makeId("generated"),
+              filename: `image2-slide-${image.slideIndex + 1}.png`,
+              url: image.url,
+              prompt: image.prompt,
+              index: maxAssetIndex([...sourceUploads, ...orderedGeneratedAssets(checkpoint.generatedBySlide)]) + 1,
+              kind: "generated",
+              width: image.width,
+              height: image.height,
+              summary: config.imageTextMode === "integrated"
+                ? `Image 2 为第 ${image.slideIndex + 1} 页生成的整页图文画面`
+                : `Image 2 为第 ${image.slideIndex + 1} 页生成的独立主视觉资产`,
+            };
+            checkpoint.generatedBySlide[image.slideIndex] = generatedAsset;
+            nextAssets = [...sourceUploads, ...orderedGeneratedAssets(checkpoint.generatedBySlide)];
+            nextDeck = applyGeneratedAssets(nextDeck, checkpoint.generatedBySlide, config.imageTextMode);
+            checkpoint = {
+              ...checkpoint,
+              deck: nextDeck,
+              assets: nextAssets,
+              resumeFrom: "image",
+            };
+            pipelineCheckpointRef.current = checkpoint;
+            setAssets(nextAssets);
+            setDeck(nextDeck);
+            setApiCalls((value) => value + imageResponse.meta.apiCalls);
+            updateStep("image", "running", imageProgressDetail(checkpoint.generatedBySlide, requestedImageCount));
+          }
+          const generatedAssets = orderedGeneratedAssets(checkpoint.generatedBySlide);
+          if (generatedAssets.length < requestedImageCount) {
+            throw new Error(`图片只完成 ${generatedAssets.length}/${requestedImageCount} 页`);
+          }
+          updateStep("image", "done", config.imageTextMode === "integrated"
+            ? `按要求生成 ${generatedAssets.length}/${requestedImageCount} 张连续整页图文画面`
+            : `按要求生成 ${generatedAssets.length}/${requestedImageCount} 张独立主视觉资产`);
+        } else {
+          updateStep("image", "skipped", "图片生成已关闭，保留用户上传图片");
+        }
+        checkpoint = { ...checkpoint, deck: nextDeck, assets: nextAssets, resumeFrom: "decompose" };
+        pipelineCheckpointRef.current = checkpoint;
+      }
 
+      if (shouldRunFrom(startFrom, "decompose")) {
         activeStep = "decompose";
-        if (config.imageTextMode === "integrated") {
-          updateStep("decompose", "done", `已校验 ${generatedAssets.length} 张连续成片：页数一致、16:9 画幅、统一风格语言`);
+        if (!config.imageEnabled) {
+          updateStep("decompose", "skipped", "没有生成图需要校验");
+        } else if (config.imageTextMode === "integrated") {
+          updateStep("decompose", "done", `已校验 ${orderedGeneratedAssets(checkpoint.generatedBySlide).length} 张连续成片：页数一致、16:9 画幅、统一风格语言`);
         } else {
           updateStep("decompose", "done", "原生分层模式已保留独立图片与文字对象");
         }
-      } else {
-        updateStep("image", "skipped", "图片生成已关闭，保留用户上传图片");
-        updateStep("decompose", "skipped", "没有生成图需要拆解");
+        checkpoint = { ...checkpoint, resumeFrom: "assemble" };
+        pipelineCheckpointRef.current = checkpoint;
       }
 
-      activeStep = "assemble";
-      updateStep("assemble", "running", config.imageTextMode === "integrated" ? "正在按原始构图装入整页融合成片" : "正在映射原生文字、表格、图片和讲稿备注");
-      setStatus(config.imageEnabled && config.imageTextMode === "integrated" ? "正在组装图文页面并保存可追溯内容源…" : "正在组装可编辑页面对象…");
-      await sleep(240);
-      setDeck(nextDeck);
-      updateStep("assemble", "done", config.imageEnabled && config.imageTextMode === "integrated"
-        ? `${nextDeck.slides.length} 页已组装，完整保留 Image 2 的图文构图`
-        : `${nextDeck.slides.length} 页已组装，文字和表格保持原生可编辑`);
+      if (shouldRunFrom(startFrom, "assemble")) {
+        activeStep = "assemble";
+        updateStep("assemble", "running", config.imageTextMode === "integrated" ? "正在按原始构图装入整页融合成片" : "正在映射原生文字、表格、图片和讲稿备注");
+        setStatus(config.imageEnabled && config.imageTextMode === "integrated" ? "正在组装图文页面并保存可追溯内容源…" : "正在组装可编辑页面对象…");
+        await sleep(240);
+        setDeck(nextDeck);
+        updateStep("assemble", "done", config.imageEnabled && config.imageTextMode === "integrated"
+          ? `${nextDeck.slides.length} 页已组装，完整保留 Image 2 的图文构图`
+          : `${nextDeck.slides.length} 页已组装，文字和表格保持原生可编辑`);
+        checkpoint = { ...checkpoint, deck: nextDeck, assets: nextAssets, resumeFrom: "export" };
+        pipelineCheckpointRef.current = checkpoint;
+      }
 
-      activeStep = "export";
-      updateStep("export", "running", "正在写入 PowerPoint 文件");
-      setStatus(config.imageEnabled && config.imageTextMode === "integrated"
-        ? "正在生成 PPTX，并写入图文页面、内容源与讲稿备注…"
-        : "正在生成可编辑 PPTX，完成后浏览器会保存文件…");
-      await exportNotebookDeck(nextDeck, nextAssets);
-      updateStep("export", "done", "PPTX 已生成并保存到下载目录");
+      if (shouldRunFrom(startFrom, "export")) {
+        activeStep = "export";
+        updateStep("export", "running", "正在写入 PowerPoint 文件");
+        setStatus(config.imageEnabled && config.imageTextMode === "integrated"
+          ? "正在生成 PPTX，并写入图文页面、内容源与讲稿备注…"
+          : "正在生成可编辑 PPTX，完成后浏览器会保存文件…");
+        await exportNotebookDeck(nextDeck, nextAssets);
+        updateStep("export", "done", "PPTX 已生成并保存到下载目录");
+      }
+      pipelineCheckpointRef.current = null;
+      setFailedStep(null);
       setStatus(config.imageEnabled && config.imageTextMode === "integrated"
         ? "五阶段流程完成。融合页修改内容源后需要重新生成画面。"
         : "五阶段流程完成。你可以继续修改右侧内容并再次导出。");
     } catch (error) {
-      updateStep(activeStep, "error", error instanceof Error ? error.message : "流程执行失败");
-      setStatus(error instanceof Error ? error.message : "API 流程执行失败。");
+      const message = error instanceof Error ? error.message : "流程执行失败";
+      checkpoint = { ...checkpoint, deck: nextDeck, assets: nextAssets, resumeFrom: activeStep };
+      pipelineCheckpointRef.current = checkpoint;
+      setFailedStep(activeStep);
+      updateStep(activeStep, "error", `${message}；前序成功结果已保存`);
+      setStatus(`${message}。可以从“${stepTitle(activeStep)}”继续，不会重跑已经完成的环节。`);
     } finally {
       setRunning(false);
     }
+  }
+
+  function resumeAiPipeline() {
+    const checkpoint = pipelineCheckpointRef.current;
+    if (!checkpoint || isRunning) return;
+    void runAiPipeline(checkpoint.source, checkpoint.config, true);
+  }
+
+  function restartAiPipeline() {
+    if (isRunning) return;
+    pipelineCheckpointRef.current = null;
+    setFailedStep(null);
+    void runAiPipeline();
   }
 
   async function exportCurrentDeck() {
@@ -602,7 +710,15 @@ function App() {
           <p className="task-summary">把文字、表格和图像整理成一份能讲清楚、能继续修改的 PowerPoint。</p>
 
           <div className="step-list">
-            {steps.map((step, index) => <WorkflowRow key={step.id} step={step} index={index} />)}
+            {steps.map((step, index) => (
+              <WorkflowRow
+                key={step.id}
+                step={step}
+                index={index}
+                onRetry={step.status === "error" && failedStep === step.id ? resumeAiPipeline : undefined}
+                retrying={isRunning && failedStep === step.id}
+              />
+            ))}
           </div>
 
           <div className="run-summary">
@@ -613,14 +729,17 @@ function App() {
           <div className="run-area">
             <p>{status}</p>
             {mode === "ai" ? (
-              <button className="primary-button" onClick={() => void runAiPipeline()} disabled={isRunning}>
-                {isRunning ? <Loader2 className="spin" size={16} /> : <WandSparkles size={16} />}
-                {isRunning ? "正在执行五阶段…" : "运行并生成 PPTX"}
-              </button>
+              <div className="run-actions">
+                <button className="primary-button" onClick={failedStep ? resumeAiPipeline : () => void runAiPipeline()} disabled={isRunning}>
+                  {isRunning ? <Loader2 className="spin" size={16} /> : failedStep ? <RotateCcw size={16} /> : <WandSparkles size={16} />}
+                  {isRunning ? "正在执行五阶段…" : failedStep ? `从“${stepTitle(failedStep)}”继续` : "运行并生成 PPTX"}
+                </button>
+                {failedStep && <button className="restart-button" onClick={restartAiPipeline} disabled={isRunning}>重新开始</button>}
+              </div>
             ) : (
               <button className="primary-button" onClick={() => runLocal()}><Sparkles size={16} />生成本地方案</button>
             )}
-            <small>{mode === "ai" ? "文字和图片会发送到你配置的模型服务。" : "不联网、不需要 Key，所有处理在浏览器完成。"}</small>
+            <small>{mode === "ai" ? failedStep ? "检查点保存在当前页面中；继续时不会重复成功的环节和图片。" : "文字和图片会发送到你配置的模型服务。" : "不联网、不需要 Key，所有处理在浏览器完成。"}</small>
           </div>
         </section>
 
@@ -654,6 +773,45 @@ function App() {
       </div>
     </main>
   );
+}
+
+function shouldRunFrom(start: StepId, target: StepId) {
+  return stepOrder.indexOf(target) >= stepOrder.indexOf(start);
+}
+
+function stepTitle(step: StepId) {
+  return initialSteps.find((item) => item.id === step)?.title || "失败环节";
+}
+
+function orderedGeneratedAssets(generatedBySlide: Record<number, GeneratedAsset>) {
+  return Object.entries(generatedBySlide)
+    .sort(([left], [right]) => Number(left) - Number(right))
+    .map(([, asset]) => asset);
+}
+
+function imageProgressDetail(generatedBySlide: Record<number, GeneratedAsset>, total: number) {
+  const completed = orderedGeneratedAssets(generatedBySlide).length;
+  return completed
+    ? `已保存 ${completed}/${total} 页；下一页失败时可从当前进度继续`
+    : `准备逐页生成 ${total} 页，每成功一页立即保存检查点`;
+}
+
+function applyGeneratedAssets(
+  deck: NotebookDeckSpec,
+  generatedBySlide: Record<number, GeneratedAsset>,
+  textMode: ApiConfig["imageTextMode"],
+) {
+  return {
+    ...deck,
+    slides: deck.slides.map((slide, index) => {
+      const asset = generatedBySlide[index];
+      return asset ? {
+        ...slide,
+        imageIndex: asset.index,
+        visualMode: textMode === "integrated" ? "full-slide-text" as const : "panel" as const,
+      } : slide;
+    }),
+  };
 }
 
 function HomeScreen({
@@ -844,13 +1002,16 @@ function HomeScreen({
   );
 }
 
-function WorkflowRow({ step, index }: { step: WorkflowStep; index: number }) {
+function WorkflowRow({ step, index, onRetry, retrying }: { step: WorkflowStep; index: number; onRetry?: () => void; retrying?: boolean }) {
   return (
     <div className={`workflow-row ${step.status}`}>
       <div className="step-status">
         {step.status === "running" ? <Loader2 className="spin" size={15} /> : step.status === "done" ? <Check size={14} /> : step.status === "error" ? <X size={14} /> : <Circle size={11} />}
       </div>
-      <div><span>0{index + 1}</span><strong>{step.title}</strong><small>{step.engine}</small><p>{step.detail}</p></div>
+      <div>
+        <span>0{index + 1}</span><strong>{step.title}</strong><small>{step.engine}</small><p>{step.detail}</p>
+        {onRetry && <button className="step-retry" onClick={onRetry} disabled={retrying}>{retrying ? <Loader2 className="spin" size={12} /> : <RotateCcw size={12} />}从此处继续</button>}
+      </div>
     </div>
   );
 }

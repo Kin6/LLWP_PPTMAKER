@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const imageBase64 = (await fs.readFile(path.join(root, "public", "style-guides", "product-calm.png"))).toString("base64");
+const failedImageTokens = new Set();
 
 const deck = {
   title: "模拟 API：五阶段 PPT 工作流",
@@ -42,6 +43,8 @@ const deck = {
 function deckForRequest(text) {
   const match = String(text || "").match(/(?:必须恰好|严格)\s*(\d+)\s*页/);
   const count = Math.max(1, Math.min(50, Number(match?.[1]) || deck.slides.length));
+  const failureMatch = String(text).match(/FAIL_IMAGE_ONCE_PAGE_(\d+)/);
+  const failurePage = Number(failureMatch?.[1]) || 0;
   const slides = Array.from({ length: count }, (_, index) => {
     const base = deck.slides[index % deck.slides.length];
     const isLast = index === count - 1;
@@ -50,6 +53,7 @@ function deckForRequest(text) {
       title: isLast && count > 1 ? "把前述证据收束为下一步行动" : base.title,
       subtitle: `模拟服务返回的第 ${index + 1}/${count} 页`,
       speakerNotes: `承接第 ${Math.max(1, index)} 页，并引向第 ${Math.min(count, index + 2)} 页。`,
+      imagePrompt: `${base.imagePrompt}${index + 1 === failurePage ? ` FAIL_IMAGE_ONCE_PAGE_${failurePage}` : ""}`,
     };
   });
   if (String(text).includes("RETURN_OBJECT_FIELDS")) {
@@ -61,6 +65,13 @@ function deckForRequest(text) {
     };
   }
   return { ...deck, slides };
+}
+
+function shouldFailImageOnce(prompt) {
+  const match = String(prompt || "").match(/FAIL_IMAGE_ONCE_PAGE_(\d+)/);
+  if (!match || failedImageTokens.has(match[0])) return false;
+  failedImageTokens.add(match[0]);
+  return true;
 }
 
 const decomposition = {
@@ -91,6 +102,12 @@ const server = http.createServer(async (req, res) => {
       res.statusCode = 400;
       return res.end(JSON.stringify({ error: { message: "Prompt must contain an explicit drawing instruction" } }));
     }
+    const promptMatch = multipart.match(/name="prompt"\r\n\r\n([\s\S]*?)\r\n--/);
+    const decodedPrompt = promptMatch ? Buffer.from(promptMatch[1], "latin1").toString("utf8") : "";
+    if (shouldFailImageOnce(decodedPrompt)) {
+      res.statusCode = 504;
+      return res.end(JSON.stringify({ error: { message: "The operation was aborted due to timeout" } }));
+    }
     return res.end(JSON.stringify({ data: [{ url: "http://127.0.0.1:4010/mock-image.png" }] }));
   }
   if (req.method === "POST" && req.url === "/v1/images/generations") {
@@ -100,6 +117,10 @@ const server = http.createServer(async (req, res) => {
     if (!String(parsed.prompt || "").includes("画一个")) {
       res.statusCode = 400;
       return res.end(JSON.stringify({ error: { message: "Prompt must contain an explicit drawing instruction" } }));
+    }
+    if (shouldFailImageOnce(parsed.prompt)) {
+      res.statusCode = 504;
+      return res.end(JSON.stringify({ error: { message: "The operation was aborted due to timeout" } }));
     }
     return res.end(JSON.stringify({ data: [{ url: "http://127.0.0.1:4010/mock-image.png" }] }));
   }
