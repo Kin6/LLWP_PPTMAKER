@@ -30,6 +30,7 @@ import {
   X,
 } from "lucide-react";
 import { parseAttachment, type ParsedAttachment } from "./lib/attachmentParser";
+import { containImageRect, coverImageRect } from "./lib/imageGeometry";
 import { exportNotebookDeck } from "./lib/exportDeck";
 import { buildLocalDeck, parseTable } from "./lib/localPlanner";
 import {
@@ -1159,23 +1160,26 @@ async function normalizeGeneratedSlideImage(image: { slideIndex: number; url: st
   const source = await loadImage(image.url);
   const targetRatio = 16 / 9;
   const sourceRatio = source.naturalWidth / Math.max(1, source.naturalHeight);
-  let sx = 0;
-  let sy = 0;
-  let sw = source.naturalWidth;
-  let sh = source.naturalHeight;
-  if (sourceRatio > targetRatio) {
-    sw = Math.round(source.naturalHeight * targetRatio);
-    sx = Math.round((source.naturalWidth - sw) / 2);
-  } else if (sourceRatio < targetRatio) {
-    sh = Math.round(source.naturalWidth / targetRatio);
-    sy = Math.round((source.naturalHeight - sh) / 2);
-  }
   const canvas = document.createElement("canvas");
-  canvas.width = Math.min(1536, sw);
+  canvas.width = 1536;
   canvas.height = Math.round(canvas.width / targetRatio);
   const context = canvas.getContext("2d");
   if (!context) throw new Error("浏览器无法整理 Image 2 页面画布。");
-  context.drawImage(source, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+
+  if (Math.abs(sourceRatio - targetRatio) < 0.01) {
+    context.drawImage(source, 0, 0, canvas.width, canvas.height);
+  } else {
+    const background = coverImageRect(source.naturalWidth, source.naturalHeight, canvas.width, canvas.height);
+    context.save();
+    context.filter = "blur(30px) brightness(0.58) saturate(0.82)";
+    context.drawImage(source, background.x - 28, background.y - 28, background.width + 56, background.height + 56);
+    context.restore();
+    context.fillStyle = "rgba(8, 10, 12, 0.12)";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+
+    const foreground = containImageRect(source.naturalWidth, source.naturalHeight, canvas.width, canvas.height, 0.015);
+    context.drawImage(source, foreground.x, foreground.y, foreground.width, foreground.height);
+  }
   return { ...image, url: canvas.toDataURL("image/png"), width: canvas.width, height: canvas.height };
 }
 
