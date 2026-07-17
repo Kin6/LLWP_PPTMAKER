@@ -30,6 +30,10 @@ API 流程支持当前页面内的断点续跑。内容策划完成后会保存 
 
 真正可编辑的 SVG → DrawingML 升级路线和开源方案比较见 [docs/EDITABLE_PIPELINE.md](./docs/EDITABLE_PIPELINE.md)。
 
+## 协作复刻
+
+从克隆、环境配置、无费用模拟验收到真实 API 联调、目录职责和故障排查，见 [docs/COLLABORATOR_REPRODUCTION.md](./docs/COLLABORATOR_REPRODUCTION.md)。这份指南以当前仓库和锁定依赖为准，适合新的开发合作者在另一台机器上复刻同一套工作流。
+
 ## 本地模式
 
 不填写 API Key 也能完成：
@@ -47,7 +51,7 @@ API 流程支持当前页面内的断点续跑。内容策划完成后会保存 
 
 ```powershell
 cd D:\ppt_maker
-npm install
+npm ci
 npm run dev
 ```
 
@@ -89,7 +93,9 @@ IMAGE_API_MAX_RETRIES=1
 npm run build
 npm run test:attachments
 npm run test:visual
-node scripts/mock-openai.mjs
+npm run test:image-geometry
+npm run test:image-prompt
+npm run test:integrated-export
 ```
 
 开发用模拟服务运行在 `http://127.0.0.1:4010/v1`，可在没有真实 API 费用的情况下验收五阶段前端流程。它不会替代正式模型质量。
