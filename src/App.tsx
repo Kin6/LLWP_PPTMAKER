@@ -14,7 +14,7 @@ import {
   FolderOpen,
   House,
   Image as ImageIcon,
-  KeyRound,
+  ShieldCheck,
   Layers3,
   Loader2,
   MonitorUp,
@@ -38,7 +38,6 @@ import {
   generateAiImages,
   testApiConnection,
   type ApiConfig,
-  type ApiProvider,
   type ApiSourceImage,
   type ImageJob,
 } from "./lib/apiClient";
@@ -90,15 +89,8 @@ type PipelineCheckpoint = {
 const stepOrder: StepId[] = ["logic", "image", "decompose", "assemble", "export"];
 
 const defaultApiConfig: ApiConfig = {
-  configVersion: 5,
-  provider: "openai",
-  baseUrl: "https://api.openai.com/v1",
-  model: "gpt-5.6-terra",
-  apiKey: "",
+  configVersion: 6,
   imageEnabled: true,
-  imageBaseUrl: "https://api.openai.com/v1",
-  imageApiKey: "",
-  imageModel: "gpt-image-2",
   imageCount: 0,
   imageQuality: "high",
   imageTextMode: "integrated",
@@ -177,14 +169,9 @@ function App() {
     fetch("/api/health").then((response) => response.json()).then((data) => {
       setEnvKeyConfigured(Boolean(data.envKeyConfigured));
       const defaults = data.apiDefaults;
-      if (defaults?.source === "environment") {
+      if (defaults) {
         setApiConfig((current) => ({
           ...current,
-          provider: defaults.provider === "compatible" ? "compatible" : "openai",
-          baseUrl: String(defaults.baseUrl || current.baseUrl),
-          model: String(defaults.model || current.model),
-          imageBaseUrl: String(defaults.imageBaseUrl || current.imageBaseUrl),
-          imageModel: String(defaults.imageModel || current.imageModel),
           imageTimeoutSeconds: clamp(Number(defaults.imageTimeoutMs) / 1_000, 240, 900),
           imageMaxRetries: clamp(Number(defaults.imageMaxRetries), 0, 2),
         }));
@@ -1031,14 +1018,10 @@ function ApiSettings({ config, onChange, envKeyConfigured, connection, onTest }:
   const patch = (value: Partial<ApiConfig>) => onChange({ ...config, ...value });
   return (
     <section className="api-settings">
-      <div className="section-line"><div><span className="eyebrow">MODEL SERVICE</span><h2>API 设置</h2></div><KeyRound size={15} /></div>
-      <label><span>文本与视觉模型服务</span><select value={config.provider} onChange={(event) => patch({ provider: event.target.value as ApiProvider, baseUrl: event.target.value === "ollama" ? "http://127.0.0.1:11434/v1" : config.baseUrl })}><option value="openai">OpenAI</option><option value="compatible">OpenAI Compatible</option><option value="ollama">Ollama</option></select></label>
-      <label><span>Base URL</span><input value={config.baseUrl} onChange={(event) => patch({ baseUrl: event.target.value })} /></label>
-      <label><span>文本 / 视觉模型</span><input value={config.model} onChange={(event) => patch({ model: event.target.value })} placeholder="gpt-5.6-terra" /></label>
-      <label><span>API Key {envKeyConfigured && <em>环境变量已配置</em>}</span><input type="password" autoComplete="off" value={config.apiKey} onChange={(event) => patch({ apiKey: event.target.value })} placeholder={envKeyConfigured ? "自动使用系统环境变量" : "sk-…"} /></label>
-      <div className="api-note">页面 Key 只保存在当前浏览器会话，并由本机服务转发。留空时自动读取系统环境变量或项目根目录 <code>.env.local</code> 中的 <code>OPENAI_API_KEY</code>。</div>
+      <div className="section-line"><div><span className="eyebrow">SYSTEM ENVIRONMENT</span><h2>API 设置</h2></div><ShieldCheck size={15} /></div>
+      <div className="api-note"><strong>{envKeyConfigured ? "已检测到系统 API Key" : "未检测到系统 API Key"}</strong><br />密钥、服务地址和模型只从本机系统环境变量读取，不会显示、保存或发送到浏览器。请配置 <code>OPENAI_API_KEY</code>、<code>OPENAI_API_BASE</code>、<code>TEXT_MODEL</code> 和 <code>IMAGE_MODEL</code> 后重启服务。</div>
       <label className="toggle-row"><span><strong>Image 2 视觉生成</strong><small>生成整页图或独立主视觉，按页面计费</small></span><input type="checkbox" checked={config.imageEnabled} onChange={(event) => patch({ imageEnabled: event.target.checked })} /></label>
-      {config.imageEnabled && <div className="image-config"><label className="wide"><span>图片 API Base URL</span><input value={config.imageBaseUrl || ""} onChange={(event) => patch({ imageBaseUrl: event.target.value })} /></label><label className="wide"><span>图片 API Key（留空则复用上方 Key）</span><input type="password" autoComplete="off" value={config.imageApiKey || ""} onChange={(event) => patch({ imageApiKey: event.target.value })} placeholder="可与文本服务分开" /></label><label className="wide"><span>成片模式</span><select value={config.imageTextMode} onChange={(event) => patch({ imageTextMode: event.target.value as ApiConfig["imageTextMode"] })}><option value="integrated">整页图文融合（推荐成片）</option><option value="native">原生分层（编辑优先）</option></select><small className="field-hint">整页融合让文字直接参与画面构图；原生分层便于编辑，但文字与图片的视觉融合度会降低。</small></label><label><span>图片模型</span><input value={config.imageModel} onChange={(event) => patch({ imageModel: event.target.value })} /></label><label><span>生图页数</span><select value={config.imageCount} onChange={(event) => patch({ imageCount: clamp(Number(event.target.value), 0, 50) })}><option value={0}>跟随 PPT 总页数</option>{Array.from({ length: 50 }, (_, index) => index + 1).map((count) => <option key={count} value={count}>{count} 页</option>)}</select></label><label><span>质量</span><select value={config.imageQuality} onChange={(event) => patch({ imageQuality: event.target.value as ApiConfig["imageQuality"] })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label><label><span>单页最长等待</span><select value={config.imageTimeoutSeconds} onChange={(event) => patch({ imageTimeoutSeconds: clamp(Number(event.target.value), 240, 900) })}><option value={240}>4 分钟</option><option value={360}>6 分钟</option><option value={600}>10 分钟（推荐）</option><option value={900}>15 分钟</option></select></label><label><span>超时自动重试</span><select value={config.imageMaxRetries} onChange={(event) => patch({ imageMaxRetries: clamp(Number(event.target.value), 0, 2) })}><option value={0}>不重试</option><option value={1}>重试 1 次（推荐）</option><option value={2}>重试 2 次</option></select></label><small className="field-hint wide">第三方网关可能早于本地上限中止请求；自动重试耗尽后仍可从失败页继续。</small></div>}
+      {config.imageEnabled && <div className="image-config"><label className="wide"><span>成片模式</span><select value={config.imageTextMode} onChange={(event) => patch({ imageTextMode: event.target.value as ApiConfig["imageTextMode"] })}><option value="integrated">整页图文融合（推荐成片）</option><option value="native">原生分层（编辑优先）</option></select><small className="field-hint">整页融合让文字直接参与画面构图；原生分层便于编辑，但文字与图片的视觉融合度会降低。</small></label><label><span>生图页数</span><select value={config.imageCount} onChange={(event) => patch({ imageCount: clamp(Number(event.target.value), 0, 50) })}><option value={0}>跟随 PPT 总页数</option>{Array.from({ length: 50 }, (_, index) => index + 1).map((count) => <option key={count} value={count}>{count} 页</option>)}</select></label><label><span>质量</span><select value={config.imageQuality} onChange={(event) => patch({ imageQuality: event.target.value as ApiConfig["imageQuality"] })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label><label><span>单页最长等待</span><select value={config.imageTimeoutSeconds} onChange={(event) => patch({ imageTimeoutSeconds: clamp(Number(event.target.value), 240, 900) })}><option value={240}>4 分钟</option><option value={360}>6 分钟</option><option value={600}>10 分钟（推荐）</option><option value={900}>15 分钟</option></select></label><label><span>超时自动重试</span><select value={config.imageMaxRetries} onChange={(event) => patch({ imageMaxRetries: clamp(Number(event.target.value), 0, 2) })}><option value={0}>不重试</option><option value={1}>重试 1 次（推荐）</option><option value={2}>重试 2 次</option></select></label><small className="field-hint wide">第三方网关可能早于本地上限中止请求；自动重试耗尽后仍可从失败页继续。</small></div>}
       <button className={`connection-button ${connection}`} onClick={onTest} disabled={connection === "testing"}>{connection === "testing" ? <Loader2 className="spin" size={14} /> : <Cloud size={14} />}{connection === "success" ? "连接正常" : connection === "error" ? "重试连接" : "测试连接"}</button>
     </section>
   );
@@ -1210,7 +1193,9 @@ function loadApiConfig(): ApiConfig {
       parsed.imageTimeoutSeconds = 600;
       parsed.imageMaxRetries = 1;
     }
-    return { ...defaultApiConfig, ...parsed, configVersion: 5 };
+    const legacy = parsed as Record<string, unknown>;
+    ["provider", "baseUrl", "model", "apiKey", "imageBaseUrl", "imageApiKey", "imageModel"].forEach((key) => delete legacy[key]);
+    return { ...defaultApiConfig, ...parsed, configVersion: 6 };
   } catch {
     return defaultApiConfig;
   }

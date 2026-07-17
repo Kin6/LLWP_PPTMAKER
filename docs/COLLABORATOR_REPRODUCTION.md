@@ -64,27 +64,21 @@ npm run test:integrated-export
 
 ## 真实 API 配置
 
-复制环境模板：
+为避免 API Key 进入浏览器、页面会话、网络请求或项目文件，本项目只接受运行服务机器上的系统环境变量配置。页面不会提供 Key、Base URL 或模型输入框，服务端也会忽略客户端提交的这些字段。
+
+Windows 用户环境变量示例：
 
 ```powershell
-Copy-Item .env.example .env.local
+[Environment]::SetEnvironmentVariable("OPENAI_API_KEY", "your_key", "User")
+[Environment]::SetEnvironmentVariable("OPENAI_API_BASE", "https://api.chatanywhere.org/v1", "User")
+[Environment]::SetEnvironmentVariable("OPENAI_API_FALLBACK_BASE", "https://api.chatanywhere.tech/v1", "User")
+[Environment]::SetEnvironmentVariable("TEXT_MODEL", "gpt-5.6-terra", "User")
+[Environment]::SetEnvironmentVariable("IMAGE_MODEL", "gpt-image-2", "User")
 ```
 
-编辑 `.env.local`，示例：
+关闭并重新打开终端，再启动 `npm run dev`。访问 `http://127.0.0.1:5173/api/health`，应返回 `envKeyConfigured: true` 与已读取的服务地址、模型、备用网关和超时配置，但永远不会返回 Key。
 
-```dotenv
-OPENAI_API_KEY=your_key
-OPENAI_API_BASE=https://api.chatanywhere.org/v1
-OPENAI_API_FALLBACK_BASE=https://api.chatanywhere.tech/v1
-TEXT_MODEL=gpt-5.6-terra
-IMAGE_MODEL=gpt-image-2
-IMAGE_API_TIMEOUT_MS=600000
-IMAGE_API_MAX_RETRIES=1
-```
-
-重启 `npm run dev` 后访问 `http://127.0.0.1:5173/api/health`。返回结果应显示 `envKeyConfigured: true`、所选 Base URL、图片备用网关、模型和超时配置。不要把 `.env.local` 提交到 Git。
-
-也可通过页面右上角“API 设置”填写 Key 与 Base URL。页面配置只保存于该标签页的 `sessionStorage`；环境变量由服务端读取，Key 不返回给浏览器。字段优先级为：页面填写值 > `TEXT_API_BASE_URL` / `IMAGE_API_BASE_URL` > `OPENAI_API_BASE` > OpenAI 官方默认地址。
+`TEXT_API_BASE_URL` 与 `IMAGE_API_BASE_URL` 可以分别覆盖 `OPENAI_API_BASE`；`IMAGE_API_TIMEOUT_MS` 与 `IMAGE_API_MAX_RETRIES` 控制服务端默认值。项目不读取 `.env` 或 `.env.local`，不要在项目目录、浏览器、截图或版本库中保存 Key。
 
 更详细的接口、隐私与第三方网关说明见 [API_SETUP.md](../API_SETUP.md)。
 

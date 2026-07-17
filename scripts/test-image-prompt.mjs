@@ -50,9 +50,9 @@ try {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       config: {
-        baseUrl: `http://127.0.0.1:${mockPort}/v1`,
-        model: "gpt-image-2",
-        apiKey: "test-key",
+        baseUrl: "https://browser-must-not-control-api.example/v1",
+        model: "browser-model-must-not-control-api",
+        apiKey: "browser-key-must-not-control-api",
         quality: "medium",
         timeoutMs: 240_000,
         maxRetries: 0,
@@ -87,6 +87,8 @@ try {
   });
   const payload = await response.json();
   assert.equal(response.ok, true, JSON.stringify(payload));
+  assert.equal(payload.meta?.keySource, "environment");
+  assert.equal(payload.meta?.model, "gpt-image-2");
   const prompt = payload.images?.[0]?.prompt || "";
   assert.match(prompt, /高信息密度/);
   assert.match(prompt, /三到五个/);
@@ -96,7 +98,7 @@ try {
   assert.match(prompt, /x=7% 到 93%、y=10% 到 88%/);
   for (const bullet of bullets) assert.match(prompt, new RegExp(bullet));
   assert.doesNotMatch(prompt, /最多两个短要点/);
-  console.log("Image prompt regression passed: dense copy, five evidence points, continuity, safe area, and no outer frame.");
+  console.log("Image prompt regression passed: environment-only credentials, dense copy, five evidence points, continuity, safe area, and no outer frame.");
 } finally {
   for (const child of children.reverse()) child.kill();
 }

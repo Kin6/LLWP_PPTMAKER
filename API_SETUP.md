@@ -30,66 +30,32 @@
 
 OpenAI 官方接口使用 `image[]` 传递多张参考图。ChatAnywhere 等文档声明单图 `image` 参数的兼容网关会自动切换为单图模式：上传了用户图片时优先发送第一张用户图片，并把风格方向写进提示词；没有用户图片时发送内置风格图。提示词统一以“画一个……”开头。第三方返回图片 URL 时，服务端会先下载并转换为 data URL，再进入视觉拆解和 PPTX 导出。
 
-内容模型与图片模型可以使用不同 Base URL 和 Key。例如：本地 Ollama 负责内容，OpenAI 负责 Image 2。
+内容模型与图片模型可以使用不同系统环境变量 Base URL。默认情况下，它们共用同一个 `OPENAI_API_KEY`；若需使用两个不同服务，请在本机部署能安全转发凭据的网关，而不是把第二把 Key 放到浏览器。
 
-## Key 填在哪里
+## 只允许系统环境变量配置
 
-### 方式 1：页面设置
-
-点击右上角齿轮：
-
-- `文本与视觉模型服务`：OpenAI、Compatible 或 Ollama
-- `Base URL`：内容模型地址
-- `文本 / 视觉模型`：需支持结构化 JSON，处理图片时还需支持视觉输入
-- `API Key`：内容模型 Key
-- `图片 API Base URL`：通常为 `https://api.openai.com/v1`
-- `图片 API Key`：可与内容模型分开；留空则复用内容 Key
-- `图片模型`：默认 `gpt-image-2`
-- `单页最长等待`：默认 10 分钟，可选 4、6、10 或 15 分钟
-- `超时自动重试`：默认重试 1 次；重试仍失败时可从当前页继续
-
-这些字段保存在当前标签页的 `sessionStorage`。关闭浏览器会话后清除，前端构建文件中不会写入 Key。
-
-### 方式 2：`.env.local`
-
-在 `D:\ppt_maker\.env.local` 中填写：
-
-```dotenv
-OPENAI_API_KEY=你的_key
-OPENAI_API_BASE=https://api.chatanywhere.org/v1
-OPENAI_API_FALLBACK_BASE=https://api.chatanywhere.tech/v1
-TEXT_API_BASE_URL=
-TEXT_MODEL=gpt-5.6-terra
-IMAGE_API_BASE_URL=
-IMAGE_API_FALLBACK_BASE_URL=
-IMAGE_MODEL=gpt-image-2
-IMAGE_API_TIMEOUT_MS=600000
-IMAGE_API_MAX_RETRIES=1
-```
-
-修改后重启：
-
-```powershell
-npm run dev
-```
-
-### 方式 3：Windows 系统环境变量
-
-已设置 `OPENAI_API_KEY` 时无需创建 `.env.local`。服务启动时按“当前进程 -> Windows 用户环境变量 -> Windows 计算机环境变量”的顺序读取：
+出于密钥安全考虑，页面不提供 Key、Base URL 或模型输入框，浏览器请求也不携带这些字段。服务端强制忽略客户端提交的 Key、Base URL、模型和 Provider，只在启动时读取本机系统环境变量：
 
 ```powershell
 [Environment]::SetEnvironmentVariable("OPENAI_API_KEY", "你的_key", "User")
-```
-
-设置后重新打开终端并运行 `npm run dev`。首屏只显示“系统 Key 已读取”，Key 本身不会返回前端。若使用 OpenAI 兼容服务，还需要在“API 设置”中填写该服务的正确 Base URL；OpenAI Key 不能自动推断第三方服务地址。
-
-第三方教程常用的 `OPENAI_API_BASE` 和 `OPENAI_BASE_URL` 也会被读取，并自动同步到所有浏览器页面：
-
-```powershell
 [Environment]::SetEnvironmentVariable("OPENAI_API_BASE", "https://api.chatanywhere.org/v1", "User")
+[Environment]::SetEnvironmentVariable("OPENAI_API_FALLBACK_BASE", "https://api.chatanywhere.tech/v1", "User")
+[Environment]::SetEnvironmentVariable("TEXT_MODEL", "gpt-5.6-terra", "User")
+[Environment]::SetEnvironmentVariable("IMAGE_MODEL", "gpt-image-2", "User")
 ```
 
-`TEXT_API_BASE_URL` 和 `IMAGE_API_BASE_URL` 的优先级更高，适合文本与图片使用不同服务的情况。
+设置后关闭并重新打开终端，再运行 `npm run dev` 或 `npm start`。应用只会显示“系统 API Key 已检测到”的状态，不会显示 Key 本身。
+
+可用变量：
+
+- `OPENAI_API_KEY`：唯一允许使用的外部 API 凭据。
+- `OPENAI_API_BASE` 或 `OPENAI_BASE_URL`：文本与图片共用的 OpenAI 兼容地址。
+- `TEXT_API_BASE_URL`、`IMAGE_API_BASE_URL`：分别覆盖共用地址。
+- `OPENAI_API_FALLBACK_BASE`、`IMAGE_API_FALLBACK_BASE_URL`：图片重试的备用地址。
+- `TEXT_MODEL`、`IMAGE_MODEL`：服务端使用的模型。
+- `IMAGE_API_TIMEOUT_MS`、`IMAGE_API_MAX_RETRIES`：图片请求的服务端默认值。
+
+项目不会读取 `.env` 或 `.env.local`；不要在项目目录、浏览器、截图或版本库中保存 Key。Windows 上服务按“当前服务进程 -> 用户环境变量 -> 计算机环境变量”的顺序读取。Linux/macOS 请在启动服务的登录环境中导出同名变量。
 
 当主线路是 `api.chatanywhere.org` 时，图片请求遇到 524、超时、限流或临时服务错误，会在自动重试时切换到 `api.chatanywhere.tech`。也可以使用 `OPENAI_API_FALLBACK_BASE` 或 `IMAGE_API_FALLBACK_BASE_URL` 明确指定备用地址。
 

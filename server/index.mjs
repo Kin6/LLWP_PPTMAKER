@@ -3,15 +3,11 @@ import fs from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import express from "express";
-import dotenv from "dotenv";
 import { FormData as UndiciFormData, ProxyAgent, fetch as undiciFetch } from "undici";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const root = path.resolve(__dirname, "..");
-
-dotenv.config({ path: path.join(root, ".env.local"), quiet: true });
-dotenv.config({ path: path.join(root, ".env"), quiet: true });
 
 const openAiApiKey = resolveEnvironmentSecret("OPENAI_API_KEY");
 const openAiApiBase = resolveEnvironmentSecret("OPENAI_API_BASE") || resolveEnvironmentSecret("OPENAI_BASE_URL");
@@ -370,41 +366,40 @@ app.post("/api/ai/decompose-images", async (req, res) => {
   }
 });
 
-function normalizeTextConfig(raw) {
-  const provider = ["openai", "compatible", "ollama"].includes(raw.provider) ? raw.provider : "openai";
-  const fallbackBase = provider === "ollama" ? "http://127.0.0.1:11434/v1" : textApiBaseUrl;
-  const fallbackModel = provider === "ollama" ? "qwen3:8b" : textModel;
-  return finishConfig({ provider, baseUrl: preferredGatewayBase(raw.baseUrl, fallbackBase), model: raw.model || fallbackModel, apiKey: raw.apiKey, allowNoKey: provider === "ollama" });
+function normalizeTextConfig() {
+  return finishConfig({
+    provider: defaultApiProvider,
+    baseUrl: textApiBaseUrl,
+    model: textModel,
+    allowNoKey: isLocalApiBase(textApiBaseUrl),
+  });
 }
 
 function normalizeImageConfig(raw) {
   return finishConfig({
     provider: "openai",
-    baseUrl: preferredGatewayBase(raw.baseUrl, imageApiBaseUrl),
-    model: raw.model || imageModel,
-    apiKey: raw.apiKey,
-    allowNoKey: false,
+    baseUrl: imageApiBaseUrl,
+    model: imageModel,
+    allowNoKey: isLocalApiBase(imageApiBaseUrl),
     quality: ["low", "medium", "high"].includes(raw.quality) ? raw.quality : "medium",
     timeoutMs: boundedInteger(raw.timeoutMs, 240_000, 900_000, configuredImageTimeoutMs),
     maxRetries: boundedInteger(raw.maxRetries, 0, 2, configuredImageMaxRetries),
   });
 }
 
-function finishConfig({ provider, baseUrl, model, apiKey, allowNoKey, quality, timeoutMs, maxRetries }) {
+function finishConfig({ provider, baseUrl, model, allowNoKey, quality, timeoutMs, maxRetries }) {
   const normalizedBaseUrl = String(baseUrl || "").trim().replace(/\/+$/, "");
   let parsedUrl;
   try { parsedUrl = new URL(normalizedBaseUrl); } catch { throw new HttpError(400, "API Base URL 格式不正确。"); }
   if (!["http:", "https:"].includes(parsedUrl.protocol)) throw new HttpError(400, "API Base URL 只支持 http 或 https。");
-  const requestKey = String(apiKey || "").trim();
   const envKey = openAiApiKey;
-  const resolvedKey = requestKey || envKey;
-  if (!allowNoKey && !resolvedKey) throw new HttpError(400, "缺少 API Key。请在页面填写，或在 .env.local 配置 OPENAI_API_KEY。");
+  if (!allowNoKey && !envKey) throw new HttpError(400, "缺少系统环境变量 OPENAI_API_KEY。请在本机用户或计算机环境变量中设置后重启服务。");
   return {
     provider,
     baseUrl: normalizedBaseUrl,
     model: cleanText(model, 120),
-    apiKey: resolvedKey,
-    keySource: requestKey ? "session" : resolvedKey ? "environment" : "none",
+    apiKey: envKey,
+    keySource: envKey ? "environment" : "none",
     quality,
     timeoutMs,
     maxRetries,
@@ -904,15 +899,8 @@ function retryGatewayBase(primaryValue, fallbackValue) {
   } catch { return ""; }
   return "";
 }
-function preferredGatewayBase(requestedValue, fallbackValue) {
-  const requested = String(requestedValue || "").trim();
-  const fallback = String(fallbackValue || "").trim();
-  try {
-    const requestedHost = new URL(requested).hostname.toLowerCase();
-    const fallbackHost = new URL(fallback).hostname.toLowerCase();
-    if (requestedHost === "api.chatanywhere.tech" && fallbackHost === "api.chatanywhere.org") return fallback;
-  } catch { /* finishConfig reports malformed URLs */ }
-  return requested || fallback;
+function isLocalApiBase(value) {
+  try { return ["127.0.0.1", "localhost", "::1"].includes(new URL(String(value)).hostname); } catch { return false; }
 }
 function resolveEnvironmentSecret(name) {
   const inherited = String(process.env[name] || "").trim();

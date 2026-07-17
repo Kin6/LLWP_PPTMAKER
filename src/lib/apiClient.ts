@@ -1,18 +1,10 @@
 import type { NotebookDeckSpec, NormalizedRect } from "../types";
 
-export type ApiProvider = "openai" | "compatible" | "ollama";
 export type ImageTextMode = "integrated" | "native";
 
 export type ApiConfig = {
   configVersion: number;
-  provider: ApiProvider;
-  baseUrl: string;
-  model: string;
-  apiKey: string;
   imageEnabled: boolean;
-  imageBaseUrl: string;
-  imageApiKey: string;
-  imageModel: string;
   imageCount: number;
   imageQuality: "low" | "medium" | "high";
   imageTextMode: ImageTextMode;
@@ -74,7 +66,7 @@ type ApiMeta = {
   provider?: string;
   model?: string;
   apiCalls: number;
-  keySource?: "session" | "environment" | "none";
+  keySource?: "environment" | "none";
   refinementApplied?: boolean;
 };
 
@@ -104,9 +96,6 @@ export async function generateAiImages(
     meta: ApiMeta;
   }>("/api/ai/generate-images", {
     config: {
-      baseUrl: config.imageBaseUrl || "https://api.openai.com/v1",
-      model: config.imageModel,
-      apiKey: config.imageApiKey || config.apiKey,
       quality: config.imageQuality,
       timeoutMs: config.imageTimeoutSeconds * 1_000,
       maxRetries: config.imageMaxRetries,
@@ -128,12 +117,8 @@ export async function decomposeAiImages(
 }
 
 function textConfig(config: ApiConfig) {
-  return {
-    provider: config.provider,
-    baseUrl: config.baseUrl,
-    model: config.model,
-    apiKey: config.apiKey,
-  };
+  void config;
+  return {};
 }
 
 async function requestJson<T>(url: string, body: unknown): Promise<T> {

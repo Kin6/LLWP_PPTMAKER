@@ -62,30 +62,21 @@ npm run build
 npm start
 ```
 
-## API Key
+## 系统 API 环境变量
 
-工作台右上角的“API 设置”可以配置文本服务、图片服务、模型与 Key。页面填写的 Key 只保存在当前浏览器会话。
+为防止 Key 进入浏览器会话、网络请求、项目文件或版本库，工作台只从运行服务的本机系统环境变量读取 API 配置。页面中不提供 Key、Base URL 或模型输入框，服务端也会忽略客户端请求中伪造的这些字段。
 
-如果 Windows 用户或计算机环境变量中已经存在 `OPENAI_API_KEY`，本地服务会自动读取，不需要把 Key 再写进页面或项目文件。程序也会读取常见代理环境变量，并在必要时沿用 Git 的 HTTP 代理设置。
+Windows 用户环境变量示例：
 
-第三方 OpenAI 兼容网关可设置 `OPENAI_API_BASE` 或 `OPENAI_BASE_URL`。服务会自动将页面切换为 `OpenAI Compatible`，并把该地址同时作为文本和图片接口默认值；`TEXT_API_BASE_URL`、`IMAGE_API_BASE_URL` 可以分别覆盖它。
-
-长期使用建议在根目录创建 `.env.local`：
-
-```dotenv
-OPENAI_API_KEY=你的_key
-OPENAI_API_BASE=https://api.chatanywhere.org/v1
-OPENAI_API_FALLBACK_BASE=https://api.chatanywhere.tech/v1
-TEXT_API_BASE_URL=
-TEXT_MODEL=gpt-5.6-terra
-IMAGE_API_BASE_URL=
-IMAGE_API_FALLBACK_BASE_URL=
-IMAGE_MODEL=gpt-image-2
-IMAGE_API_TIMEOUT_MS=600000
-IMAGE_API_MAX_RETRIES=1
+```powershell
+[Environment]::SetEnvironmentVariable("OPENAI_API_KEY", "你的_key", "User")
+[Environment]::SetEnvironmentVariable("OPENAI_API_BASE", "https://api.chatanywhere.org/v1", "User")
+[Environment]::SetEnvironmentVariable("OPENAI_API_FALLBACK_BASE", "https://api.chatanywhere.tech/v1", "User")
+[Environment]::SetEnvironmentVariable("TEXT_MODEL", "gpt-5.6-terra", "User")
+[Environment]::SetEnvironmentVariable("IMAGE_MODEL", "gpt-image-2", "User")
 ```
 
-`.env.local` 已被 Git 忽略，只由本地 Express 服务读取。完整说明见 [API_SETUP.md](./API_SETUP.md)。
+设置后重新打开终端并启动服务。`TEXT_API_BASE_URL` 与 `IMAGE_API_BASE_URL` 可分别覆盖 `OPENAI_API_BASE`；`IMAGE_API_TIMEOUT_MS` 与 `IMAGE_API_MAX_RETRIES` 可控制图片请求。完整变量清单与第三方网关说明见 [API_SETUP.md](./API_SETUP.md)。
 
 ## 验证
 
