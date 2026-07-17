@@ -58,6 +58,8 @@ npm run test:visual
 npm run test:image-geometry
 npm run test:image-prompt
 npm run test:integrated-export
+npm run test:provenance
+npm run test:html-deck
 ```
 
 `test:image-prompt` 会临时启动模拟 OpenAI 服务和应用，验证高信息密度提示词仍包含 3–5 个证据点、跨页连续性、安全区和“无整页外框”约束；不会调用真实 API，也不会产生费用。
@@ -76,32 +78,33 @@ Windows 用户环境变量示例：
 [Environment]::SetEnvironmentVariable("IMAGE_MODEL", "gpt-image-2", "User")
 ```
 
-关闭并重新打开终端，再启动 `npm run dev`。访问 `http://127.0.0.1:5173/api/health`，应返回 `envKeyConfigured: true` 与已读取的服务地址、模型、备用网关和超时配置，但永远不会返回 Key。
+关闭并重新打开终端，再启动 `npm run dev`。访问 `http://127.0.0.1:5173/api/health`，应返回 `envKeyConfigured: true` 和图片超时/重试默认值，但不会返回 Key、服务地址或模型。
 
 `TEXT_API_BASE_URL` 与 `IMAGE_API_BASE_URL` 可以分别覆盖 `OPENAI_API_BASE`；`IMAGE_API_TIMEOUT_MS` 与 `IMAGE_API_MAX_RETRIES` 控制服务端默认值。项目不读取 `.env` 或 `.env.local`，不要在项目目录、浏览器、截图或版本库中保存 Key。
 
 更详细的接口、隐私与第三方网关说明见 [API_SETUP.md](../API_SETUP.md)。
 
-## 三种运行模式
+## 四种运行模式
 
 | 模式 | 外部调用 | 输出特点 | 复刻验收 |
 | --- | --- | --- | --- |
 | 本地 | 无 | 原生文字、表格、上传图片都可编辑 | 输入到 PPTX 导出闭环 |
 | 标准 | 文本模型 | 模型整理内容逻辑，PPTX 保持原生对象 | 严格页数、标题因果、内容可编辑 |
 | 视觉增强 | 文本模型 + 图片模型 | 默认整页图文融合，视觉上限较高 | 每页图、跨页衔接、断点续跑、PPTX 导出 |
+| 交互网页 | 文本模型 + 图片模型 + HTML 布局 | 可编辑对象、图表、动画与交互 | 页面切换、编辑回写、离线 HTML、静态 PPTX |
 
 整页图文融合模式的文字是图片的一部分，不能在 PowerPoint 逐字编辑。需要逐字编辑时，选择“原生分层”；该模式让图片模型只生成视觉资产，文字与表格由 PptxGenJS 输出为原生对象。
 
 ## 当前架构与代码职责
 
 ```text
-用户文字 / 表格 / 图片 / 示例 PPTX
+用户文字 / 表格 / 图片 / DOCX / PDF / 示例 PPTX
         │
         ├── 浏览器附件解析：src/lib/attachmentParser.ts
         ├── 本地内容规划：src/lib/localPlanner.ts
-        └── API 内容规划：POST /api/ai/generate-deck
+        └── API 内容规划：DeckOutline -> DeckSpec
                               │
-                         DeckSpec（论证与逐页内容）
+                    NotebookDeckSpec（论证与逐页内容）
                               │
               ┌───────────────┴────────────────┐
               │                                │
@@ -114,14 +117,22 @@ Windows 用户环境变量示例：
                    src/lib/exportDeck.ts
                               │
                           可下载 PPTX
+
+NotebookDeckSpec -> HtmlDeckSpec -> Reveal.js / ECharts sandbox
+                              │
+                    离线 HTML / 静态 PPTX
 ```
 
 关键文件：
 
-- [src/App.tsx](../src/App.tsx)：首屏、模式切换、五阶段状态、检查点和断点续跑。
+- [src/App.tsx](../src/App.tsx)：应用状态、模式切换、流水线协调和断点续跑。
+- [src/app/pipeline.ts](../src/app/pipeline.ts)：共享的图片任务、画幅归一化、检查点数据与 API 参数。
+- [src/components/HomeScreen.tsx](../src/components/HomeScreen.tsx)：Manus 式首屏与附件入口。
+- [src/components/WorkspacePanels.tsx](../src/components/WorkspacePanels.tsx)：任务轨迹、API 状态和 PPTX 编辑面板。
+- [src/html-deck/](../src/html-deck/)：HtmlDeckSpec、sandbox 运行时、编辑器、持久化与导出。
 - [server/index.mjs](../server/index.mjs)：API 路由、环境变量、网关回退、DeckSpec 提示词、Image 2 高信息密度提示词。
 - [src/lib/localPlanner.ts](../src/lib/localPlanner.ts)：离线 DeckSpec 规则。
-- [src/lib/attachmentParser.ts](../src/lib/attachmentParser.ts)：图片、CSV/TSV/XLSX、TXT/MD、PPTX 附件解析。
+- [src/lib/attachmentParser.ts](../src/lib/attachmentParser.ts)：图片、表格、TXT/MD、DOCX、PDF/OCR 和 PPTX 附件解析。
 - [src/lib/exportDeck.ts](../src/lib/exportDeck.ts)：PptxGenJS 导出；融合页作为整页图，原生分层页保留文字与表格对象。
 - [src/lib/imageGeometry.ts](../src/lib/imageGeometry.ts)：将常见 3:2 生图安全地放入 16:9 幻灯片。
 - [scripts/mock-openai.mjs](../scripts/mock-openai.mjs)：本地无费用的兼容 API 模拟服务。
@@ -135,7 +146,7 @@ Windows 用户环境变量示例：
 - 相邻页共享主体、环境、色彩、字体气质和视觉母题；下一页必须承接本页新增的信息。
 - 内容不足时优先保留标题、核心句、三个重点、关键数字和页码，禁止虚构数据或生成 `DeckSpec`、`API`、`Prompt` 等制作过程文字。
 
-这组约束位于 `server/index.mjs` 的 `buildDeckPrompt`、`buildDeckRefinementPrompt`、`buildIntegratedTextImagePrompt` 和 `buildIntegratedArtDirection`。修改其中一项后必须运行 `npm run test:image-prompt`。
+这组约束位于 `server/index.mjs` 的 `buildDeckOutlinePrompt`、`buildDeckFromOutlinePrompt`、`buildIntegratedTextImagePrompt` 和 `buildIntegratedArtDirection`。修改其中一项后必须运行 `npm run test:image-prompt` 与 `npm run test:html-deck`。
 
 ## 真实联调步骤
 
@@ -145,6 +156,7 @@ Windows 用户环境变量示例：
 4. 检查每页是否有一个结论标题、至少三个不同证据点、完整的 16:9 画面和可连读的标题链。
 5. 关闭图片生成后再跑一次，确认“标准”模式能输出可编辑文字和表格。
 6. 故意使用一个不可用图片地址或临时关掉网关，确认失败步骤显示“从此处继续”，且已成功页面不会再次请求。
+7. 选择“交互网页”，确认页面数严格一致、缩略图可切换、元素可拖拽缩放，并能导出离线 HTML。
 
 ## 故障排查
 

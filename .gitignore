@@ -4,3 +4,6 @@ dist/
 .env.local
 artifacts/
 *.log
+.gstack/
+.playwright-cli/
+output/playwright/

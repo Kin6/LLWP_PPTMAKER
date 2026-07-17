@@ -31,6 +31,21 @@ export type GeneratedAsset = {
   summary?: string;
 };
 
+export type SourceLocation = {
+  blockId: string;
+  attachmentId: string;
+  filename: string;
+  kind: "docx" | "pdf" | "pptx" | "xlsx" | "text" | "image";
+  extraction: "native" | "ocr";
+  page?: number;
+  sectionPath?: string[];
+  paragraphIndex?: number;
+  tableIndex?: number;
+  imageIndex?: number;
+  confidence?: number;
+  lowConfidence?: boolean;
+};
+
 export type NotebookSlideSpec = {
   title: string;
   subtitle?: string;
@@ -39,6 +54,7 @@ export type NotebookSlideSpec = {
   bullets?: string[];
   speakerNotes?: string;
   sourceNotes?: string[];
+  sourceRefs?: SourceLocation[];
   imageIndex?: number;
   tableRows?: string[][];
   callouts?: { label: string; value: string }[];

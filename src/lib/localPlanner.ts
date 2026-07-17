@@ -1,4 +1,5 @@
 import type { GeneratedAsset, NotebookDeckSpec, NotebookSlideSpec } from "../types";
+import type { ExtractedBlock } from "./attachmentParser";
 
 export type LocalSource = {
   topic: string;
@@ -9,16 +10,20 @@ export type LocalSource = {
   imageBrief: string;
   styleId: string;
   assets: GeneratedAsset[];
+  sourceBlocks?: ExtractedBlock[];
 };
 
 export function buildLocalDeck(source: LocalSource): NotebookDeckSpec {
-  const statements = splitStatements(source.textInput);
-  const tableRows = parseTable(source.tableInput);
+  const materialText = (source.sourceBlocks || []).filter((block) => block.type === "heading" || block.type === "paragraph").map((block) => block.text).filter(Boolean).join("\n");
+  const statements = splitStatements([source.textInput, materialText].filter(Boolean).join("\n"));
+  const structuredTable = (source.sourceBlocks || []).find((block) => block.type === "table" && block.rows?.length)?.rows;
+  const tableRows = structuredTable || parseTable(source.tableInput);
   const count = clamp(source.slideCount, 1, 50);
   const thesis = statements[0] || `${source.topic}需要一条从问题到行动的清晰叙事`;
   const evidence = statements.slice(1);
   const uploaded = source.assets.filter((asset) => asset.kind === "upload");
   const slides: NotebookSlideSpec[] = [];
+  const coverRefs = sourceRefsForSlide(source.sourceBlocks, 0);
 
   slides.push({
     title: source.topic || "未命名演示文稿",
@@ -27,7 +32,8 @@ export function buildLocalDeck(source: LocalSource): NotebookDeckSpec {
     claim: thesis,
     bullets: [compact(thesis, 52)],
     speakerNotes: "先给出核心判断，再说明证据链和下一步。",
-    sourceNotes: ["本地规则：来自用户文字"],
+    sourceNotes: coverRefs?.map(sourceRefLabel) || ["本地规则：来自用户文字"],
+    sourceRefs: coverRefs,
     imageIndex: uploaded[0]?.index,
     visualBrief: source.imageBrief || "用一张主题明确的主视觉建立演示气质",
     imagePrompt: `${source.topic}，${source.imageBrief}，16:9 演示主视觉，无文字`,
@@ -49,6 +55,7 @@ export function buildLocalDeck(source: LocalSource): NotebookDeckSpec {
     if (!bullets.length) bullets.push(template[1]);
     const useTable = Boolean(tableRows.length > 1 && (index === 2 || index === count - 2));
     const asset = uploaded[index % Math.max(uploaded.length, 1)];
+    const sourceRefs = sourceRefsForSlide(source.sourceBlocks, index, useTable ? "table" : undefined);
     slides.push({
       title: isLast ? "把结论转化为可验证的下一步" : template[0],
       subtitle: template[1],
@@ -56,7 +63,8 @@ export function buildLocalDeck(source: LocalSource): NotebookDeckSpec {
       claim: bullets[0],
       bullets,
       speakerNotes: `这一页只回答一个问题：${template[0]}。`,
-      sourceNotes: [useTable ? "本地规则：来自用户表格" : "本地规则：来自用户文字"],
+      sourceNotes: sourceRefs?.map(sourceRefLabel) || [useTable ? "本地规则：来自用户表格" : "本地规则：来自用户文字"],
+      sourceRefs,
       imageIndex: useTable ? undefined : asset?.index,
       tableRows: useTable ? tableRows.slice(0, 7).map((row) => row.slice(0, 5)) : undefined,
       visualBrief: useTable ? "保留为原生可编辑表格" : source.imageBrief || "使用用户图片作为证据或主视觉",
@@ -77,6 +85,25 @@ export function buildLocalDeck(source: LocalSource): NotebookDeckSpec {
     },
     slides,
   };
+}
+
+function sourceRefsForSlide(blocks: ExtractedBlock[] | undefined, slideIndex: number, preferredType?: ExtractedBlock["type"]) {
+  const candidates = (blocks || []).filter((block) => !preferredType || block.type === preferredType);
+  const fallback = candidates.length ? candidates : blocks || [];
+  if (!fallback.length) return undefined;
+  const start = Math.min(slideIndex * 2, Math.max(0, fallback.length - 1));
+  return fallback.slice(start, start + 3).map((block) => block.source);
+}
+
+function sourceRefLabel(source: ExtractedBlock["source"]) {
+  const location = [
+    source.page ? `第 ${source.page} 页` : "",
+    source.sectionPath?.length ? `章节：${source.sectionPath.join(" > ")}` : "",
+    source.tableIndex ? `表格 ${source.tableIndex}` : "",
+    source.imageIndex ? `图片 ${source.imageIndex}` : "",
+    source.extraction === "ocr" ? `OCR${source.confidence !== undefined ? ` ${Math.round(source.confidence)}%` : ""}${source.lowConfidence ? "，低置信度，待核实" : ""}` : "",
+  ].filter(Boolean);
+  return `${source.filename}${location.length ? `，${location.join("，")}` : ""}`;
 }
 
 export function parseTable(input: string) {

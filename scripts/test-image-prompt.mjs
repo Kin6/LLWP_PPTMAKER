@@ -45,21 +45,17 @@ try {
   await waitFor(`http://127.0.0.1:${appPort}/api/health`);
 
   const bullets = ["证据一", "证据二", "证据三", "证据四", "证据五"];
-  const response = await fetch(`http://127.0.0.1:${appPort}/api/ai/generate-images`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      config: {
-        baseUrl: "https://browser-must-not-control-api.example/v1",
-        model: "browser-model-must-not-control-api",
-        apiKey: "browser-key-must-not-control-api",
-        quality: "medium",
-        timeoutMs: 240_000,
-        maxRetries: 0,
-      },
-      styleId: "blank",
-      referenceImages: [],
-      jobs: [{
+  const requestBody = {
+    config: {
+      baseUrl: `http://127.0.0.1:${mockPort}/v1`,
+      model: "gpt-image-2",
+      apiKey: "test-key",
+      quality: "medium",
+      timeoutMs: 240_000,
+      maxRetries: 0,
+    },
+    referenceImages: [],
+    jobs: [{
         slideIndex: 1,
         pageNumber: 2,
         totalPages: 3,
@@ -82,8 +78,12 @@ try {
         narrativeArc: ["提出判断", "展示证据", "推导行动"],
         previousSlideTitle: "先提出需要验证的判断",
         nextSlideTitle: "再把证据推导为行动",
-      }],
-    }),
+    }],
+  };
+  const response = await fetch(`http://127.0.0.1:${appPort}/api/ai/generate-images`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...requestBody, styleId: "blank" }),
   });
   const payload = await response.json();
   assert.equal(response.ok, true, JSON.stringify(payload));
@@ -98,7 +98,15 @@ try {
   assert.match(prompt, /x=7% 到 93%、y=10% 到 88%/);
   for (const bullet of bullets) assert.match(prompt, new RegExp(bullet));
   assert.doesNotMatch(prompt, /最多两个短要点/);
-  console.log("Image prompt regression passed: environment-only credentials, dense copy, five evidence points, continuity, safe area, and no outer frame.");
+
+  const editResponse = await fetch(`http://127.0.0.1:${appPort}/api/ai/generate-images`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...requestBody, styleId: "product-calm" }),
+  });
+  const editPayload = await editResponse.json();
+  assert.equal(editResponse.ok, true, JSON.stringify(editPayload));
+  console.log("Image prompt regression passed: direct 16:9 generation/edit requests, dense copy, continuity, safe area, and no outer frame.");
 } finally {
   for (const child of children.reverse()) child.kill();
 }

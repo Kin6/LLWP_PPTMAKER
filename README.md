@@ -1,92 +1,168 @@
-# LLWP_PPTMAKER
+# LLWP PPTMAKER
 
-一个本地优先、可切换 API 增强的 AI PPT 工作台。用户可以同时输入文字、表格和图片，系统先建立演示逻辑，再生成与拆解视觉，最后输出真正可编辑的 `.pptx`。
+LLWP PPTMAKER 是一个本地优先、可选 AI 增强的中文演示文稿工作台。它能把文字、表格、图片、DOCX、PDF 和示例 PPTX 整理为有明确叙事顺序的演示，并输出可编辑 PPTX 或可交互的单文件 HTML。
 
-## Manus 式首屏
+项目当前重点不是让模型一次性吐出不可控的页面代码，而是把内容规划、视觉生成、结构校验、编辑和导出拆成可检查、可恢复的流水线。
 
-首屏用一个对话框完成创建：输入主题、明确目标受众、精确指定 1–50 页，并按需选择模板，然后从模式菜单选择：
+## 能做什么
 
-- **本地**：不联网，直接建立本地 `DeckSpec` 并输出可编辑 PPTX。
-- **标准**：调用文本/视觉模型理清逻辑，保留原生文本和表格，不调用图片生成。
-- **视觉增强**：运行完整五阶段流程，包括 GPT Image 2 生图与视觉拆解。
+- 精确生成 1-50 页演示，不用占位页补数量。
+- 先生成轻量叙事大纲，再扩展完整 `DeckSpec`，减少第一步等待和重复内容。
+- 直接请求 GPT Image 2，并将返回结果归一化为 1536 x 864 的 16:9 画布。
+- 按页生成并保存检查点，图片或后续阶段失败后可从断点继续。
+- 以 Manus/Codex 式任务轨迹逐步显示当前阶段、流式内容和 API 调用数。
+- 导入 DOCX、PDF、扫描 PDF、XLSX、CSV/TSV、TXT/MD、图片和 PPTX 参考材料。
+- 把页码、章节、表格、图片与 OCR 置信度保存在结构化来源引用中。
+- 输出原生分层 PPTX、整页图文融合 PPTX，或可编辑、可交互的 HTML Deck。
 
-对话框左下角的 `+` 支持上传 PNG/JPG/WebP、CSV/TSV、XLSX、TXT/MD 和示例 PPTX。示例 PPTX 会提取前 40 页文字和前 4 张内嵌图片，作为内容与审美参考；旧版二进制 `.ppt`/`.xls` 需要先在 Office 中另存为 `.pptx`/`.xlsx`。
+## 四种创建模式
 
-## 五阶段 API 工作流
+| 模式 | 模型调用 | 主要输出 | 适合场景 |
+| --- | --- | --- | --- |
+| 本地 | 无 | 原生可编辑 PPTX | 快速整理文字、表格和已有图片 |
+| 标准 | 文本模型 | 原生分层 PPTX | 需要更好的叙事，但不需要 AI 生图 |
+| 融合成片 | 文本模型 + GPT Image 2 | 高完成度 PPTX | 优先追求完整视觉和跨页一致性 |
+| 交互网页 | 文本模型 + GPT Image 2 + HTML 布局 | 可编辑 HTML、离线 HTML、静态 PPTX | 需要动画、图表、交互和设计工作台 |
 
-1. **策划整套叙事**：文本模型先建立严格页数的 `DeckSpec`，再进行第二轮总编辑审校，专门检查页间因果、删除重复观点、压缩可见文案并强化每页视觉导演意图。
-2. **Image 2 生图**：调用 `gpt-image-2` 生成视觉。生图页数默认严格跟随 PPT 总页数，也可单独指定 1–50 页；每个任务都携带整套主张、叙事弧、上一页和下一页，保持跨页连续。OpenAI 官方接口使用多参考图；只接受单图参数的兼容网关会使用 `image` 字段。选择空白模板时不套用风格图。
-3. **校验成片一致性**：检查严格页数、16:9 画幅、跨页叙事承接和统一视觉语言，不再把矩形截图描述成“真正拆解”。
-4. **组装整页成片**：默认使用 `整页图文融合`，让 Image 2 把文字、主体、光影、轨迹和信息层级设计成同一张完整页面。`原生分层` 保留为编辑优先的备选模式。
-5. **生成 PPTX**：PptxGenJS 输出 PPTX、内容源和讲稿备注。默认融合页面中的文字属于整页图片，修改内容源后需要重新生成；原生分层模式中的文本框和表格可以逐字编辑。
+融合成片默认把标题、证据、标注和主视觉一起交给 Image 2 编排，视觉完整度更高，但页面文字属于整页图片。API 设置中可以切换到“原生分层”，让文字、表格和基础形状保持 PowerPoint 原生可编辑。
 
-整页融合默认按高信息密度 PPT 组织：结论标题、核心解释、3–5 个证据点、关键数字或关系标注共同融入一张连续全画布，不再使用只有巨型标题和氛围图的海报式构图。允许依附主场景的内部信息模块，但禁止整页外框、白纸页面和框中框。Image 2 常见的 3:2 返回图会以单层全画布方式铺满 16:9；提示词强制标题、主体和标注位于中央安全区，只裁切可延展背景边缘。
+## 生成流程
 
-API 流程支持当前页面内的断点续跑。内容策划完成后会保存 DeckSpec，Image 2 改为逐页请求并在每页成功后立即保存检查点；某一页超时或某个后续环节失败时，可以从该环节继续，不会重复已经成功的文本规划和生图调用。刷新或关闭页面会清除这份临时检查点。
+### PPTX 模式
 
-单页生图默认最长等待 10 分钟。第三方兼容网关返回超时、限流或临时服务错误时默认自动重试 1 次；主线路为 `api.chatanywhere.org` 时，重试会自动切换到 `api.chatanywhere.tech`。等待时间与重试次数可在页面 API 设置中调整，也可通过 `IMAGE_API_TIMEOUT_MS`、`IMAGE_API_MAX_RETRIES` 设置服务端默认值。
+1. **策划整套叙事**：第一次文本请求只生成严格页数的 `DeckOutline`，确定总主张、证据顺序和每页任务；第二次请求根据大纲生成完整 `DeckSpec`。
+2. **生成主题视觉**：GPT Image 2 按页处理。每个请求都包含整套主张、目标受众、前后页关系和当前页信息，默认生图页数跟随演示总页数。
+3. **确认成片结构**：核对已生成页数并统一整理为 16:9 画布；跨页承接与视觉连续性由大纲和逐页提示词约束，不把提示词约束冒充成视觉检测结果。
+4. **组装整页成片**：融合模式铺满整张画布；原生分层模式保留文字、表格、形状与独立主视觉。
+5. **生成 PPTX**：PptxGenJS 写出页面、讲稿备注和内容源。
 
-项目内置四套真实风格参考图：沉静产品、咨询网格、编辑科技、电影感数据。它们位于 `public/style-guides/`，可以继续增加或替换。
+### 交互网页模式
 
-真正可编辑的 SVG → DrawingML 升级路线和开源方案比较见 [docs/EDITABLE_PIPELINE.md](./docs/EDITABLE_PIPELINE.md)。
+```text
+用户材料
+  -> DeckOutline
+  -> NotebookDeckSpec
+  -> GPT Image 2 逐页主视觉
+  -> HtmlDeckSpec 草稿
+  -> AI 布局规划与 Schema 校验
+  -> Reveal.js + ECharts 工作台
+  -> 离线 HTML / 静态 PPTX
+```
 
-## 协作复刻
+模型不会获得任意脚本执行权限。它只返回受 JSON Schema 和 Zod 约束的 `HtmlDeckSpec`，局部修改也只能提交白名单 Patch。运行时位于无同源权限的 sandbox iframe 中。
 
-从克隆、环境配置、无费用模拟验收到真实 API 联调、目录职责和故障排查，见 [docs/COLLABORATOR_REPRODUCTION.md](./docs/COLLABORATOR_REPRODUCTION.md)。这份指南以当前仓库和锁定依赖为准，适合新的开发合作者在另一台机器上复刻同一套工作流。
+工作台当前支持：
 
-## 本地模式
+- 页面缩略图切换、复制和删除。
+- 元素选择、拖拽、缩放、图层与属性编辑。
+- 撤销/重做、评论与解决状态、Tweaks、手绘标注。
+- 对当前页或选中元素执行 AI 局部修改。
+- Reveal.js 放映、ECharts 图表以及 `click`、`hover`、`enter`、`key` 触发器。
+- `next`、`previous`、`toggle`、`highlight`、`set-variable`、`animate` 动作。
+- IndexedDB 自动保存；素材会转换为可恢复的数据 URI。
+- 导出内联依赖和素材的单文件 HTML，以及静态可编辑 PPTX。
 
-不填写 API Key 也能完成：
+HTML 动画、视频状态和 Web 交互无法无损转换到 PowerPoint，静态 PPTX 会按明确规则降级。详见 [HTML 交互演示模式](./docs/HTML_INTERACTIVE_MODE.md)。
 
-- 中文文字拆句与观点提取
-- CSV、TSV、Markdown 表格解析
-- 上传图片尺寸与用途识别
-- 本地 DeckSpec 和原生 PPTX 组装
+## 支持的材料
 
-本地模式不会生图和视觉拆解，但可以用上传图片跑通完整的“输入 -> 预览编辑 -> PPTX 导出”闭环。
+| 类型 | 当前处理方式 |
+| --- | --- |
+| PNG/JPG/WebP | 作为内容图片和视觉参考图 |
+| CSV/TSV/XLSX | 提取表格；XLSX 当前读取第一个工作表 |
+| TXT/MD | 作为主题材料和结构化文字 |
+| DOCX | 提取标题层级、段落、表格、内嵌图片和章节路径 |
+| 文本型 PDF | 最多解析前 80 页，按页提取文字、对齐明确的表格和可读取图片 |
+| 扫描 PDF | 原生文字不足时按需使用浏览器端 Tesseract OCR，并标记置信度 |
+| PPTX | 提取前 40 页文字和前 4 张内嵌图片，作为内容与风格参考 |
 
-## 运行
+旧版二进制 `.ppt` 和 `.xls` 暂不直接解析，请先在 Office 或 LibreOffice 中另存为 `.pptx` 和 `.xlsx`。
+
+每段材料都会获得稳定 `blockId`。页码、DOCX 章节路径、段落/表格/图片序号、提取方式和 OCR 置信度会进入 `sourceRefs` 与 `sourceNotes`；模型只能引用真实存在的证据块，低置信度 OCR 不会被当作确定事实。
+
+## 快速开始
 
 需要 Node.js 20 或更高版本。
 
-```powershell
-cd D:\ppt_maker
+```bash
+git clone https://github.com/Kin6/LLWP_PPTMAKER.git
+cd LLWP_PPTMAKER
 npm ci
 npm run dev
 ```
 
 打开 <http://127.0.0.1:5173>。
 
-```powershell
+生产构建：
+
+```bash
 npm run build
 npm start
 ```
 
-## 系统 API 环境变量
+服务默认只监听 `127.0.0.1`。可以通过 `HOST` 和 `PORT` 修改监听地址和端口。
 
-为防止 Key 进入浏览器会话、网络请求、项目文件或版本库，工作台只从运行服务的本机系统环境变量读取 API 配置。页面中不提供 Key、Base URL 或模型输入框，服务端也会忽略客户端请求中伪造的这些字段。
+## API 配置
+
+本地模式不需要 API Key。其他模式只从运行服务的本机系统环境变量读取 Key、Base URL 和模型。浏览器不会显示、保存或提交这些字段，服务端也会忽略客户端伪造的配置。
 
 Windows 用户环境变量示例：
 
 ```powershell
-[Environment]::SetEnvironmentVariable("OPENAI_API_KEY", "你的_key", "User")
-[Environment]::SetEnvironmentVariable("OPENAI_API_BASE", "https://api.chatanywhere.org/v1", "User")
-[Environment]::SetEnvironmentVariable("OPENAI_API_FALLBACK_BASE", "https://api.chatanywhere.tech/v1", "User")
+[Environment]::SetEnvironmentVariable("OPENAI_API_KEY", "your_key", "User")
+[Environment]::SetEnvironmentVariable("OPENAI_API_BASE", "https://api.openai.com/v1", "User")
 [Environment]::SetEnvironmentVariable("TEXT_MODEL", "gpt-5.6-terra", "User")
 [Environment]::SetEnvironmentVariable("IMAGE_MODEL", "gpt-image-2", "User")
 ```
 
-设置后重新打开终端并启动服务。`TEXT_API_BASE_URL` 与 `IMAGE_API_BASE_URL` 可分别覆盖 `OPENAI_API_BASE`；`IMAGE_API_TIMEOUT_MS` 与 `IMAGE_API_MAX_RETRIES` 可控制图片请求。完整变量清单与第三方网关说明见 [API_SETUP.md](./API_SETUP.md)。
+- Linux/macOS 请在启动服务的登录环境中 `export` 同名变量。
+- `OPENAI_API_BASE` 或 `OPENAI_BASE_URL` 可设置 OpenAI 兼容网关。
+- `TEXT_API_BASE_URL` 和 `IMAGE_API_BASE_URL` 可以让文本与图片使用不同服务。
+- `OPENAI_API_FALLBACK_BASE` 和 `IMAGE_API_FALLBACK_BASE_URL` 可以设置图片备用线路。
+- `IMAGE_API_TIMEOUT_MS` 和 `IMAGE_API_MAX_RETRIES` 可以设置服务端默认等待与重试。
+- 官方 OpenAI 文本路径使用 Responses API；兼容服务使用 Chat Completions，并带结构修复回退。
+- 单页图片默认等待 10 分钟，临时错误默认重试 1 次。
+- 主线路为 `api.chatanywhere.org` 时，重试可以自动切换到 `api.chatanywhere.tech`。
+- 服务会读取 `HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY`，必要时沿用 Git 的 HTTP 代理。
 
-## 验证
+项目不会读取 `.env` 或 `.env.local`。修改系统环境变量后需要重启服务。完整说明见 [API 配置](./API_SETUP.md)。
 
-```powershell
+## 测试
+
+```bash
 npm run build
 npm run test:attachments
-npm run test:visual
+npm run test:provenance
+npm run test:integrated-export
 npm run test:image-geometry
 npm run test:image-prompt
-npm run test:integrated-export
+npm run test:html-deck
+npm run test:visual
 ```
 
-开发用模拟服务运行在 `http://127.0.0.1:4010/v1`，可在没有真实 API 费用的情况下验收五阶段前端流程。它不会替代正式模型质量。
+本地模拟 OpenAI 服务：
+
+```bash
+node scripts/mock-openai.mjs
+```
+
+模拟服务默认运行在 `http://127.0.0.1:4010/v1`，可验证流式文本、逐页图片、失败重试、HTML Deck 和断点续跑，不会产生真实 API 费用。
+
+## 已知边界
+
+- 融合成片的文字已经压入整页图片，修改内容后需要重新生成该页。
+- HTML 与 PPTX 的动画、视频、交互和字体排版不是无损双向转换。
+- HTML 模式不包含组织级多人实时协作、Figma/Canva 连接器或任意用户代码执行。
+- 浏览器刷新会清除当前 PPTX 流水线的内存检查点；已完成的 HTML Deck 会保存在 IndexedDB。
+- OCR 首次运行需要下载中英文语言数据，识别质量取决于扫描清晰度。
+
+## 进一步阅读
+
+- [HTML 交互演示模式](./docs/HTML_INTERACTIVE_MODE.md)
+- [协作者复刻指南](./docs/COLLABORATOR_REPRODUCTION.md)
+- [可编辑 PPTX 技术路线](./docs/EDITABLE_PIPELINE.md)
+- [API 配置与实现](./API_SETUP.md)
+- [产品原则](./PRODUCT.md)
+- [设计系统](./DESIGN.md)
+
+版本变化见 [CHANGELOG.md](./CHANGELOG.md)。

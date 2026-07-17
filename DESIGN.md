@@ -23,7 +23,7 @@ Use the native system sans stack with Microsoft YaHei for Chinese. UI headings s
 
 ## Layout
 
-Desktop uses a compact top bar and a Manus-like three-column workspace: a source rail, a five-step agent timeline, and a flexible artifact canvas. The artifact canvas contains the story thesis, slide preview, navigator, and native text editor. Mobile collapses to one column with actions kept reachable.
+Desktop PPTX mode uses a compact top bar and a Manus-like three-column workspace: a source rail, a five-step agent timeline, and a flexible artifact canvas. HTML mode uses a Claude Design-like single sidebar with Chat/Context tabs beside an unframed artifact canvas; page navigation and the object inspector stay inside the HTML editor. Mobile collapses to one column with actions kept reachable.
 
 ## Components
 
