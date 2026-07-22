@@ -117,10 +117,42 @@ export function createEventStore({ store, now = () => new Date().toISOString() }
   if (typeof now !== "function") throw new TypeError("Event store now must be a function");
   const listeners = new Map();
 
+  async function readPersistedUnlocked(jobId) {
+    const raw = await store.readArtifact(jobId, "events.ndjson", { optional: true }) || "";
+    const hasPartialTail = raw.length > 0 && !raw.endsWith("\n");
+    const lines = raw.split("\n");
+    if (raw.endsWith("\n")) lines.pop();
+    let tail;
+    if (hasPartialTail) tail = lines.pop();
+
+    const events = [];
+    for (const [index, line] of lines.entries()) {
+      if (!line) continue;
+      events.push(parsePersistedEvent(line, index + 1, jobId));
+    }
+    if (tail) {
+      try {
+        events.push(parsePersistedEvent(tail, lines.length + 1, jobId));
+      } catch {
+        // An unterminated final record may be truncated at any field boundary.
+      }
+    }
+    assertMonotonic(events);
+
+    if (hasPartialTail) {
+      const repaired = events.length ? `${events.map((event) => JSON.stringify(event)).join("\n")}\n` : "";
+      await store.writeArtifact(jobId, "events.ndjson", repaired, { alreadyLocked: true });
+    }
+    const lastSeq = events.at(-1)?.seq || 0;
+    const job = await store.readJob(jobId, { alreadyLocked: true });
+    if (job.lastSeq !== lastSeq) await store.updateJob(jobId, { lastSeq }, { alreadyLocked: true });
+    return events;
+  }
+
   async function append(jobId, input) {
     return store.runExclusive(jobId, async () => {
-      const job = await store.readJob(jobId, { alreadyLocked: true });
-      const event = deckEventSchema.parse({ ...input, seq: job.lastSeq + 1, jobId, createdAt: now() });
+      const persisted = await readPersistedUnlocked(jobId);
+      const event = deckEventSchema.parse({ ...input, seq: (persisted.at(-1)?.seq || 0) + 1, jobId, createdAt: now() });
       await store.appendLine(jobId, "events.ndjson", `${JSON.stringify(event)}\n`, { alreadyLocked: true });
       await store.updateJob(jobId, { lastSeq: event.seq }, { alreadyLocked: true });
       for (const listener of listeners.get(jobId) || []) {
@@ -137,37 +169,7 @@ export function createEventStore({ store, now = () => new Date().toISOString() }
   async function readAfter(jobId, after) {
     validateAfter(after);
     return store.runExclusive(jobId, async () => {
-      const raw = await store.readArtifact(jobId, "events.ndjson", { optional: true }) || "";
-      const hasPartialTail = raw.length > 0 && !raw.endsWith("\n");
-      const lines = raw.split("\n");
-      if (raw.endsWith("\n")) lines.pop();
-      let tail;
-      if (hasPartialTail) tail = lines.pop();
-
-      const events = [];
-      for (const [index, line] of lines.entries()) {
-        if (!line) continue;
-        events.push(parsePersistedEvent(line, index + 1, jobId));
-      }
-      if (tail) {
-        let parsed;
-        try {
-          parsed = JSON.parse(tail);
-        } catch {
-          parsed = undefined;
-        }
-        if (parsed !== undefined) events.push(parsePersistedEvent(tail, lines.length + 1, jobId));
-      }
-      assertMonotonic(events);
-
-      if (hasPartialTail) {
-        const repaired = events.length ? `${events.map((event) => JSON.stringify(event)).join("\n")}\n` : "";
-        await store.writeArtifact(jobId, "events.ndjson", repaired, { alreadyLocked: true });
-      }
-      const lastSeq = events.at(-1)?.seq || 0;
-      const job = await store.readJob(jobId, { alreadyLocked: true });
-      if (job.lastSeq !== lastSeq) await store.updateJob(jobId, { lastSeq }, { alreadyLocked: true });
-      return events.filter((event) => event.seq > after);
+      return (await readPersistedUnlocked(jobId)).filter((event) => event.seq > after);
     });
   }
 

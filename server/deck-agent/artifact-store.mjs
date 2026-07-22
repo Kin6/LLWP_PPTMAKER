@@ -364,8 +364,31 @@ export function createArtifactStore({ rootDir, quotas = DEFAULT_QUOTAS, fsHooks 
       const projectedTotal = currentTotal - (inputStat?.size || 0) + inputBytes.length + prepared.reduce((sum, item) => sum + item.bytes.length, 0);
       if (projectedTotal > effectiveQuotas.job) throw new Error("Job quota limit exceeded");
 
-      for (const item of prepared) await writeUnlocked(jobId, item.relativePath, item.bytes, options);
-      await writeUnlocked(jobId, "job-input.json", inputBytes, options);
+      for (const item of prepared) {
+        const { target } = resolveJobPath(resolvedRoot, jobId, item.relativePath);
+        if (await lstatOptional(target)) throw new Error("Generated asset id collision");
+      }
+      const committedAssets = [];
+      try {
+        for (const item of prepared) {
+          await writeUnlocked(jobId, item.relativePath, item.bytes, options);
+          committedAssets.push(item.relativePath);
+        }
+        await writeUnlocked(jobId, "job-input.json", inputBytes, options);
+      } catch (error) {
+        const rollbackErrors = [];
+        for (const relativePath of committedAssets) {
+          const { jobRoot: rollbackRoot, target } = resolveJobPath(resolvedRoot, jobId, relativePath);
+          try {
+            await assertNoSymlink(rollbackRoot, target);
+            await fs.rm(target, { force: true });
+          } catch (rollbackError) {
+            rollbackErrors.push(rollbackError);
+          }
+        }
+        if (rollbackErrors.length) throw new AggregateError([error, ...rollbackErrors], "Uploaded asset rollback failed");
+        throw error;
+      }
       return prepared.map((item) => item.provenance);
     };
     return options.alreadyLocked ? persist() : runExclusive(jobId, persist);

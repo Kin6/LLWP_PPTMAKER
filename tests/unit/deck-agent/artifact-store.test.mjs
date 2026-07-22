@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { access, mkdtemp, mkdir, readFile, symlink } from "node:fs/promises";
+import { access, mkdtemp, mkdir, readFile, readdir, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createArtifactStore, DEFAULT_QUOTAS, resolveJobPath } from "../../../server/deck-agent/artifact-store.mjs";
@@ -144,6 +144,41 @@ describe("artifact store", () => {
       id: asset.id, filename: asset.filename, kind: "image", stage: "queued", previewable: true, downloadable: true,
     });
     expect(JSON.stringify(listed)).not.toContain("../../portrait.png");
+  });
+
+  it("rolls back a multi-image batch when the provenance commit fails", async () => {
+    const rootDir = await mkdtemp(path.join(tmpdir(), "deck-store-"));
+    const store = createArtifactStore({ rootDir });
+    await store.createJob({ jobId, title: "测试", input: { source: {}, options: {} }, sourceBlocks: [] });
+    const png = Buffer.from("89504e470d0a1a0a00000000", "hex");
+    await store.persistUploadedAssets(jobId, [{
+      name: "existing.png", dataUrl: `data:image/png;base64,${png.toString("base64")}`, summary: "existing",
+    }]);
+    const assetsDir = path.join(rootDir, jobId, "assets");
+    const previousFiles = (await readdir(assetsDir)).sort();
+    const previousInput = await store.readJson(jobId, "job-input.json");
+    const previousArtifacts = await store.listArtifacts(jobId);
+    let failProvenance = true;
+    const faultyStore = createArtifactStore({
+      rootDir,
+      fsHooks: {
+        beforeRename: (_temporary, target) => {
+          if (failProvenance && target === path.join(rootDir, jobId, "job-input.json")) {
+            failProvenance = false;
+            throw new Error("provenance commit fault");
+          }
+        },
+      },
+    });
+
+    await expect(faultyStore.persistUploadedAssets(jobId, [
+      { name: "first.png", dataUrl: `data:image/png;base64,${png.toString("base64")}`, summary: "first" },
+      { name: "second.png", dataUrl: `data:image/png;base64,${Buffer.concat([png, Buffer.from([1])]).toString("base64")}`, summary: "second" },
+    ])).rejects.toThrow(/provenance commit fault/);
+
+    expect((await readdir(assetsDir)).sort()).toEqual(previousFiles);
+    expect(await store.readJson(jobId, "job-input.json")).toEqual(previousInput);
+    expect(await store.listArtifacts(jobId)).toEqual(previousArtifacts);
   });
 
   it("lists only valid nonterminal job directories as recoverable", async () => {

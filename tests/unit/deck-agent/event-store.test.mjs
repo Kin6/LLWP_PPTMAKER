@@ -24,6 +24,35 @@ it("serializes concurrent appends and replays only seq greater than after", asyn
   expect((await events.readAfter(jobId, 15)).map((event) => event.seq)).toEqual([16, 17, 18, 19, 20]);
 });
 
+it("reconciles a durable event before retrying after the job update fails", async () => {
+  const { rootDir, store, jobId } = await createTemporaryJob();
+  let failJobUpdate = true;
+  const faultyStore = createArtifactStore({
+    rootDir,
+    fsHooks: {
+      beforeRename: (_temporary, target) => {
+        if (failJobUpdate && target === path.join(rootDir, jobId, "job.json")) {
+          failJobUpdate = false;
+          throw new Error("job update fault");
+        }
+      },
+    },
+  });
+  const events = createEventStore({ store: faultyStore, now: () => "2026-07-22T00:00:00.000Z" });
+
+  await expect(events.append(jobId, {
+    stage: "outline", type: "progress", status: "running", title: "durable before failure",
+  })).rejects.toThrow(/job update fault/);
+  expect((await store.readJob(jobId)).lastSeq).toBe(0);
+
+  const retried = await events.append(jobId, {
+    stage: "outline", type: "progress", status: "running", title: "retry",
+  });
+  expect(retried.seq).toBe(2);
+  expect((await events.readAfter(jobId, 0)).map((event) => event.seq)).toEqual([1, 2]);
+  expect((await store.readJob(jobId)).lastSeq).toBe(2);
+});
+
 it("drops an incomplete final record and reconciles lastSeq to the last valid event", async () => {
   const { rootDir, store, jobId } = await createTemporaryJob();
   const events = createEventStore({ store, now: () => "2026-07-22T00:00:00.000Z" });
@@ -36,6 +65,20 @@ it("drops an incomplete final record and reconciles lastSeq to the last valid ev
   const repaired = await readFile(path.join(rootDir, jobId, "events.ndjson"), "utf8");
   expect(repaired.endsWith("\n")).toBe(true);
   expect(repaired).not.toContain('{"seq":2,"jobId":');
+});
+
+it("drops an unterminated schema-invalid final record", async () => {
+  const { rootDir, store, jobId } = await createTemporaryJob();
+  const events = createEventStore({ store, now: () => "2026-07-22T00:00:00.000Z" });
+  await events.append(jobId, { stage: "outline", type: "stage", status: "running", title: "outline" });
+  await appendFile(path.join(rootDir, jobId, "events.ndjson"), '{"seq":2}');
+  await store.updateJob(jobId, { lastSeq: 2 });
+
+  expect((await events.readAfter(jobId, 0)).map((event) => event.seq)).toEqual([1]);
+  expect((await store.readJob(jobId)).lastSeq).toBe(1);
+  const repaired = await readFile(path.join(rootDir, jobId, "events.ndjson"), "utf8");
+  expect(repaired.endsWith("\n")).toBe(true);
+  expect(repaired).not.toContain('{"seq":2}');
 });
 
 it("rejects a corrupt newline-terminated persisted event", async () => {
@@ -61,6 +104,9 @@ class TestResponse extends EventEmitter {
 
 it("subscribes before replay, orders and deduplicates events, then closes on a terminal job event", async () => {
   const { store, jobId } = await createTemporaryJob();
+  await createEventStore({ store, now: () => "2026-07-22T00:00:00.000Z" }).append(jobId, {
+    stage: "queued", type: "job", status: "queued", title: "created",
+  });
   let releaseRead;
   let signalRead;
   const readStarted = new Promise((resolve) => { signalRead = resolve; });
@@ -74,7 +120,6 @@ it("subscribes before replay, orders and deduplicates events, then closes on a t
     },
   };
   const events = createEventStore({ store: delayedStore, now: () => "2026-07-22T00:00:00.000Z" });
-  await events.append(jobId, { stage: "queued", type: "job", status: "queued", title: "created" });
   const req = new EventEmitter();
   const res = new TestResponse();
   const piping = events.pipeNdjson(req, res, { jobId, after: 0 });
