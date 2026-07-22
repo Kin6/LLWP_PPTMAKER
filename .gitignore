@@ -7,3 +7,7 @@ artifacts/
 .gstack/
 .playwright-cli/
 output/playwright/
+coverage/
+test-results/
+playwright-report/
+blob-report/
