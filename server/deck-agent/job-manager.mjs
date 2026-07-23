@@ -67,9 +67,12 @@ function normalizedBlock(block) {
   if (!source || typeof source !== "object" || Array.isArray(source)) {
     throw httpError(400, "Source block provenance is required");
   }
+  if (typeof block.id !== "string" || typeof source.blockId !== "string" || block.id !== source.blockId) {
+    throw httpError(400, "Source block id must match its provenance blockId");
+  }
   const id = cleanText(block.id, 160);
   const sourceBlockId = cleanText(source.blockId, 160);
-  if (!id || id !== sourceBlockId) {
+  if (!id) {
     throw httpError(400, "Source block id must match its provenance blockId");
   }
   if (!BLOCK_TYPES.has(block.type)) throw httpError(400, "Unsupported source block type");
@@ -226,6 +229,7 @@ export function createJobManager({
   const active = new Map();
   const cancelling = new Set();
   const lifecycleOperations = new Set();
+  const startupOperations = new Set();
   let started = false;
   let startPromise;
   let accepting = true;
@@ -326,6 +330,7 @@ export function createJobManager({
     accepting = true;
     startPromise = (async () => {
       for (const job of await store.listRecoverableJobs()) {
+        if (!accepting) break;
         await events.readAfter(job.id, 0);
         if (active.has(job.id)) continue;
         const reconciled = await store.readJob(job.id);
@@ -336,9 +341,10 @@ export function createJobManager({
             checkpoints: checkpointsBefore(reconciled, resumeFrom),
           });
         }
+        if (!accepting) break;
         launch(job.id, { resumeFrom });
       }
-      started = true;
+      if (accepting) started = true;
     })();
     try {
       await startPromise;
@@ -353,43 +359,53 @@ export function createJobManager({
     return Promise.resolve().then(operation).finally(() => lifecycleOperations.delete(jobId));
   }
 
+  function runStartupOperation(operation) {
+    let tracked;
+    tracked = Promise.resolve().then(operation).finally(() => startupOperations.delete(tracked));
+    startupOperations.add(tracked);
+    return tracked;
+  }
+
   async function create(raw) {
     if (!accepting) throw httpError(503, "Job manager is shutting down");
-    const input = normalizeInput(raw);
-    const jobId = `job-${crypto.randomUUID()}`;
-    const job = await store.createJob({
-      jobId,
-      title: input.source.topic,
-      input: {
-        source: {
-          topic: input.source.topic,
-          audience: input.source.audience,
-          slideCount: input.source.slideCount,
-          textInput: input.source.textInput,
-          tableInput: input.source.tableInput,
-          imageBrief: input.source.imageBrief,
-          styleId: input.source.styleId,
+    return runStartupOperation(async () => {
+      const input = normalizeInput(raw);
+      const jobId = `job-${crypto.randomUUID()}`;
+      const job = await store.createJob({
+        jobId,
+        title: input.source.topic,
+        input: {
+          source: {
+            topic: input.source.topic,
+            audience: input.source.audience,
+            slideCount: input.source.slideCount,
+            textInput: input.source.textInput,
+            tableInput: input.source.tableInput,
+            imageBrief: input.source.imageBrief,
+            styleId: input.source.styleId,
+          },
+          options: input.options,
         },
-        options: input.options,
-      },
-      sourceBlocks: input.source.sourceBlocks,
+        sourceBlocks: input.source.sourceBlocks,
+      });
+      await store.persistUploadedAssets(jobId, input.source.images);
+      await events.append(jobId, {
+        stage: "queued",
+        type: "job",
+        status: "queued",
+        title: "已创建 HTML 幻灯片任务",
+      });
+      await events.append(jobId, {
+        stage: "queued",
+        type: "message",
+        status: "done",
+        title: "开始制作演示文稿",
+        message: `我会把“${input.source.topic}”整理成面向${input.source.audience || "目标听众"}的 ${input.source.slideCount} 页演示，先生成可查看的 Markdown 内容大纲，然后自动进入设计。`,
+      });
+      if (!accepting) throw httpError(503, "Job manager is shutting down");
+      launch(jobId, { resumeFrom: "outline" });
+      return publicJob(await store.readJob(job.id));
     });
-    await store.persistUploadedAssets(jobId, input.source.images);
-    await events.append(jobId, {
-      stage: "queued",
-      type: "job",
-      status: "queued",
-      title: "已创建 HTML 幻灯片任务",
-    });
-    await events.append(jobId, {
-      stage: "queued",
-      type: "message",
-      status: "done",
-      title: "开始制作演示文稿",
-      message: `我会把“${input.source.topic}”整理成面向${input.source.audience || "目标听众"}的 ${input.source.slideCount} 页演示，先生成可查看的 Markdown 内容大纲，然后自动进入设计。`,
-    });
-    launch(jobId, { resumeFrom: "outline" });
-    return publicJob(await store.readJob(job.id));
   }
 
   async function get(jobId) {
@@ -430,8 +446,8 @@ export function createJobManager({
   async function retry(jobId) {
     return runLifecycleOperation(jobId, async () => {
       if (!accepting) throw httpError(503, "Job manager is shutting down");
-      if (active.has(jobId)) throw httpError(409, "Job already has an active worker");
       const job = await store.readJob(jobId);
+      if (active.has(jobId)) throw httpError(409, "Job already has an active worker");
       if (!RETRYABLE.has(job.status)) throw httpError(409, "Job is not retryable");
       const resumeFrom = retryStage(job);
       try {
@@ -459,53 +475,61 @@ export function createJobManager({
   }
 
   async function message(jobId, request) {
-    if (!accepting) throw httpError(503, "Job manager is shutting down");
-    const before = await store.readJob(jobId);
-    if (!["ready", "needs-review"].includes(before.status) || active.has(jobId)) {
-      throw httpError(409, "Job is not available for revision");
-    }
-    try {
-      await launch(jobId, { type: "revision", request }, { mode: "revision" });
-    } catch (error) {
-      if (Number(error?.status || error?.statusCode) >= 400) throw error;
-      throw httpError(409, error instanceof Error ? error.message : "Revision failed", { cause: error });
-    }
-    const updated = await store.readJob(jobId);
-    if (updated.revision <= before.revision) {
-      throw httpError(409, "Revision worker did not publish a new revision");
-    }
-    await events.append(jobId, {
-      stage: updated.status,
-      type: "revision",
-      status: "done",
-      title: "修改已发布",
-      revision: updated.revision,
+    return runLifecycleOperation(jobId, async () => {
+      if (!accepting) throw httpError(503, "Job manager is shutting down");
+      const before = await store.readJob(jobId);
+      if (!["ready", "needs-review"].includes(before.status) || active.has(jobId)) {
+        throw httpError(409, "Job is not available for revision");
+      }
+      try {
+        await launch(jobId, { type: "revision", request }, { mode: "revision" });
+      } catch (error) {
+        if (Number(error?.status || error?.statusCode) >= 400) throw error;
+        throw httpError(409, error instanceof Error ? error.message : "Revision failed", { cause: error });
+      }
+      const updated = await store.readJob(jobId);
+      if (updated.revision <= before.revision) {
+        throw httpError(409, "Revision worker did not publish a new revision");
+      }
+      await events.append(jobId, {
+        stage: updated.status,
+        type: "revision",
+        status: "done",
+        title: "修改已发布",
+        revision: updated.revision,
+      });
+      return publicJob(await store.readJob(jobId));
     });
-    return publicJob(await store.readJob(jobId));
   }
 
   async function undo(jobId, request) {
-    if (!accepting) throw httpError(503, "Job manager is shutting down");
-    const before = await store.readJob(jobId);
-    if (!["ready", "needs-review"].includes(before.status) || active.has(jobId)) {
-      throw httpError(409, "Job is not available for undo");
-    }
-    if (!revisions?.undo) throw httpError(503, "Revision support is unavailable");
-    await revisions.undo(jobId, request);
-    const updated = await store.readJob(jobId);
-    if (updated.revision >= before.revision) throw httpError(409, "Undo did not select an earlier revision");
-    await events.append(jobId, {
-      stage: updated.status,
-      type: "revision",
-      status: "done",
-      title: "已撤销上一版修改",
-      revision: updated.revision,
+    return runLifecycleOperation(jobId, async () => {
+      if (!accepting) throw httpError(503, "Job manager is shutting down");
+      const before = await store.readJob(jobId);
+      if (!["ready", "needs-review"].includes(before.status) || active.has(jobId)) {
+        throw httpError(409, "Job is not available for undo");
+      }
+      if (!revisions?.undo) throw httpError(503, "Revision support is unavailable");
+      await revisions.undo(jobId, request);
+      const updated = await store.readJob(jobId);
+      if (updated.revision >= before.revision) throw httpError(409, "Undo did not select an earlier revision");
+      await events.append(jobId, {
+        stage: updated.status,
+        type: "revision",
+        status: "done",
+        title: "已撤销上一版修改",
+        revision: updated.revision,
+      });
+      return publicJob(await store.readJob(jobId));
     });
-    return publicJob(await store.readJob(jobId));
   }
 
   async function shutdown() {
     accepting = false;
+    await Promise.allSettled([
+      ...(startPromise ? [startPromise] : []),
+      ...startupOperations,
+    ]);
     const jobIds = [...active.keys()];
     jobIds.forEach((jobId) => cancelling.add(jobId));
     await Promise.allSettled(jobIds.map((jobId) => executor.cancel(jobId)));
