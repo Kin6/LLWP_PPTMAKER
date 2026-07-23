@@ -252,7 +252,7 @@ describe("useDeckAgentJob", () => {
     api.getDeckJob
       .mockResolvedValueOnce(snapshot())
       .mockResolvedValueOnce(snapshot({
-        lastSeq: 4,
+        lastSeq: 5,
         artifacts: [{
           id: "slides-content",
           filename: "slides-content.md",
@@ -451,6 +451,55 @@ describe("useDeckAgentJob", () => {
     });
     expect(streamSignals[0].aborted).toBe(true);
     expect(result.current.state.status).toBe("cancelled");
+    unmount();
+  });
+
+  it("aborts and ignores an older artifact refresh after a command succeeds", async () => {
+    window.history.replaceState(null, "", `/?job=${jobId}`);
+    let resolveRefresh!: (job: DeckJobSnapshot) => void;
+    let refreshSignal!: AbortSignal;
+    api.getDeckJob
+      .mockResolvedValueOnce(snapshot())
+      .mockImplementationOnce((_id: string, signal?: AbortSignal) => {
+        refreshSignal = signal!;
+        return new Promise((resolve) => {
+          resolveRefresh = resolve;
+        });
+      });
+    api.streamDeckJobEvents.mockImplementation((
+      _id: string,
+      _after: number,
+      signal: AbortSignal,
+      onEvent: (value: DeckJobEvent) => void,
+    ) => {
+      onEvent(event({ seq: 5, type: "artifact", artifactId: "slides-content" }));
+      return pendingUntilAbort(signal, []);
+    });
+    api.cancelDeckJob.mockResolvedValue(snapshot({
+      status: "cancelled",
+      lastSeq: 6,
+      actions: {
+        canCancel: false,
+        canRetry: true,
+        canMessage: false,
+        canUndo: false,
+        canDownload: false,
+      },
+    }));
+
+    const { result, unmount } = renderHook(() => useDeckAgentJob());
+    await waitFor(() => expect(api.getDeckJob).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      await result.current.cancel();
+    });
+    expect(refreshSignal.aborted).toBe(true);
+
+    await act(async () => {
+      resolveRefresh(snapshot({ status: "building", lastSeq: 5 }));
+      await Promise.resolve();
+    });
+    expect(result.current.state.status).toBe("cancelled");
+    expect(result.current.state.job?.lastSeq).toBe(6);
     unmount();
   });
 

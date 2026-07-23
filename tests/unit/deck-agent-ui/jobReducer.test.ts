@@ -96,6 +96,48 @@ describe("deck job reducer", () => {
     expect(refreshed.artifacts).toEqual([expect.objectContaining({ id: "deck-preview" })]);
   });
 
+  it("rejects a background snapshot older than the accepted event or command watermark", () => {
+    const afterEvent = reduceDeckJob(createDeckJobState(snapshot({ lastSeq: 5 })), {
+      type: "event",
+      event: event({
+        seq: 6,
+        stage: "verifying",
+        progress: { completed: 7, total: 8 },
+        revision: 2,
+      }),
+    });
+    const afterCommand = reduceDeckJob(afterEvent, {
+      type: "snapshot",
+      job: snapshot({
+        status: "cancelled",
+        lastSeq: 7,
+        revision: 2,
+        progress: { completed: 7, total: 8 },
+        actions: {
+          canCancel: false,
+          canRetry: true,
+          canMessage: false,
+          canUndo: false,
+          canDownload: false,
+        },
+      }),
+    });
+    const stale = reduceDeckJob(afterCommand, {
+      type: "server-refreshed",
+      job: snapshot({
+        status: "building",
+        lastSeq: 5,
+        revision: 1,
+        progress: { completed: 2, total: 8 },
+      }),
+    });
+
+    expect(stale).toBe(afterCommand);
+    expect(stale.status).toBe("cancelled");
+    expect(stale.revision).toBe(2);
+    expect(stale.progress).toEqual({ completed: 7, total: 8 });
+  });
+
   it("rejects wrong-job and duplicate events and keeps timeline sequence order", () => {
     const initial = createDeckJobState(snapshot());
     const afterFirst = reduceDeckJob(initial, { type: "event", event: event({ seq: 2 }) });

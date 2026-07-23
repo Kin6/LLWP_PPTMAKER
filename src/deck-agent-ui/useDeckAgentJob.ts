@@ -190,6 +190,8 @@ export function useDeckAgentJob(): UseDeckAgentJobResult {
     try {
       const job = await operation(controller.signal);
       if (controller.signal.aborted) return;
+      artifactRefreshControllerRef.current?.abort();
+      artifactRefreshControllerRef.current = null;
       afterSuccess?.(job);
       dispatch({ type: "snapshot", job });
     } catch (error: unknown) {

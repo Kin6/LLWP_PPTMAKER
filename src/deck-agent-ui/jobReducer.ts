@@ -226,6 +226,11 @@ export function reduceDeckJob(
     case "snapshot":
       return withSnapshot(state, action.job);
     case "server-refreshed": {
+      if (state.job?.id === action.job.id) {
+        const currentWatermark = Math.max(state.lastSeq, state.job.lastSeq);
+        if (action.job.lastSeq < currentWatermark
+          || (action.job.lastSeq === currentWatermark && action.job.revision < state.revision)) return state;
+      }
       const refreshed = withSnapshot(state, action.job);
       return {
         ...refreshed,
