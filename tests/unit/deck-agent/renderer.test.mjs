@@ -217,6 +217,24 @@ describe("fixed deck renderer", () => {
       .rejects.toThrow(/QA artifact/i);
   });
 
+  it("fences QA artifact writes with the verification cancellation signal", async () => {
+    const controller = new AbortController();
+    controller.abort(new Error("verification cancelled"));
+
+    await expect(renderer.writeQaArtifact({
+      jobId,
+      revisionId,
+      filename: "slides/cancelled.png",
+      data: Buffer.from("late evidence"),
+      signal: controller.signal,
+    })).rejects.toThrow(/verification cancelled/i);
+    expect(await store.readArtifact(
+      jobId,
+      `revisions/${revisionId}/qa/slides/cancelled.png`,
+      { optional: true, encoding: null },
+    )).toBeUndefined();
+  });
+
   it("packages standalone HTML through a bounded CLI with no output path option", async () => {
     const { stdout } = await execFileAsync(process.execPath, [packageDeckCli, "--job", jobId, "--revision", revisionId], {
       cwd: repositoryRoot,

@@ -1,8 +1,14 @@
 import path from "node:path";
 import fs from "node:fs/promises";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import express from "express";
 import { loadServerConfig } from "./config.mjs";
+import { createArtifactStore } from "./deck-agent/artifact-store.mjs";
+import { createEventStore } from "./deck-agent/event-store.mjs";
+import { createJobManager, normalizeDeckJobInput } from "./deck-agent/job-manager.mjs";
+import { createRenderer } from "./deck-agent/renderer.mjs";
+import { createDeckJobRouter } from "./deck-agent/routes.mjs";
+import { createWorkerExecutor } from "./deck-agent/worker-entry.mjs";
 import { createImageClient } from "./images/client.mjs";
 import { createModelClient } from "./model/client.mjs";
 import { HttpError } from "./shared/errors.mjs";
@@ -23,8 +29,37 @@ const isProduction = serverConfig.production;
 const port = serverConfig.port;
 const host = serverConfig.host;
 
-const app = express();
+export const app = express();
 app.use(express.json({ limit: "42mb" }));
+
+const deckStore = createArtifactStore({ rootDir: serverConfig.deckJobRoot });
+const deckEvents = createEventStore({ store: deckStore });
+const deckParentOrigin = process.env.DECK_PARENT_ORIGIN || serverOrigin(host, port);
+process.env.DECK_PARENT_ORIGIN = deckParentOrigin;
+const deckRenderer = createRenderer({
+  store: deckStore,
+  runtimeRoot: path.join(root, "skills/generate-html-deck/assets/runtime"),
+  appOrigin: deckParentOrigin,
+});
+const deckRevisions = createDeferredRevisionAdapter({ store: deckStore, renderer: deckRenderer });
+const deckExecutor = createWorkerExecutor({
+  onEvent: (jobId, event) => deckEvents.append(jobId, event),
+});
+export const jobManager = createJobManager({
+  store: deckStore,
+  events: deckEvents,
+  executor: deckExecutor,
+  revisions: deckRevisions,
+  normalizeInput: normalizeHtmlDeckJobInput,
+});
+export const deckJobRouter = createDeckJobRouter({
+  manager: jobManager,
+  events: deckEvents,
+  store: deckStore,
+  revisions: deckRevisions,
+  parentOrigin: deckParentOrigin,
+});
+app.use("/api/html-deck", deckJobRouter);
 
 app.get("/api/html-runtime/reveal.js", (_req, res) => sendRuntimeAsset(res, "reveal.js/dist/reveal.js", "application/javascript; charset=utf-8"));
 app.get("/api/html-runtime/reveal.css", (_req, res) => sendRuntimeAsset(res, "reveal.js/dist/reveal.css", "text/css; charset=utf-8"));
@@ -612,6 +647,23 @@ function normalizeSource(raw) {
     styleId: styleGuides[raw.styleId] ? raw.styleId : "product-calm",
     images: normalizeImages(raw.images),
     sourceBlocks: normalizeSourceBlocks(raw.sourceBlocks),
+  };
+}
+
+function normalizeHtmlDeckJobInput(raw) {
+  const input = normalizeDeckJobInput(raw);
+  // Keep shared legacy topic/audience/style defaults while preserving the
+  // durable path's larger, prevalidated source and image quotas.
+  const shared = normalizeSource({ ...raw.source, images: [], sourceBlocks: [] });
+  return {
+    ...input,
+    source: {
+      ...input.source,
+      topic: shared.topic,
+      audience: shared.audience,
+      slideCount: shared.slideCount,
+      styleId: shared.styleId,
+    },
   };
 }
 
@@ -1256,17 +1308,139 @@ async function sendRuntimeAsset(res, relativePath, contentType) {
   }
 }
 
-if (isProduction) {
-  app.use(express.static(path.join(root, "dist")));
-  app.get("*", (_req, res) => res.sendFile(path.join(root, "dist", "index.html")));
-} else {
-  const { createServer: createViteServer } = await import("vite");
-  const vite = await createViteServer({
-    root,
-    server: { middlewareMode: true, host: "0.0.0.0", watch: { ignored: ["**/artifacts/**", "**/dist/**"] } },
-    appType: "spa",
-  });
-  app.use(vite.middlewares);
+function serverOrigin(serverHost, serverPort) {
+  const formattedHost = serverHost.includes(":") && !serverHost.startsWith("[")
+    ? `[${serverHost}]`
+    : serverHost;
+  return `http://${formattedHost}:${serverPort}`;
 }
 
-app.listen(port, host, () => console.log(`DeckForge running at http://${host}:${port}`));
+function createDeferredRevisionAdapter({ store, renderer }) {
+  return {
+    async resolveRevisionArtifact(jobId, artifactId) {
+      const artifacts = await store.listArtifacts(jobId);
+      if (artifactId === "slides-content") {
+        return artifacts.some((artifact) => artifact.id === artifactId)
+          ? { id: artifactId, relativePath: "slides-content.md" }
+          : undefined;
+      }
+      if (artifactId === "design-brief") {
+        return artifacts.some((artifact) => artifact.id === artifactId)
+          ? { id: artifactId, relativePath: "design-brief.md" }
+          : undefined;
+      }
+      if (artifactId === "deck-preview") {
+        const pointer = await store.readJson(jobId, "current-revision.json", { optional: true });
+        const revision = Number(pointer?.revision ?? pointer?.number);
+        const revisionId = pointer?.revisionId;
+        const registered = artifacts.some((artifact) => (
+          artifact.kind === "html"
+          && artifact.filename === "index.html"
+          && artifact.revision === revision
+        ));
+        if (!registered || !/^revision-\d{6}$/.test(revisionId || "")) return undefined;
+        return {
+          id: artifactId,
+          relativePath: `revisions/${revisionId}/dist/index.html`,
+          revisionId,
+          preview: true,
+        };
+      }
+      const descriptor = artifacts.find((artifact) => artifact.id === artifactId);
+      if (descriptor?.kind === "image") {
+        const jobInput = await store.readJson(jobId, "job-input.json", { optional: true }) || {};
+        const asset = (jobInput.uploadedAssets || []).find((candidate) => candidate.id === artifactId);
+        if (asset?.filename && /^[a-z0-9-]+\.(?:png|jpe?g|webp)$/.test(asset.filename)) {
+          return { id: artifactId, relativePath: `assets/${asset.filename}` };
+        }
+      }
+      return undefined;
+    },
+    async renderPreview(jobId, resolved) {
+      return renderer.assemblePreview({ jobId, revisionId: resolved.revisionId });
+    },
+  };
+}
+
+let frontendPromise;
+async function mountFrontend() {
+  if (frontendPromise) return frontendPromise;
+  frontendPromise = (async () => {
+    if (isProduction) {
+      app.use(express.static(path.join(root, "dist")));
+      app.get("*", (_req, res) => res.sendFile(path.join(root, "dist", "index.html")));
+      return;
+    }
+    const { createServer: createViteServer } = await import("vite");
+    const vite = await createViteServer({
+      root,
+      server: { middlewareMode: true, host: "0.0.0.0", watch: { ignored: ["**/artifacts/**", "**/dist/**"] } },
+      appType: "spa",
+    });
+    app.use(vite.middlewares);
+  })();
+  return frontendPromise;
+}
+
+export let httpServer;
+let shutdownPromise;
+let signalsInstalled = false;
+
+export async function startServer({ installSignalHandlers = true } = {}) {
+  if (httpServer?.listening) return httpServer;
+  await jobManager.start();
+  await mountFrontend();
+  httpServer = await new Promise((resolve, reject) => {
+    const server = app.listen(port, host, () => {
+      server.off("error", reject);
+      resolve(server);
+    });
+    server.once("error", reject);
+  });
+  if (installSignalHandlers && !signalsInstalled) {
+    signalsInstalled = true;
+    for (const signal of ["SIGINT", "SIGTERM"]) {
+      process.once(signal, () => {
+        stopServer().then(
+          () => process.exit(0),
+          (error) => {
+            console.error(error);
+            process.exit(1);
+          },
+        );
+      });
+    }
+  }
+  console.log(`DeckForge running at ${serverOrigin(host, port)}`);
+  return httpServer;
+}
+
+export async function stopServer() {
+  if (shutdownPromise) return shutdownPromise;
+  shutdownPromise = (async () => {
+    const server = httpServer;
+    let closed = Promise.resolve();
+    if (server?.listening) {
+      closed = new Promise((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
+    }
+    await jobManager.shutdown();
+    server?.closeAllConnections?.();
+    server?.closeIdleConnections?.();
+    await closed;
+    httpServer = undefined;
+  })().finally(() => {
+    shutdownPromise = undefined;
+  });
+  return shutdownPromise;
+}
+
+const isDirectRun = process.argv[1]
+  && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+if (isDirectRun) {
+  startServer().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}

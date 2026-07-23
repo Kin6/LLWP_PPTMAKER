@@ -331,10 +331,10 @@ export function createRenderer({ store, runtimeRoot, appOrigin }) {
     });
   }
 
-  async function writeQaArtifact({ jobId, revisionId, filename, data }) {
+  async function writeQaArtifact({ jobId, revisionId, filename, data, signal }) {
     if (typeof filename !== "string" || !QA_FILENAME.test(filename)) throw new Error("Invalid QA artifact filename");
     const relativePath = `${revisionPrefix(revisionId)}/qa/${filename}`;
-    await store.writeArtifact(jobId, relativePath, data);
+    await store.writeArtifact(jobId, relativePath, data, { signal });
     return { artifactId: artifactIdFor(relativePath), relativePath };
   }
 

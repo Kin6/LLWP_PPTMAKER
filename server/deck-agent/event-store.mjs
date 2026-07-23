@@ -43,7 +43,7 @@ function createNdjsonPipe({ readAfter, subscribe, now }) {
     if (!req?.once || !res?.write) throw new TypeError("NDJSON streaming requires request and response streams");
 
     res.setHeader?.("Content-Type", "application/x-ndjson; charset=utf-8");
-    res.setHeader?.("Cache-Control", "no-cache, no-transform");
+    res.setHeader?.("Cache-Control", "no-store, no-transform");
     res.setHeader?.("Connection", "keep-alive");
     res.flushHeaders?.();
 
