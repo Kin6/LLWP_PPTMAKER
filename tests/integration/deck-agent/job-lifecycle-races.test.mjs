@@ -8,6 +8,7 @@ import {
   createJobManager,
   normalizeDeckJobInput,
 } from "../../../server/deck-agent/job-manager.mjs";
+import { createRevisionStore } from "../../../server/deck-agent/revision-store.mjs";
 
 const PIPELINE = [
   "outline",
@@ -90,6 +91,14 @@ async function seedJob(store, {
   return jobId;
 }
 
+async function pointToRevision(store, jobId, revision) {
+  await store.writeJson(jobId, "current-revision.json", {
+    revision,
+    revisionId: `revision-${String(revision).padStart(6, "0")}`,
+    status: "ready",
+  });
+}
+
 describe("deck job lifecycle race fences", () => {
   let store;
   let events;
@@ -98,6 +107,142 @@ describe("deck job lifecycle race fences", () => {
     const rootDir = await mkdtemp(path.join(tmpdir(), "deck-lifecycle-races-"));
     store = createArtifactStore({ rootDir });
     events = createEventStore({ store });
+  });
+
+  it("reports the pointer revision when the job snapshot lags after publication", async () => {
+    const jobId = await seedJob(store, { status: "ready", failedStage: undefined });
+    await pointToRevision(store, jobId, 2);
+    const revisions = createRevisionStore({ store });
+    const manager = createJobManager({
+      store,
+      events,
+      revisions,
+      executor: {
+        start: vi.fn(async () => {}),
+        cancel: vi.fn(async () => {}),
+        shutdown: vi.fn(async () => {}),
+      },
+      normalizeInput: normalizeDeckJobInput,
+    });
+
+    const snapshot = await manager.get(jobId);
+
+    expect(snapshot.revision).toBe(2);
+    expect(snapshot.actions.canUndo).toBe(true);
+    expect((await store.readJob(jobId)).revision).toBe(1);
+    await manager.shutdown();
+  });
+
+  it("compares message publication against the pointer when the job snapshot lags", async () => {
+    const jobId = await seedJob(store, { status: "ready", failedStage: undefined });
+    await pointToRevision(store, jobId, 2);
+    const revisions = createRevisionStore({ store });
+    const executor = {
+      start: vi.fn(async (receivedJobId, options) => {
+        expect(options).toMatchObject({
+          type: "revision",
+          request: { expectedRevision: 2 },
+        });
+        await pointToRevision(store, receivedJobId, 3);
+      }),
+      cancel: vi.fn(async () => {}),
+      shutdown: vi.fn(async () => {}),
+    };
+    const manager = createJobManager({
+      store,
+      events,
+      executor,
+      revisions,
+      normalizeInput: normalizeDeckJobInput,
+    });
+
+    const snapshot = await manager.message(jobId, {
+      instruction: "Tighten the conclusion",
+      expectedRevision: 2,
+    });
+
+    expect(snapshot.revision).toBe(3);
+    expect((await store.readJob(jobId)).revision).toBe(1);
+    await manager.shutdown();
+  });
+
+  it("compares undo against the pointer when the job snapshot already matches its parent", async () => {
+    const jobId = await seedJob(store, { status: "ready", failedStage: undefined });
+    await pointToRevision(store, jobId, 2);
+    const revisionStore = createRevisionStore({ store });
+    const revisions = {
+      ...revisionStore,
+      undo: vi.fn(async (receivedJobId, request) => {
+        expect(request).toEqual({ expectedRevision: 2 });
+        await pointToRevision(store, receivedJobId, 1);
+      }),
+    };
+    const manager = createJobManager({
+      store,
+      events,
+      revisions,
+      executor: {
+        start: vi.fn(async () => {}),
+        cancel: vi.fn(async () => {}),
+        shutdown: vi.fn(async () => {}),
+      },
+      normalizeInput: normalizeDeckJobInput,
+    });
+
+    const snapshot = await manager.undo(jobId, { expectedRevision: 2 });
+
+    expect(snapshot.revision).toBe(1);
+    expect((await store.readJob(jobId)).revision).toBe(1);
+    await manager.shutdown();
+  });
+
+  it("cancels an active revision while preserving the published ready deck", async () => {
+    const jobId = await seedJob(store, { status: "ready", failedStage: undefined });
+    const revisionStarted = deferred();
+    const revisionStopped = deferred();
+    const executor = {
+      start: vi.fn((_receivedJobId, options) => {
+        expect(options.type).toBe("revision");
+        revisionStarted.resolve();
+        return revisionStopped.promise;
+      }),
+      cancel: vi.fn(async () => {
+        revisionStopped.reject(new Error("revision cancelled"));
+        await Promise.allSettled([revisionStopped.promise]);
+      }),
+      shutdown: vi.fn(async () => {}),
+    };
+    const manager = createJobManager({
+      store,
+      events,
+      executor,
+      normalizeInput: normalizeDeckJobInput,
+    });
+    const messageResult = settled(manager.message(jobId, {
+      instruction: "Tighten the conclusion",
+      expectedRevision: 1,
+    }));
+    await revisionStarted.promise;
+
+    const runningSnapshot = await manager.get(jobId);
+    const cancelResult = await settled(manager.cancel(jobId));
+    if (executor.cancel.mock.calls.length === 0) {
+      revisionStopped.reject(new Error("test cleanup"));
+    }
+    const finalMessageResult = await messageResult;
+
+    expect(runningSnapshot.actions.canCancel).toBe(true);
+    expect(cancelResult).toMatchObject({
+      status: "fulfilled",
+      value: { status: "ready" },
+    });
+    expect(finalMessageResult).toMatchObject({
+      status: "rejected",
+      reason: { status: 409 },
+    });
+    expect(executor.cancel).toHaveBeenCalledWith(jobId);
+    expect(await store.readJob(jobId)).toMatchObject({ status: "ready", revision: 1 });
+    await manager.shutdown();
   });
 
   it("allows only retry to mutate when a message arrives during its paused job read", async () => {

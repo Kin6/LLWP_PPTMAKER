@@ -234,6 +234,12 @@ describe("HTML deck jobs API", () => {
       .expect("Cache-Control", /no-store/);
 
     expect(deckJobSnapshotSchema.parse(response.body.job)).toEqual(response.body.job);
+    expect(response.body.job.source).toEqual({
+      topic: validRequest.source.topic,
+      audience: validRequest.source.audience,
+      slideCount: validRequest.source.slideCount,
+    });
+    expect(response.body.job).not.toHaveProperty("source.textInput");
     await request(app)
       .get("/api/html-deck/jobs/job-00000000-0000-4000-8000-000000000099")
       .expect(404);

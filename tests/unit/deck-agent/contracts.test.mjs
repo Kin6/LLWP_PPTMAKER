@@ -4,6 +4,7 @@ import {
   assertResumeTransition,
   createJobRequestSchema,
   deckEventSchema,
+  deckJobSnapshotSchema,
   nextStageAfter,
 } from "../../../server/deck-agent/contracts.mjs";
 
@@ -34,6 +35,28 @@ describe("deck job contracts", () => {
       prompt: "secret system prompt",
     });
     expect(result.success).toBe(false);
+  });
+
+  it("exposes only the safe source summary in public snapshots", () => {
+    const snapshot = {
+      id: "job-00000000-0000-4000-8000-000000000001",
+      title: "主题",
+      source: { topic: "主题", audience: "管理层", slideCount: 8 },
+      status: "queued",
+      lastSeq: 0,
+      revision: 0,
+      progress: { completed: 0, total: 8 },
+      artifacts: [],
+      actions: { canCancel: true, canRetry: false, canMessage: false, canUndo: false, canDownload: false },
+      createdAt: "2026-07-22T00:00:00.000Z",
+      updatedAt: "2026-07-22T00:00:00.000Z",
+    };
+
+    expect(deckJobSnapshotSchema.parse(snapshot).source).toEqual(snapshot.source);
+    expect(deckJobSnapshotSchema.safeParse({
+      ...snapshot,
+      source: { ...snapshot.source, textInput: "private material" },
+    }).success).toBe(false);
   });
 
   it("preserves OCR confidence percentages and ignores client-supplied provider credentials", () => {

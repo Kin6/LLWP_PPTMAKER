@@ -227,6 +227,7 @@ export function createJobManager({
   if (!executor?.start || !executor?.cancel) throw new TypeError("Job manager requires a worker executor");
   if (typeof normalizeInput !== "function") throw new TypeError("Job manager normalizeInput must be a function");
   const active = new Map();
+  const activeModes = new Map();
   const cancelling = new Set();
   const lifecycleOperations = new Set();
   const startupOperations = new Set();
@@ -234,32 +235,58 @@ export function createJobManager({
   let startPromise;
   let accepting = true;
 
+  async function effectiveJob(job) {
+    if (!revisions?.readCurrent) return job;
+    const current = await revisions.readCurrent(job.id, { optional: true });
+    return current && current.number !== job.revision
+      ? { ...job, revision: current.number }
+      : job;
+  }
+
+  async function sourceSummary(job) {
+    const input = await store.readJson?.(job.id, "job-input.json", { optional: true });
+    const source = input?.source;
+    const slideCount = Number(source?.slideCount);
+    return {
+      topic: typeof source?.topic === "string" ? source.topic : job.title,
+      audience: typeof source?.audience === "string" ? source.audience : "",
+      slideCount: Number.isInteger(slideCount) && slideCount >= 1 && slideCount <= 50 ? slideCount : 1,
+    };
+  }
+
   async function publicJob(job) {
-    const rawArtifacts = await store.listArtifacts(job.id);
-    const artifacts = currentPreviewArtifact(job, rawArtifacts);
-    const completed = TERMINAL_JOB_STATUSES.includes(job.status)
-      && !["failed", "cancelled"].includes(job.status)
+    const effective = await effectiveJob(job);
+    const [rawArtifacts, source] = await Promise.all([
+      store.listArtifacts(effective.id),
+      sourceSummary(effective),
+    ]);
+    const artifacts = currentPreviewArtifact(effective, rawArtifacts);
+    const completed = TERMINAL_JOB_STATUSES.includes(effective.status)
+      && !["failed", "cancelled"].includes(effective.status)
       ? PIPELINE.length
-      : Math.min(PIPELINE.length, new Set(job.checkpoints || []).size);
+      : Math.min(PIPELINE.length, new Set(effective.checkpoints || []).size);
+    const activeRevision = active.has(effective.id) && activeModes.get(effective.id) === "revision";
     return deckJobSnapshotSchema.parse({
-      id: job.id,
-      title: job.title,
-      status: job.status,
-      ...(job.failedStage ? { failedStage: job.failedStage } : {}),
-      ...(job.error ? { error: job.error } : {}),
-      lastSeq: job.lastSeq,
-      revision: job.revision,
+      id: effective.id,
+      title: effective.title,
+      source,
+      status: effective.status,
+      ...(effective.failedStage ? { failedStage: effective.failedStage } : {}),
+      ...(effective.error ? { error: effective.error } : {}),
+      lastSeq: effective.lastSeq,
+      revision: effective.revision,
       progress: { completed, total: PIPELINE.length },
       artifacts,
       actions: {
-        canCancel: !TERMINAL_JOB_STATUSES.includes(job.status),
-        canRetry: RETRYABLE.has(job.status) && !active.has(job.id),
-        canMessage: ["ready", "needs-review"].includes(job.status) && !active.has(job.id),
-        canUndo: ["ready", "needs-review"].includes(job.status) && job.revision > 1 && !active.has(job.id),
-        canDownload: ["ready", "needs-review"].includes(job.status) && job.revision > 0,
+        canCancel: !TERMINAL_JOB_STATUSES.includes(effective.status)
+          || (["ready", "needs-review"].includes(effective.status) && activeRevision),
+        canRetry: RETRYABLE.has(effective.status) && !active.has(effective.id),
+        canMessage: ["ready", "needs-review"].includes(effective.status) && !active.has(effective.id),
+        canUndo: ["ready", "needs-review"].includes(effective.status) && effective.revision > 1 && !active.has(effective.id),
+        canDownload: ["ready", "needs-review"].includes(effective.status) && effective.revision > 0,
       },
-      createdAt: job.createdAt,
-      updatedAt: job.updatedAt,
+      createdAt: effective.createdAt,
+      updatedAt: effective.updatedAt,
     });
   }
 
@@ -317,9 +344,13 @@ export function createJobManager({
       await recordUnexpectedFailure(jobId, error, mode);
       throw error;
     }).finally(() => {
-      if (active.get(jobId) === tracked) active.delete(jobId);
+      if (active.get(jobId) === tracked) {
+        active.delete(jobId);
+        activeModes.delete(jobId);
+      }
     });
     active.set(jobId, tracked);
+    activeModes.set(jobId, mode);
     tracked.catch(() => {});
     return tracked;
   }
@@ -415,7 +446,11 @@ export function createJobManager({
   async function cancel(jobId) {
     return runLifecycleOperation(jobId, async () => {
       const before = await store.readJob(jobId);
-      if (TERMINAL_JOB_STATUSES.includes(before.status)) throw httpError(409, "Job is not cancellable");
+      const activeRevision = active.has(jobId) && activeModes.get(jobId) === "revision";
+      if (TERMINAL_JOB_STATUSES.includes(before.status)
+        && !(["ready", "needs-review"].includes(before.status) && activeRevision)) {
+        throw httpError(409, "Job is not cancellable");
+      }
       cancelling.add(jobId);
       try {
         await executor.cancel(jobId);
@@ -475,43 +510,47 @@ export function createJobManager({
   }
 
   async function message(jobId, request) {
-    return runLifecycleOperation(jobId, async () => {
+    const { before, running } = await runLifecycleOperation(jobId, async () => {
       if (!accepting) throw httpError(503, "Job manager is shutting down");
-      const before = await store.readJob(jobId);
+      const before = await effectiveJob(await store.readJob(jobId));
       if (!["ready", "needs-review"].includes(before.status) || active.has(jobId)) {
         throw httpError(409, "Job is not available for revision");
       }
-      try {
-        await launch(jobId, { type: "revision", request }, { mode: "revision" });
-      } catch (error) {
-        if (Number(error?.status || error?.statusCode) >= 400) throw error;
-        throw httpError(409, error instanceof Error ? error.message : "Revision failed", { cause: error });
-      }
-      const updated = await store.readJob(jobId);
-      if (updated.revision <= before.revision) {
-        throw httpError(409, "Revision worker did not publish a new revision");
-      }
-      await events.append(jobId, {
-        stage: updated.status,
-        type: "revision",
-        status: "done",
-        title: "修改已发布",
-        revision: updated.revision,
-      });
-      return publicJob(await store.readJob(jobId));
+      return {
+        before,
+        running: launch(jobId, { type: "revision", request }, { mode: "revision" }),
+      };
     });
+    try {
+      await running;
+    } catch (error) {
+      if (Number(error?.status || error?.statusCode) >= 400) throw error;
+      throw httpError(409, error instanceof Error ? error.message : "Revision failed", { cause: error });
+    }
+    const updated = await effectiveJob(await store.readJob(jobId));
+    if (updated.revision <= before.revision) {
+      throw httpError(409, "Revision worker did not publish a new revision");
+    }
+    await events.append(jobId, {
+      stage: updated.status,
+      type: "revision",
+      status: "done",
+      title: "修改已发布",
+      revision: updated.revision,
+    });
+    return publicJob(await store.readJob(jobId));
   }
 
   async function undo(jobId, request) {
     return runLifecycleOperation(jobId, async () => {
       if (!accepting) throw httpError(503, "Job manager is shutting down");
-      const before = await store.readJob(jobId);
+      const before = await effectiveJob(await store.readJob(jobId));
       if (!["ready", "needs-review"].includes(before.status) || active.has(jobId)) {
         throw httpError(409, "Job is not available for undo");
       }
       if (!revisions?.undo) throw httpError(503, "Revision support is unavailable");
       await revisions.undo(jobId, request);
-      const updated = await store.readJob(jobId);
+      const updated = await effectiveJob(await store.readJob(jobId));
       if (updated.revision >= before.revision) throw httpError(409, "Undo did not select an earlier revision");
       await events.append(jobId, {
         stage: updated.status,

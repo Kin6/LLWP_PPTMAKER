@@ -47,6 +47,7 @@ export const deckJobSchema = z.object({
 export const deckArtifactSchema = z.object({ id: z.string().regex(/^[a-z0-9-]+$/), filename: z.string().min(1).max(200), kind: z.enum(["markdown", "html", "image", "json"]), stage: jobStatusSchema, revision: z.number().int().nonnegative().optional(), previewable: z.boolean(), downloadable: z.boolean() }).strict();
 export const deckJobSnapshotSchema = z.object({
   id: z.string().regex(/^job-[0-9a-f-]{36}$/), title: z.string(), status: jobStatusSchema, failedStage: jobStatusSchema.optional(),
+  source: z.object({ topic: z.string(), audience: z.string(), slideCount: z.number().int().min(1).max(50) }).strict(),
   error: z.string().optional(), lastSeq: z.number().int().nonnegative(), revision: z.number().int().nonnegative(),
   progress: z.object({ completed: z.number().int().nonnegative(), total: z.number().int().nonnegative() }).strict(),
   artifacts: z.array(deckArtifactSchema), actions: z.object({ canCancel: z.boolean(), canRetry: z.boolean(), canMessage: z.boolean(), canUndo: z.boolean(), canDownload: z.boolean() }).strict(),
