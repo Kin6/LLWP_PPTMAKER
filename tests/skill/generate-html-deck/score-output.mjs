@@ -13,7 +13,7 @@ const EXPECTED_SOURCE_REFS = new Map([
 const QA_SLIDE_IDS = Array.from({ length: 8 }, (_, index) => `slide-${String(index + 1).padStart(2, "0")}`);
 const REQUIRED_MEDIA_FIELDS = ["id", "file", "tags", "license", "sourceUrl", "sha256"];
 const IMAGE_RESOLUTION_ORDER = ["uploaded-assets", "licensed-internal-assets", "optional-generation", "no-image-layout"];
-const UNIVERSAL_SECURITY_FIELDS = ["artifact-safety", "no-script", "no-external-url"];
+const UNIVERSAL_SECURITY_FIELDS = ["artifact-safety", "fragment-structure", "no-script", "no-external-url"];
 const BYTE_LIMITS = Object.freeze({
   markdown: 2 * 1024 * 1024,
   slideHtml: 200 * 1024,
@@ -25,6 +25,32 @@ const PROHIBITED_FRAGMENT_TAGS = new Set(["script", "style", "form", "frame", "i
 const PROHIBITED_FRAGMENT_NAMESPACES = new Set([
   "http://www.w3.org/2000/svg",
   "http://www.w3.org/1998/Math/MathML",
+]);
+const URL_ATTRIBUTES = new Set([
+  "action",
+  "archive",
+  "attributionsrc",
+  "background",
+  "cite",
+  "classid",
+  "codebase",
+  "data",
+  "dynsrc",
+  "formaction",
+  "href",
+  "imagesrcset",
+  "itemid",
+  "itemtype",
+  "longdesc",
+  "lowsrc",
+  "manifest",
+  "ping",
+  "poster",
+  "profile",
+  "src",
+  "srcset",
+  "usemap",
+  "xlink:href",
 ]);
 const defaultMediaRoot = fileURLToPath(new URL("../../../skills/generate-html-deck/assets/media/", import.meta.url));
 
@@ -73,6 +99,19 @@ async function readContainedFile(root, target, { byteLimit, label, encoding = "u
     if (!targetStat.isFile()) throw new Error(`${label}: is not a regular file`);
     if (targetStat.size > byteLimit) throw new Error(`${label}: exceeds ${byteLimit} byte limit`);
     return readFile(realTarget, encoding);
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith(`${label}:`)) throw error;
+    throw new Error(`${label}: unreadable file (${error instanceof Error ? error.message : String(error)})`);
+  }
+}
+
+async function readInputFile(target, { byteLimit, label }) {
+  try {
+    const targetStat = await lstat(target);
+    if (targetStat.isSymbolicLink()) throw new Error(`${label}: symbolic links are forbidden`);
+    if (!targetStat.isFile()) throw new Error(`${label}: is not a regular file`);
+    if (targetStat.size > byteLimit) throw new Error(`${label}: exceeds ${byteLimit} byte limit`);
+    return await readFile(target, "utf8");
   } catch (error) {
     if (error instanceof Error && error.message.startsWith(`${label}:`)) throw error;
     throw new Error(`${label}: unreadable file (${error instanceof Error ? error.message : String(error)})`);
@@ -279,6 +318,21 @@ function declarations(rule) {
   return values;
 }
 
+function declarationRecords(rule) {
+  const records = [];
+  csstree.walk(rule.block, {
+    visit: "Declaration",
+    enter(node) {
+      records.push({
+        property: node.property.toLowerCase(),
+        value: csstree.generate(node.value).toLowerCase(),
+        important: node.important === true,
+      });
+    },
+  });
+  return records;
+}
+
 function approvedAssetUrl(value, mediaAssetIds) {
   if (!value.startsWith("asset://")) return false;
   const id = value.slice("asset://".length);
@@ -287,12 +341,14 @@ function approvedAssetUrl(value, mediaAssetIds) {
 
 function externalUrls(elements, css, mediaAssetIds, mediaViolations = []) {
   const urls = [...mediaViolations];
-  const urlAttributes = new Set(["src", "href", "srcset", "action", "poster", "formaction"]);
   for (const element of elements) {
     for (const attribute of element.attrs || []) {
       if (attribute.name === "style") urls.push(`${element.file}: inline style`);
       if (attribute.name === "srcdoc") urls.push(`${element.file}: srcdoc`);
-      if (urlAttributes.has(attribute.name) && !approvedAssetUrl(attribute.value, mediaAssetIds)) {
+      const approvedImageSource = element.tagName === "img"
+        && attribute.name === "src"
+        && approvedAssetUrl(attribute.value, mediaAssetIds);
+      if (URL_ATTRIBUTES.has(attribute.name) && !approvedImageSource) {
         urls.push(`${element.file}: ${attribute.name}=${attribute.value}`);
       }
     }
@@ -320,6 +376,51 @@ function processSlides(process) {
   return Array.isArray(process.slides) ? process.slides : [];
 }
 
+function fragmentStructureViolations(htmlFiles) {
+  const violations = [];
+  for (const file of htmlFiles) {
+    const contents = file.contents.replace(/<!--[\s\S]*?-->/g, "");
+    if (/<!doctype(?:\s|>)/i.test(contents)) violations.push(`${file.relativePath}: <!doctype>`);
+    for (const match of contents.matchAll(/<\s*\/?\s*(html|head|body)(?=\s|\/?>)/gi)) {
+      violations.push(`${file.relativePath}: <${match[1].toLowerCase()}> wrapper`);
+    }
+  }
+  return violations;
+}
+
+function cssHidingDeclarations(css) {
+  const found = [];
+  for (const file of css.parsed) {
+    csstree.walk(file.ast, {
+      visit: "Declaration",
+      enter(node) {
+        const property = node.property.toLowerCase();
+        const value = csstree.generate(node.value).trim().toLowerCase();
+        const zeroLength = /^[+-]?(?:0+(?:\.0*)?|\.0+)(?:[a-z%]+)?$/.test(value);
+        const hidden = (property === "display" && value === "none")
+          || (property === "visibility" && ["hidden", "collapse"].includes(value))
+          || (property === "opacity" && Number(value) === 0)
+          || (property === "color" && value === "transparent")
+          || (property === "font-size" && zeroLength)
+          || (property === "content-visibility" && value === "hidden")
+          || property === "clip"
+          || property === "clip-path"
+          || (property === "transform" && /\bscale(?:x|y|3d)?\(\s*(?:0+(?:\.0*)?|\.0+)(?=[, )])/.test(value))
+          || (property === "scale" && /^(?:0+(?:\.0*)?|\.0+)(?:\s|$)/.test(value));
+        if (hidden) found.push(`${file.relativePath}: ${property}: ${value}`);
+      },
+    });
+  }
+  return found;
+}
+
+function isStructurallyEmpty(element) {
+  if (element.tagName === "img") return false;
+  const children = [...(element.childNodes || []), ...(element.content?.childNodes || [])];
+  return children.every((child) => child.nodeName === "#comment"
+    || (child.nodeName === "#text" && !(child.value || "").trim()));
+}
+
 function isConcreteQaText(value, minimumLength) {
   if (typeof value !== "string") return false;
   const text = value.trim();
@@ -341,13 +442,19 @@ const checks = {
     artifactViolations.length === 0,
     { violations: artifactViolations },
   ),
+  "fragment-structure": ({ htmlFiles }) => {
+    const violations = fragmentStructureViolations(htmlFiles);
+    return result("fragment-structure", violations.length === 0, { violations });
+  },
   "one-design-direction": ({ process }) => {
-    const directions = Array.isArray(process.designDirections)
-      ? process.designDirections
-      : typeof process.designDirection === "string" && process.designDirection.trim()
-        ? [process.designDirection]
-        : [];
-    return result("one-design-direction", directions.length === 1, { directions }, "text-judgment");
+    const direction = typeof process.designDirection === "string" ? process.designDirection.trim() : "";
+    const pluralAliasPresent = Object.hasOwn(process, "designDirections");
+    return result(
+      "one-design-direction",
+      Boolean(direction) && !pluralAliasPresent,
+      { direction, pluralAliasPresent },
+      "text-judgment",
+    );
   },
   "no-script": ({ elements, htmlFiles }) => {
     const violations = elements.flatMap((element) => {
@@ -375,10 +482,51 @@ const checks = {
   "fixed-canvas": ({ css }) => {
     const roots = css.parsed.flatMap((file) => cssSelectors(file.ast)
       .filter(({ selector }) => selector.trim() === ":slide")
-      .map(({ rule }) => ({ file: file.relativePath, values: Object.fromEntries(declarations(rule)) })));
-    const effective = Object.assign({}, ...roots.map(({ values }) => values));
-    const pass = roots.length > 0 && effective.width === "1920px" && effective.height === "1080px";
-    return result("fixed-canvas", pass, { roots, effective, parseErrors: css.errors });
+      .map(({ rule }) => ({
+        file: file.relativePath,
+        declarations: declarationRecords(rule),
+        values: Object.fromEntries(declarations(rule)),
+      })));
+    const required = { width: "1920px", height: "1080px", overflow: "hidden" };
+    const effectiveRecords = {};
+    for (const root of roots) {
+      for (const declaration of root.declarations) {
+        if (!Object.hasOwn(required, declaration.property)) continue;
+        const current = effectiveRecords[declaration.property];
+        if (!current
+          || declaration.important === current.important
+          || (declaration.important && !current.important)) {
+          effectiveRecords[declaration.property] = declaration;
+        }
+      }
+    }
+    const effective = Object.fromEntries(Object.entries(effectiveRecords)
+      .map(([property, declaration]) => [property, declaration.value]));
+    const violations = [];
+    for (const file of css.parsed) {
+      for (const { selector, rule } of cssSelectors(file.ast)) {
+        const normalized = selector.trim();
+        if (!/^:slide(?:$|[\s>+~.#[:])/.test(normalized)) continue;
+        const values = declarations(rule);
+        if (normalized !== ":slide") {
+          for (const [property, expected] of Object.entries(required)) {
+            if (values.has(property) && values.get(property) !== expected) {
+              violations.push(`${file.relativePath}: ${normalized} sets ${property}: ${values.get(property)}`);
+            }
+          }
+        }
+        for (const property of ["overflow-x", "overflow-y"]) {
+          if (values.has(property) && values.get(property) !== "hidden") {
+            violations.push(`${file.relativePath}: ${normalized} sets ${property}: ${values.get(property)}`);
+          }
+        }
+      }
+    }
+    const pass = roots.length > 0
+      && css.errors.length === 0
+      && Object.entries(required).every(([property, expected]) => effective[property] === expected)
+      && violations.length === 0;
+    return result("fixed-canvas", pass, { roots, effective, violations, parseErrors: css.errors });
   },
   "scoped-css": ({ css }) => {
     const violations = [...css.errors];
@@ -405,9 +553,11 @@ const checks = {
       && serviceOwned.length === 0;
     return result("stable-slide-id", pass, { filenames, processSlideIds: ids, serviceOwned });
   },
-  "valid-source-refs": ({ process, allowedSourceIds, elements }) => {
+  "valid-source-refs": ({ process, allowedSourceIds, elements, css }) => {
     const slides = processSlides(process);
     const invalid = [];
+    const hidingDeclarations = cssHidingDeclarations(css);
+    if (hidingDeclarations.length) invalid.push("CSS hides source evidence");
     for (const slide of slides) {
       const refs = slide.sourceRefs;
       if (!Array.isArray(refs) || refs.length === 0) invalid.push(`${slide.slideId || "unknown"}: missing refs`);
@@ -424,7 +574,11 @@ const checks = {
         .join(" ");
       if (expected?.some((ref) => !sourceText.includes(ref))) invalid.push(`${slide.slideId}: source not visible`);
     }
-    return result("valid-source-refs", slides.length === 2 && invalid.length === 0, { invalid, allowed: [...allowedSourceIds] });
+    return result("valid-source-refs", slides.length === 2 && invalid.length === 0, {
+      invalid,
+      allowed: [...allowedSourceIds],
+      cssHidingDeclarations: hidingDeclarations,
+    });
   },
   "structured-asset-slot": ({ elements }) => {
     const slots = elements.flatMap((element) => (element.attrs || [])
@@ -451,9 +605,32 @@ const checks = {
     if (optionalImageFailures !== undefined && !Array.isArray(optionalImageFailures)) {
       violations.push("process.json: optionalImageFailures must be an array");
     } else {
+      const seenFailureSlots = new Set();
       for (const failure of optionalImageFailures || []) {
-        if (typeof failure?.slot !== "string" || !failure.slot.trim() || failure.outcome !== "no-image-layout") {
+        const keys = failure && typeof failure === "object" && !Array.isArray(failure)
+          ? Object.keys(failure).sort()
+          : [];
+        const slot = typeof failure?.slot === "string" ? failure.slot.trim() : "";
+        if (JSON.stringify(keys) !== JSON.stringify(["outcome", "slot"])
+          || !slot
+          || failure.outcome !== "no-image-layout") {
           violations.push("process.json: optional image failure must resolve to no-image-layout");
+          continue;
+        }
+        if (seenFailureSlots.has(slot)) {
+          violations.push(`process.json: duplicate optional image failure for ${slot}`);
+          continue;
+        }
+        seenFailureSlots.add(slot);
+        const matchingSlots = elements.filter((element) => attribute(element, "data-asset-slot")?.trim() === slot);
+        if (matchingSlots.length === 0) {
+          violations.push(`process.json: optional image failure ${slot} has no matching data-asset-slot`);
+          continue;
+        }
+        for (const matchingSlot of matchingSlots) {
+          if (!isStructurallyEmpty(matchingSlot)) {
+            violations.push(`${matchingSlot.file}: data-asset-slot=${slot} must be structurally empty`);
+          }
         }
       }
     }
@@ -609,7 +786,10 @@ async function loadScenarioOutput(outputsRoot, scenario, evaluation) {
 
 export async function runScorer(argv = process.argv.slice(2)) {
   const options = parseArguments(argv);
-  const scenarios = JSON.parse(await readFile(options.scenarios, "utf8"));
+  const scenarios = JSON.parse(await readInputFile(options.scenarios, {
+    byteLimit: BYTE_LIMITS.json,
+    label: "Scenarios file",
+  }));
   const evaluation = await loadEvaluationContract();
   const records = [];
   for (const scenario of scenarios) records.push(await loadScenarioOutput(options.outputs, scenario, evaluation));
@@ -628,4 +808,11 @@ export async function runScorer(argv = process.argv.slice(2)) {
 }
 
 const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : "";
-if (invokedPath === fileURLToPath(import.meta.url)) await runScorer();
+if (invokedPath === fileURLToPath(import.meta.url)) {
+  try {
+    await runScorer();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  }
+}

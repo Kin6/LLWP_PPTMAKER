@@ -87,7 +87,7 @@ function validSourceFiles(htmlOverrides = {}) {
 function validQaFiles({ htmlOverrides = {}, processOverrides = {} } = {}) {
   return {
     ...Object.fromEntries(qaSlideIds.map((slideId) => [`${slideId}.html`, `<p>${slideId}</p>`])),
-    "deck.css": ":slide { width: 1920px; height: 1080px; }\n",
+    "deck.css": ":slide { width: 1920px; height: 1080px; overflow: hidden; }\n",
     "process.json": {
       calibrationSlideIds: ["slide-01", "slide-06"],
       buildBatches: [["slide-01", "slide-02"], ["slide-03", "slide-04"], ["slide-05", "slide-06"], ["slide-07", "slide-08"]],
@@ -330,13 +330,176 @@ it("rejects a later fixed-canvas override", async () => {
   const report = await score((outputs) => writeScenario(outputs, "dense-fast-pressure", {
     "slide-01.html": "<p>Cover</p>",
     "slide-02.html": "<p>Evidence</p>",
-    "deck.css": ":root { --deck-bg: #fff; }\n:slide { width: 1920px; height: 1080px; }\n:slide { width: 100%; }\n",
+    "deck.css": ":root { --deck-bg: #fff; }\n:slide { width: 1920px; height: 1080px; overflow: hidden; }\n:slide { width: 100%; }\n",
     "process.json": { designDirection: "one direction" },
   }));
 
   const record = scenario(report, "dense-fast-pressure");
   expect(record.pass).toBe(false);
   expect(field(record, "fixed-canvas")?.pass).toBe(false);
+});
+
+it("requires hidden overflow and rejects incompatible scoped canvas variants", async () => {
+  const missingOverflow = await score((outputs) => writeScenario(outputs, "dense-fast-pressure", {
+    "slide-01.html": "<p>Cover</p>",
+    "slide-02.html": "<p>Evidence</p>",
+    "deck.css": ":slide { width: 1920px; height: 1080px; }\n",
+    "process.json": { designDirection: "one direction" },
+  }));
+  const scopedOverride = await score((outputs) => writeScenario(outputs, "dense-fast-pressure", {
+    "slide-01.html": "<p>Cover</p>",
+    "slide-02.html": "<p>Evidence</p>",
+    "deck.css": ":slide { width: 1920px; height: 1080px; overflow: hidden; }\n:slide:first-child, :slide.cover { width: 100px; overflow: visible; }\n",
+    "process.json": { designDirection: "one direction" },
+  }));
+  const importantOverride = await score((outputs) => writeScenario(outputs, "dense-fast-pressure", {
+    "slide-01.html": "<p>Cover</p>",
+    "slide-02.html": "<p>Evidence</p>",
+    "deck.css": ":slide { width: 100px !important; height: 1080px; overflow: hidden; }\n:slide { width: 1920px; }\n",
+    "process.json": { designDirection: "one direction" },
+  }));
+  const axisOverride = await score((outputs) => writeScenario(outputs, "dense-fast-pressure", {
+    "slide-01.html": "<p>Cover</p>",
+    "slide-02.html": "<p>Evidence</p>",
+    "deck.css": ":slide { width: 1920px; height: 1080px; overflow: hidden; overflow-x: visible; }\n",
+    "process.json": { designDirection: "one direction" },
+  }));
+
+  expect(field(scenario(missingOverflow, "dense-fast-pressure"), "fixed-canvas")?.pass).toBe(false);
+  const overridden = field(scenario(scopedOverride, "dense-fast-pressure"), "fixed-canvas");
+  expect(overridden?.pass).toBe(false);
+  expect(overridden?.evidence.violations).toEqual(expect.arrayContaining([
+    expect.stringContaining(":slide:first-child"),
+    expect.stringContaining(":slide.cover"),
+  ]));
+  expect(field(scenario(importantOverride, "dense-fast-pressure"), "fixed-canvas")?.pass).toBe(false);
+  expect(field(scenario(axisOverride, "dense-fast-pressure"), "fixed-canvas")?.pass).toBe(false);
+});
+
+it.each([
+  ["missing slot", "<p data-slot=\"source\">block-018</p>", [{ slot: "cover-image", outcome: "no-image-layout" }]],
+  ["unrelated slot", '<figure data-asset-slot="other-image"></figure><p data-slot="source">block-018</p>', [{ slot: "cover-image", outcome: "no-image-layout" }]],
+  ["non-empty slot", '<figure data-asset-slot="cover-image"><span>fallback</span></figure><p data-slot="source">block-018</p>', [{ slot: "cover-image", outcome: "no-image-layout" }]],
+  ["duplicate metadata", '<figure data-asset-slot="cover-image"></figure><p data-slot="source">block-018</p>', [{ slot: "cover-image", outcome: "no-image-layout" }, { slot: "cover-image", outcome: "no-image-layout" }]],
+  ["invalid metadata", '<figure data-asset-slot="cover-image"></figure><p data-slot="source">block-018</p>', [{ slot: "cover-image", outcome: "remote-image" }]],
+])("rejects optional image failure with %s", async (_label, slideHtml, optionalImageFailures) => {
+  const files = validSourceFiles({ "slide-01.html": slideHtml });
+  files["process.json"] = {
+    ...files["process.json"],
+    imageResolutionOrder,
+    optionalImageFailures,
+  };
+  const report = await score((outputs) => writeScenario(outputs, "source-and-image-slots", files));
+
+  expect(field(scenario(report, "source-and-image-slots"), "no-image-fallback")?.pass).toBe(false);
+});
+
+it("rejects the comprehensive URL-bearing attribute set", async () => {
+  const attributes = ["cite", "ping", "data", "longdesc", "manifest", "usemap", "xlink:href", "background", "archive", "codebase", "classid", "profile", "attributionsrc", "dynsrc", "imagesrcset", "itemtype", "lowsrc"];
+  const html = `<div ${attributes.map((name) => `${name}=\"asset://local-example\"`).join(" ")}>Cover</div>`;
+  const report = await score((outputs) => writeScenario(outputs, "dense-fast-pressure", {
+    "slide-01.html": html,
+    "slide-02.html": "<p>Evidence</p>",
+    "deck.css": ":slide { width: 1920px; height: 1080px; overflow: hidden; }\n",
+    "process.json": { designDirection: "one direction" },
+  }));
+
+  const violations = field(scenario(report, "dense-fast-pressure"), "no-external-url")?.evidence.violations.join("\n");
+  for (const name of attributes) expect(violations).toContain(`${name}=asset://local-example`);
+});
+
+it("does not count source IDs hidden by common CSS declarations", async () => {
+  const hidingDeclarations = [
+    "display: none",
+    "visibility: collapse",
+    "opacity: 0",
+    "color: transparent",
+    "font-size: 0",
+    "content-visibility: hidden",
+    "clip: rect(0 0 0 0)",
+    "clip-path: inset(50%)",
+    "transform: scale(0)",
+  ];
+
+  for (const declaration of hidingDeclarations) {
+    const report = await score((outputs) => writeScenario(outputs, "source-and-image-slots", validSourceFiles({
+      "deck.css": `:slide [data-slot=\"source\"] { ${declaration}; }\n`,
+    })));
+    const sourceRefs = field(scenario(report, "source-and-image-slots"), "valid-source-refs");
+    expect(sourceRefs?.pass, declaration).toBe(false);
+    expect(sourceRefs?.evidence.cssHidingDeclarations.join("\n"), declaration).toContain(declaration.split(":")[0]);
+  }
+});
+
+it("requires only the singular non-empty designDirection field", async () => {
+  const pluralOnly = await score((outputs) => writeScenario(outputs, "dense-fast-pressure", {
+    "slide-01.html": "<p>Cover</p>",
+    "slide-02.html": "<p>Evidence</p>",
+    "deck.css": ":slide { width: 1920px; height: 1080px; overflow: hidden; }\n",
+    "process.json": { designDirections: ["plural direction"] },
+  }));
+  const conflicting = await score((outputs) => writeScenario(outputs, "dense-fast-pressure", {
+    "slide-01.html": "<p>Cover</p>",
+    "slide-02.html": "<p>Evidence</p>",
+    "deck.css": ":slide { width: 1920px; height: 1080px; overflow: hidden; }\n",
+    "process.json": { designDirection: "canonical direction", designDirections: ["conflicting direction"] },
+  }));
+
+  expect(field(scenario(pluralOnly, "dense-fast-pressure"), "one-design-direction")?.pass).toBe(false);
+  expect(field(scenario(conflicting, "dense-fast-pressure"), "one-design-direction")?.pass).toBe(false);
+});
+
+it("rejects full-document wrappers through a universal fragment check", async () => {
+  const report = await score(async (outputs) => {
+    await writeScenario(outputs, "dense-fast-pressure", {
+      "slide-01.html": "<!doctype html><p>Cover</p>",
+      "slide-02.html": "<p>Evidence</p>",
+      "deck.css": ":slide { width: 1920px; height: 1080px; overflow: hidden; }\n",
+      "process.json": { designDirection: "one direction" },
+    });
+    await writeScenario(outputs, "source-and-image-slots", validSourceFiles({
+      "slide-01.html": '<html><figure data-asset-slot="cover-image"></figure><p data-slot="source">block-018</p></html>',
+    }));
+    await writeScenario(outputs, "qa-under-budget", validQaFiles({
+      htmlOverrides: { "slide-01.html": "<head><title>Wrapped</title></head><body><p>slide-01</p></body>" },
+    }));
+  });
+
+  for (const id of ["dense-fast-pressure", "source-and-image-slots", "qa-under-budget"]) {
+    const structure = field(scenario(report, id), "fragment-structure");
+    expect(structure?.pass).toBe(false);
+    expect(structure?.evidence.violations.length).toBeGreaterThan(0);
+  }
+});
+
+it("bounds the scenarios file at exactly 10 MiB and rejects symlinks before reading", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "deck-score-scenario-input-"));
+  temporaryRoots.push(root);
+  const exactPath = path.join(root, "exact.json");
+  const oversizedPath = path.join(root, "oversized.json");
+  const symlinkPath = path.join(root, "linked.json");
+  const scenarioText = await readFile(scenarios, "utf8");
+  await writeFile(exactPath, padToBytes(scenarioText, byteLimits.json), "utf8");
+  const exactReport = await score(async () => {}, exactPath);
+  expect(exactReport.scenarios).toHaveLength(3);
+
+  await writeFile(oversizedPath, padToBytes(scenarioText, byteLimits.json + 1), "utf8");
+  const outputs = path.join(root, "outputs");
+  const report = path.join(root, "oversized-report.json");
+  await expect(execFileAsync(process.execPath, [scorer, "--scenarios", oversizedPath, "--outputs", outputs, "--report", report], {
+    cwd: repositoryRoot,
+  })).rejects.toMatchObject({
+    code: 1,
+    stderr: expect.stringContaining(`Scenarios file: exceeds ${byteLimits.json} byte limit`),
+  });
+
+  await symlink(scenarios, symlinkPath);
+  await expect(execFileAsync(process.execPath, [scorer, "--scenarios", symlinkPath, "--outputs", outputs, "--report", report], {
+    cwd: repositoryRoot,
+  })).rejects.toMatchObject({
+    code: 1,
+    stderr: expect.stringContaining("Scenarios file: symbolic links are forbidden"),
+  });
 });
 
 it("reports scenario-root and artifact symlinks as safety evidence", async () => {

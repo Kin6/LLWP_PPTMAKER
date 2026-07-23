@@ -119,6 +119,23 @@ describe("project Skill loader", () => {
     expect(instructions).toMatch(/no-image-layout[\s\S]{0,240}do not (?:add|emit) an `<img>` or (?:add|emit) a URL/i);
   });
 
+  it("routes the hardened fragment, metadata, fallback, and source-visibility contracts", async () => {
+    const loader = createSkillLoader({ skillRoot });
+    const design = (await loader.load("design")).instructions;
+    const building = (await loader.load("building")).instructions;
+
+    expect(design).toMatch(/one non-empty `designDirection`[\s\S]{0,180}(?:do not|never)[\s\S]{0,80}`designDirections`/i);
+    expect(design).toMatch(/doctype[\s\S]{0,120}`<html>`[\s\S]{0,120}`<head>`[\s\S]{0,120}`<body>`/i);
+    for (const attribute of ["cite", "ping", "data", "longdesc", "manifest", "usemap", "xlink:href", "background", "archive", "codebase", "classid", "profile", "attributionsrc", "dynsrc", "imagesrcset", "itemtype", "lowsrc"]) {
+      expect(design).toContain(`\`${attribute}\``);
+    }
+    expect(building).toMatch(/each `optionalImageFailures`[\s\S]{0,240}matching empty named `data-asset-slot`/i);
+    expect(building).toMatch(/duplicate[\s\S]{0,120}optional image failure/i);
+    for (const hiding of ["display: none", "visibility: hidden", "opacity: 0", "color: transparent", "font-size: 0", "content-visibility: hidden", "clip-path", "scale(0)"]) {
+      expect(building).toContain(`\`${hiding}\``);
+    }
+  });
+
   it("routes every prohibited hostile fragment element to generation stages", async () => {
     const loader = createSkillLoader({ skillRoot });
     const design = (await loader.load("design")).instructions.toLowerCase();

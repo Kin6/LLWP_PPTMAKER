@@ -1,6 +1,6 @@
 # Design Direction
 
-Commit to one direction before writing slide fragments. Do not present variants or mix visual systems. Record the chosen direction as one non-empty `designDirection` string in `process.json`.
+Commit to one direction before writing slide fragments. Do not present variants or mix visual systems. Record the chosen direction as one non-empty `designDirection` string in `process.json`. Do not emit the plural `designDirections` alias, even alongside the canonical field.
 
 Define the direction with a concrete name, audience posture, information hierarchy, palette roles, type roles, spacing rhythm, and graphic treatment. Choose exactly one theme from `assets/catalog.json`; use its `--deck-*` tokens without renaming them. Prefer restrained combinations of neutral surfaces, a functional accent, and a distinct evidence or warning color.
 

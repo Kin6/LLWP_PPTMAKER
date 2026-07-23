@@ -1,6 +1,19 @@
-import { describe, expect, it } from "vitest";
+import { execFile } from "node:child_process";
+import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
+import { afterEach, describe, expect, it } from "vitest";
 import { parseOutline, selectCalibrationSlides } from "../../../server/deck-agent/outline.mjs";
 
+const execFileAsync = promisify(execFile);
+const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+const validateOutlineCli = path.join(repositoryRoot, "skills/generate-html-deck/scripts/validate-outline.mjs");
+const outlineFixture = path.join(repositoryRoot, "tests/fixtures/deck-agent/skill-outline/slides-content.md");
+const sourcesFixture = path.join(repositoryRoot, "tests/fixtures/deck-agent/skill-outline/source-blocks.json");
+const temporaryRoots = [];
+const cliByteLimits = { outline: 2 * 1024 * 1024, sources: 10 * 1024 * 1024 };
 const sourceBlockIds = new Set(["block-018", "block-031"]);
 const valid = `# 智能制造转型方案
 
@@ -34,6 +47,25 @@ const valid = `# 智能制造转型方案
 **材料来源：**
 
 - 《调研报告》第 8 页 <!-- source:block-031 -->`;
+
+afterEach(async () => {
+  await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+function padToBytes(contents, byteLength) {
+  const padding = byteLength - Buffer.byteLength(contents, "utf8");
+  if (padding < 0) throw new Error("Requested byte length is smaller than content");
+  return `${contents}${" ".repeat(padding)}`;
+}
+
+async function runValidateOutline(outlinePath, sourcesPath) {
+  return execFileAsync(process.execPath, [
+    validateOutlineCli,
+    "--outline", outlinePath,
+    "--sources", sourcesPath,
+    "--expected-slides", "2",
+  ], { cwd: repositoryRoot });
+}
 
 describe("deck outline parser", () => {
   it("parses free sections and GFM tables without turning them into layout instructions", () => {
@@ -132,5 +164,52 @@ describe("deck outline parser", () => {
     const outline = parseOutline(oneSlide, { expectedSlideCount: 1, sourceBlockIds });
 
     expect(selectCalibrationSlides(outline)).toEqual(["slide-01"]);
+  });
+});
+
+describe("validate-outline CLI input safety", () => {
+  it("accepts exact outline and sources limits and rejects one byte over each", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "deck-outline-cli-"));
+    temporaryRoots.push(root);
+    const [outlineText, sourcesText] = await Promise.all([
+      readFile(outlineFixture, "utf8"),
+      readFile(sourcesFixture, "utf8"),
+    ]);
+    const outlinePath = path.join(root, "outline.md");
+    const sourcesPath = path.join(root, "sources.json");
+
+    await writeFile(outlinePath, padToBytes(outlineText, cliByteLimits.outline), "utf8");
+    await writeFile(sourcesPath, sourcesText, "utf8");
+    await expect(runValidateOutline(outlinePath, sourcesPath)).resolves.toMatchObject({
+      stdout: expect.stringContaining('"valid":true'),
+    });
+
+    await writeFile(outlinePath, outlineText, "utf8");
+    await writeFile(sourcesPath, padToBytes(sourcesText, cliByteLimits.sources), "utf8");
+    await expect(runValidateOutline(outlinePath, sourcesPath)).resolves.toMatchObject({
+      stdout: expect.stringContaining('"valid":true'),
+    });
+
+    await writeFile(outlinePath, padToBytes(outlineText, cliByteLimits.outline + 1), "utf8");
+    await expect(runValidateOutline(outlinePath, sourcesPath)).rejects.toMatchObject({
+      stdout: expect.stringContaining(`Outline file: exceeds ${cliByteLimits.outline} byte limit`),
+    });
+
+    await writeFile(outlinePath, outlineText, "utf8");
+    await writeFile(sourcesPath, padToBytes(sourcesText, cliByteLimits.sources + 1), "utf8");
+    await expect(runValidateOutline(outlinePath, sourcesPath)).rejects.toMatchObject({
+      stdout: expect.stringContaining(`Sources file: exceeds ${cliByteLimits.sources} byte limit`),
+    });
+  });
+
+  it("rejects symlinked CLI inputs before reading them", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "deck-outline-cli-"));
+    temporaryRoots.push(root);
+    const outlinePath = path.join(root, "outline.md");
+    await symlink(outlineFixture, outlinePath);
+
+    await expect(runValidateOutline(outlinePath, sourcesFixture)).rejects.toMatchObject({
+      stdout: expect.stringContaining("Outline file: symbolic links are forbidden"),
+    });
   });
 });
