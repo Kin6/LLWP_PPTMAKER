@@ -1,0 +1,16 @@
+:root {
+  --deck-bg: #151821;
+  --deck-surface: #222735;
+  --deck-text: #f3f5f7;
+  --deck-muted: #bec5d0;
+  --deck-accent: #45b7aa;
+  --deck-accent-strong: #79d4c9;
+  --deck-support: #e0647b;
+  --deck-border: #434c5e;
+  --deck-success: #7bc59b;
+  --deck-warning: #e3b85b;
+  --deck-font-display: "Arial", "Hiragino Kaku Gothic ProN", sans-serif;
+  --deck-font-body: "Arial", "Hiragino Kaku Gothic ProN", sans-serif;
+  --deck-radius: 5px;
+  --deck-shadow: 0 20px 56px rgba(0, 0, 0, 0.38);
+}

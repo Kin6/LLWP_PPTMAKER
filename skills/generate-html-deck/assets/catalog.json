@@ -1,0 +1,27 @@
+{
+  "canvas": { "width": 1920, "height": 1080, "safeInset": 72 },
+  "themes": [
+    { "id": "minimal-white", "file": "themes/minimal-white.css" },
+    { "id": "corporate-clean", "file": "themes/corporate-clean.css" },
+    { "id": "swiss-grid", "file": "themes/swiss-grid.css" },
+    { "id": "editorial-serif", "file": "themes/editorial-serif.css" },
+    { "id": "academic-paper", "file": "themes/academic-paper.css" },
+    { "id": "magazine-bold", "file": "themes/magazine-bold.css" },
+    { "id": "tokyo-night", "file": "themes/tokyo-night.css" },
+    { "id": "pitch-deck-vc", "file": "themes/pitch-deck-vc.css" }
+  ],
+  "layouts": [
+    { "id": "cover", "file": "layouts/cover.html" },
+    { "id": "section-divider", "file": "layouts/section-divider.html" },
+    { "id": "two-column", "file": "layouts/two-column.html" },
+    { "id": "big-quote", "file": "layouts/big-quote.html" },
+    { "id": "stat-highlight", "file": "layouts/stat-highlight.html" },
+    { "id": "kpi-grid", "file": "layouts/kpi-grid.html" },
+    { "id": "table", "file": "layouts/table.html" },
+    { "id": "timeline", "file": "layouts/timeline.html" },
+    { "id": "comparison", "file": "layouts/comparison.html" },
+    { "id": "process-steps", "file": "layouts/process-steps.html" },
+    { "id": "image-hero", "file": "layouts/image-hero.html" },
+    { "id": "thanks", "file": "layouts/thanks.html" }
+  ]
+}

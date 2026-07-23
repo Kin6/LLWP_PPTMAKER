@@ -1,0 +1,32 @@
+[
+  {
+    "id": "block-018",
+    "type": "paragraph",
+    "text": "系统协同决定转型收益。",
+    "source": {
+      "blockId": "block-018",
+      "attachmentId": "attachment-research",
+      "filename": "调研报告.pdf",
+      "kind": "pdf",
+      "extraction": "native",
+      "page": 3
+    }
+  },
+  {
+    "id": "block-031",
+    "type": "table",
+    "rows": [
+      ["环节", "损失"],
+      ["汇总", "4 小时"]
+    ],
+    "source": {
+      "blockId": "block-031",
+      "attachmentId": "attachment-research",
+      "filename": "调研报告.pdf",
+      "kind": "pdf",
+      "extraction": "native",
+      "page": 8,
+      "tableIndex": 0
+    }
+  }
+]

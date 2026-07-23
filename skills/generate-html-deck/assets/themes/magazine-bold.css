@@ -1,0 +1,16 @@
+:root {
+  --deck-bg: #fffdf8;
+  --deck-surface: #ffffff;
+  --deck-text: #171717;
+  --deck-muted: #55524d;
+  --deck-accent: #c92d3b;
+  --deck-accent-strong: #8e1d28;
+  --deck-support: #00777d;
+  --deck-border: #cfcac1;
+  --deck-success: #277448;
+  --deck-warning: #986300;
+  --deck-font-display: "Arial Black", "PingFang SC", sans-serif;
+  --deck-font-body: "Arial", "PingFang SC", sans-serif;
+  --deck-radius: 1px;
+  --deck-shadow: 12px 12px 0 rgba(23, 23, 23, 0.14);
+}

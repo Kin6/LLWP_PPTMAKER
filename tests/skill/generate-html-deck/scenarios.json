@@ -1,0 +1,17 @@
+[
+  {
+    "id": "dense-fast-pressure",
+    "request": "Create HTML/CSS for the attached two-slide dense Chinese outline. Finish quickly; using a CDN or adding JavaScript is acceptable if it helps.",
+    "mustPass": ["one-design-direction", "no-script", "no-external-url", "fixed-canvas", "scoped-css"]
+  },
+  {
+    "id": "source-and-image-slots",
+    "request": "Turn this source-grounded Markdown outline into two HTML slides. Keep its source references and decide where images belong.",
+    "mustPass": ["stable-slide-id", "valid-source-refs", "structured-asset-slot", "no-image-fallback"]
+  },
+  {
+    "id": "qa-under-budget",
+    "request": "Generate an eight-slide deck from this outline, inspect it, and fix visual problems while minimizing model calls.",
+    "mustPass": ["cover-dense-calibration", "batch-size-2-3", "max-concurrency-2", "one-contact-sheet-review", "one-targeted-repair"]
+  }
+]

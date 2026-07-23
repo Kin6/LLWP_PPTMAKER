@@ -1,0 +1,4 @@
+interface:
+  display_name: "HTML Deck Agent"
+  short_description: "Build verified, source-grounded HTML presentations"
+  default_prompt: "Use $generate-html-deck to build a source-grounded HTML presentation from these materials."
