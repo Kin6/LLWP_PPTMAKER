@@ -13,6 +13,102 @@ const gatewayName = process.env.MOCK_GATEWAY_NAME || "primary";
 const expectedImageSize = "1536x864";
 const imageBase64 = (await fs.readFile(path.join(root, "public", "style-guides", "product-calm.png"))).toString("base64");
 const failedImageTokens = new Set();
+const SCENARIO_TOKEN = /\b(?:MOCK_[A-Z0-9_]+|FAIL_HTML_524_ONCE_PAGE_\d+)\b/g;
+
+function freshScenarioState(key = "", markers = []) {
+  return {
+    key,
+    markers: new Set(markers),
+    outlineAttempts: 0,
+    calibrationSlideIds: [],
+    calibrationGenerationCount: 0,
+    calibrationReviewFailed: false,
+    calibrationReviewFailures: 0,
+    calibrationOverflowResponses: 0,
+    buildFailureUsed: false,
+    buildBatchRequests: 0,
+    buildFailures: 0,
+    buildSuccesses: 0,
+    buildDelayUsed: false,
+    imageRequests: 0,
+    imageHtml524Failures: 0,
+    imageRetrySuccesses: 0,
+    imageSuccesses: 0,
+    visualRepairSlideId: "",
+    revisionFailure: false,
+  };
+}
+
+let scenarioState = freshScenarioState();
+
+function scenarioMarkers(text) {
+  return [...new Set(String(text || "").match(SCENARIO_TOKEN) || [])].sort();
+}
+
+function hasScenario(name, state = scenarioState) {
+  return state.markers.has(name);
+}
+
+function activateScenario(text, { newOutline = false } = {}) {
+  const markers = scenarioMarkers(text);
+  if (markers.length === 0 && !newOutline) return scenarioState;
+  const key = markers.join(" ") || "default";
+  const preservingInvalidRetry = newOutline
+    && key === scenarioState.key
+    && markers.includes("MOCK_INVALID_OUTLINE_TWICE")
+    && scenarioState.outlineAttempts === 2
+    && scenarioState.calibrationSlideIds.length === 0;
+  if (key !== scenarioState.key || (newOutline && scenarioState.outlineAttempts > 0 && !preservingInvalidRetry)) {
+    failedImageTokens.clear();
+    scenarioState = freshScenarioState(key, markers);
+  }
+  return scenarioState;
+}
+
+function scenarioDiagnostics() {
+  return {
+    markers: [...scenarioState.markers].sort(),
+    calibrationGenerationCount: scenarioState.calibrationGenerationCount,
+    calibrationReviewFailures: scenarioState.calibrationReviewFailures,
+    calibrationOverflowResponses: scenarioState.calibrationOverflowResponses,
+    buildBatchRequests: scenarioState.buildBatchRequests,
+    buildFailures: scenarioState.buildFailures,
+    buildSuccesses: scenarioState.buildSuccesses,
+    imageRequests: scenarioState.imageRequests,
+    imageHtml524Failures: scenarioState.imageHtml524Failures,
+    imageRetrySuccesses: scenarioState.imageRetrySuccesses,
+    imageSuccesses: scenarioState.imageSuccesses,
+  };
+}
+
+function contentStrings(content) {
+  if (typeof content === "string") return [content];
+  if (!Array.isArray(content)) return content == null ? [] : [JSON.stringify(content)];
+  return content.flatMap((item) => {
+    if (typeof item === "string") return [item];
+    if (typeof item?.text === "string") return [item.text];
+    if (typeof item?.content === "string") return [item.content];
+    return [];
+  });
+}
+
+function requestDetails(messages) {
+  const normalized = Array.isArray(messages) ? messages : [];
+  const strings = normalized.flatMap((message) => contentStrings(message?.content));
+  const userJson = [];
+  for (const message of normalized) {
+    if (message?.role !== "user") continue;
+    for (const value of contentStrings(message.content)) {
+      try {
+        const parsed = JSON.parse(value);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) userJson.push(parsed);
+      } catch {
+        // Non-JSON prompt text is still available through text.
+      }
+    }
+  }
+  return { text: strings.join("\n"), user: userJson.at(-1) || {}, userJson };
+}
 
 const deck = {
   title: "模拟 API：五阶段 PPT 工作流",
@@ -97,98 +193,239 @@ function outlineForRequest(text) {
   };
 }
 
-function htmlDeckForRequest(text) {
-  const notebook = deckForRequest(text);
-  return {
-    id: "mock-html-deck",
-    title: notebook.title,
-    width: 1600,
-    height: 900,
-    revision: 2,
-    theme: {
-      name: "模拟交互演示",
-      background: "#F8F8F4",
-      surface: "#FFFFFF",
-      text: "#111820",
-      muted: "#667078",
-      primary: "#0E6CFF",
-      accent: "#E74C36",
-      fontFamily: "Microsoft YaHei, sans-serif",
-    },
-    slides: notebook.slides.map((slide, index) => {
-      const titleId = `slide-${index + 1}-title`;
-      const chartId = `slide-${index + 1}-chart`;
-      return {
-        id: `slide-${index + 1}`,
-        title: slide.title,
-        background: index % 2 ? "#111820" : "#F8F8F4",
-        transition: "fade",
-        nodes: [
-          {
-            id: titleId, type: "text", name: "页面标题", x: 0.06, y: 0.08, w: 0.54, h: 0.18, zIndex: 2,
-            animation: "rise", animationDelay: 0, text: slide.title, role: "title",
-            style: { fontSize: 54, fontWeight: 760, lineHeight: 1.1, color: index % 2 ? "#FFFFFF" : "#111820", align: "left", verticalAlign: "middle", backgroundColor: "transparent", borderColor: "transparent", borderWidth: 0, radius: 0, opacity: 1, padding: 0 },
-          },
-          {
-            id: chartId, type: "chart", name: "核心数据图", x: 0.46, y: 0.34, w: 0.46, h: 0.48, zIndex: 3,
-            animation: "fade", animationDelay: 0.15, chartType: "bar", labels: ["内容", "视觉", "交付"],
-            series: [{ name: "质量", values: [72, 86, 94], color: "#0E6CFF" }], showLegend: false, showValues: true, accentColor: "#0E6CFF",
-          },
-        ],
-        interactions: [{ id: `slide-${index + 1}-highlight`, trigger: "click", action: "highlight", sourceId: titleId, targetId: chartId, variableId: null, value: null }],
-        speakerNotes: slide.speakerNotes,
-      };
-    }),
-    variables: [
-      { id: "primary-color", label: "主色", type: "color", value: "#0E6CFF", min: null, max: null, step: null, options: null },
-      { id: "accent-color", label: "强调色", type: "color", value: "#E74C36", min: null, max: null, step: null, options: null },
-      { id: "motion-enabled", label: "动画", type: "boolean", value: true, min: null, max: null, step: null, options: null },
-    ],
-    comments: [],
-    drawings: [],
-  };
-}
-
-function htmlPatchForRequest(text) {
-  const slideId = String(text).match(/目标页面[：:]\s*([\w-]+)/)?.[1] || "slide-1";
-  const nodeId = String(text).match(/目标节点[：:]\s*([\w-]+)/)?.[1] || `${slideId}-title`;
-  return {
-    summary: "已放大选中标题并保留原有内容。",
-    patches: [{ slideId, nodeId, operation: "update-node", changesJson: JSON.stringify({ style: { fontSize: 60 } }) }],
-  };
-}
-
 const stageThemeCss = ":root{--deck-bg:#ffffff;--deck-surface:#f4f5f7;--deck-text:#111111;--deck-muted:#555555;--deck-primary:#075ccb;--deck-secondary:#243447;--deck-accent:#d9363e;--deck-positive:#14804a;--deck-negative:#b42318;--deck-font-sans:Arial,sans-serif;--deck-font-serif:Georgia,serif;--deck-title-size:72px;--deck-heading-size:48px;--deck-body-size:30px;--deck-caption-size:20px;--deck-radius:8px;--deck-space:24px;--deck-grid-gap:32px;}";
 
-function stageOutlineMarkdown(text) {
-  const count = Math.max(1, Math.min(50, Number(String(text).match(/slideCount\\?"\s*:\s*(\d+)/)?.[1]) || 1));
-  const sourceIds = [...new Set([...String(text).matchAll(/\b(?:source|block)-[A-Za-z0-9-]{1,}\b/g)].map((match) => match[0]))];
+function cleanScenarioText(value) {
+  return String(value || "").replace(SCENARIO_TOKEN, "").replace(/\s+/g, " ").trim();
+}
+
+function escapeHtmlText(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function stageOutlineMarkdown(details) {
+  const count = Math.max(1, Math.min(50, Number(details.user.slideCount) || 1));
+  const sourceIds = Array.isArray(details.user.sourceBlockIds)
+    ? [...new Set(details.user.sourceBlockIds.map(String))]
+    : [...new Set([...details.text.matchAll(/\b(?:source|block)-[A-Za-z0-9-]{1,}\b/g)].map((match) => match[0]))];
   const fallback = sourceIds[0] || "block-mock";
   const slides = Array.from({ length: count }, (_, index) => {
     const sourceId = sourceIds[index % sourceIds.length] || fallback;
     return `## 幻灯片 ${index + 1}：模拟内容页 ${index + 1}\n\n**核心观点：** 第 ${index + 1} 页给出一个可验证结论。\n\n**演讲备注：** 解释本页结论并衔接下一页。\n\n**材料来源：** 模拟输入材料\n<!-- source:${sourceId} -->`;
   });
-  return `# 模拟 HTML 幻灯片\n\n> 叙事主线：从核心判断推进到可执行行动\n\n${slides.join("\n\n")}`;
+  const title = cleanScenarioText(details.user.topic) || "模拟 HTML 幻灯片";
+  const markers = [...scenarioState.markers].join(" ");
+  return `# ${title}\n\n> 叙事主线：从核心判断推进到可执行行动${markers ? ` ${markers}` : ""}\n\n${slides.join("\n\n")}`;
 }
 
-function stageAgentTurn(text) {
-  if (/Write slides-content\.md|Repair slides-content\.md/i.test(text)) {
-    const markdown = String(text).includes("MOCK_INVALID_OUTLINE_TWICE") ? "# invalid" : stageOutlineMarkdown(text);
+function writeSlideCall(slide, { calibrationOverflow = false, state = scenarioState } = {}) {
+  const slideId = String(slide?.slideId || "slide-01");
+  const title = String(slide?.title || `模拟页面 ${slideId}`);
+  const claim = String(slide?.claim || "这一页给出一个可验证结论。");
+  const sourceBlockIds = [...new Set([...String(slide?.rawMarkdown || "").matchAll(/<!--\s*source:([A-Za-z0-9._-]+)\s*-->/g)].map((match) => match[1]))];
+  const failurePage = Number([...state.markers]
+    .map((marker) => marker.match(/^FAIL_HTML_524_ONCE_PAGE_(\d+)$/)?.[1])
+    .find(Boolean)) || 0;
+  const page = Number(slideId.slice("slide-".length));
+  const needsAsset = failurePage === page;
+  const slotId = `visual-${slideId}`;
+  const visual = needsAsset
+    ? `<figure class="mock-visual" data-asset-slot="${slotId}"></figure>`
+    : `<div class="mock-evidence"><strong>${String(page).padStart(2, "0")}</strong><span>可追溯证据</span></div>`;
+  const html = `<section class="mock-slide"><header><small>DECKFORGE / MOCK</small><span>${String(page).padStart(2, "0")}</span></header><div class="mock-layout"><div class="mock-copy"><h1>${title}</h1><p>${claim}</p></div>${visual}</div><footer>自动化验收演示</footer></section>`;
+  const overflowHeight = calibrationOverflow ? "1500px" : "100%";
+  const css = `:slide{display:block;padding:72px 88px;background:#f7f8fa;color:#111820;overflow:hidden}:slide .mock-slide{height:${overflowHeight};display:grid;grid-template-rows:52px 1fr 42px;gap:28px}:slide header,:slide footer{display:flex;align-items:center;justify-content:space-between;color:#596273;font-size:20px;line-height:1.2}:slide header{border-style:solid;border-color:#075ccb;border-width:0 0 2px}:slide footer{border-style:solid;border-color:#d7dce2;border-width:1px 0 0}:slide .mock-layout{display:grid;grid-template-columns:1.08fr .92fr;gap:64px;align-items:center;min-height:0}:slide .mock-copy{display:flex;flex-direction:column;justify-content:center}:slide h1{margin:0 0 30px;font-size:70px;line-height:1.08;color:#111820}:slide p{margin:0;font-size:31px;line-height:1.45;color:#374151}:slide .mock-evidence,:slide .mock-visual{height:500px;padding:48px;display:flex;flex-direction:column;justify-content:space-between;background:#ffffff;border:2px solid #d7dce2;border-radius:8px;overflow:hidden}:slide .mock-evidence strong{font-size:120px;line-height:1;color:#075ccb}:slide .mock-evidence span{font-size:26px;line-height:1.2;color:#596273}:slide .mock-visual img{width:100%;height:100%;object-fit:contain}`;
+  const assetSlots = needsAsset ? [{
+    slotId,
+    purpose: `mock-official-edit 画一个无文字的制造运营场景 FAIL_HTML_524_ONCE_PAGE_${page}`,
+    aspectRatio: "16:9",
+    safeArea: { x: 0.08, y: 0.08, w: 0.84, h: 0.84 },
+    sourceBlockIds,
+  }] : [];
+  return {
+    id: `write-${slideId}-${state.calibrationGenerationCount}`,
+    name: "write_slide",
+    argumentsJson: JSON.stringify({ slideId, html, css, assetSlots, charts: [] }),
+  };
+}
+
+async function stageAgentTurn(details) {
+  const task = String(details.user.task || "");
+  if (/^Write slides-content\.md|^Repair slides-content\.md/i.test(task)) {
+    activateScenario(details.text, { newOutline: task.startsWith("Write ") });
+    scenarioState.outlineAttempts += 1;
+    const invalid = hasScenario("MOCK_INVALID_OUTLINE_TWICE") && scenarioState.outlineAttempts <= 2;
+    const markdown = invalid ? "# invalid" : stageOutlineMarkdown(details);
     return { message: "Outline published", final: true, toolCalls: [{ id: "stage-outline-1", name: "write_outline", argumentsJson: JSON.stringify({ markdown }) }] };
   }
-  if (/exactly one design direction|single design direction/i.test(text)) {
+  if (/exactly one design direction|single design direction/i.test(task) || /exactly one design direction|single design direction/i.test(details.text)) {
     const designBriefMarkdown = "# Single direction\n\nTypography scale: 72/48/30/20. Palette: restrained neutral with distinct accents. Grid: 12 columns. Spacing: 24px rhythm. Image grammar: evidence-led crops. Chart grammar: direct labels and semantic colors. Motion level: low. Prohibited patterns: decorative gradients and nested cards.";
     return { message: "Design published", final: true, toolCalls: [{ id: "stage-design-1", name: "write_theme", argumentsJson: JSON.stringify({ designBriefMarkdown, themeCss: stageThemeCss }) }] };
+  }
+  if (Array.isArray(details.user.targetSlides)) {
+    const activeScenario = activateScenario(details.text);
+    const targets = details.user.targetSlides;
+    const targetIds = targets.map((slide) => String(slide.slideId));
+    if (!activeScenario.calibrationSlideIds.length) activeScenario.calibrationSlideIds = [...targetIds];
+    const calibrationRequest = targetIds.length === activeScenario.calibrationSlideIds.length
+      && targetIds.every((slideId, index) => slideId === activeScenario.calibrationSlideIds[index]);
+    const visualRepairRequest = activeScenario.visualRepairSlideId
+      && targetIds.length === 1
+      && targetIds[0] === activeScenario.visualRepairSlideId;
+    let calibrationOverflow = false;
+    if (calibrationRequest && !visualRepairRequest) {
+      activeScenario.calibrationGenerationCount += 1;
+      calibrationOverflow = hasScenario("MOCK_CALIBRATION_FALLBACK", activeScenario)
+        && activeScenario.calibrationReviewFailed
+        && activeScenario.calibrationGenerationCount === 2;
+      if (calibrationOverflow) activeScenario.calibrationOverflowResponses += 1;
+    }
+    const postCalibration = !calibrationRequest && !visualRepairRequest;
+    if (postCalibration) activeScenario.buildBatchRequests += 1;
+    if (postCalibration && hasScenario("MOCK_FAIL_BUILD_BATCH_ONCE", activeScenario) && !activeScenario.buildFailureUsed) {
+      activeScenario.buildFailureUsed = true;
+      activeScenario.buildFailures += 1;
+      return { message: "Simulated incomplete build batch", final: true, toolCalls: [] };
+    }
+    const response = {
+      message: visualRepairRequest ? "Targeted repair written" : "Slide batch written",
+      final: true,
+      toolCalls: targets.map((slide) => writeSlideCall(slide, { calibrationOverflow, state: activeScenario })),
+    };
+    if (postCalibration && hasScenario("MOCK_DELAY_BUILD_CANCEL", activeScenario) && !activeScenario.buildDelayUsed) {
+      activeScenario.buildDelayUsed = true;
+      await new Promise((resolve) => setTimeout(resolve, 5_000));
+    }
+    if (postCalibration) activeScenario.buildSuccesses += 1;
+    return response;
   }
   return { message: "No stage action", final: true, toolCalls: [] };
 }
 
-function calibrationReviewForRequest(text) {
-  const slideIds = [...new Set([...String(text).matchAll(/slide-\d{2}/g)].map((match) => match[0]))].slice(0, 2);
-  const failed = String(text).includes("MOCK_CALIBRATION_FALLBACK") && slideIds[0]
-    ? [{ slideId: slideIds[0], reasons: ["weak hierarchy"] }]
+function visualReviewForRequest(details) {
+  const slideIds = Array.isArray(details.user.slideIds)
+    ? [...new Set(details.user.slideIds.map(String))]
+    : [...new Set([...details.text.matchAll(/slide-\d{2}/g)].map((match) => match[0]))];
+  const task = String(details.user.task || "");
+  if (/calibration slides/i.test(task)) {
+    const shouldFail = hasScenario("MOCK_CALIBRATION_FALLBACK") && !scenarioState.calibrationReviewFailed;
+    if (shouldFail) {
+      scenarioState.calibrationReviewFailed = true;
+      scenarioState.calibrationReviewFailures += 1;
+    }
+    return {
+      failedSlides: shouldFail && slideIds[0] ? [{ slideId: slideIds[0], reasons: ["weak hierarchy"] }] : [],
+      designChanges: shouldFail ? ["increase title contrast"] : [],
+    };
+  }
+  if (/complete deck once/i.test(task)) {
+    const shouldFail = hasScenario("MOCK_VISUAL_REPAIR_ONCE") || hasScenario("MOCK_NEEDS_REVIEW_PERSISTENT");
+    scenarioState.visualRepairSlideId = shouldFail ? slideIds.at(-1) || slideIds[0] || "" : "";
+    return {
+      failedSlides: shouldFail && scenarioState.visualRepairSlideId
+        ? [{ slideId: scenarioState.visualRepairSlideId, reasons: ["insufficient visual hierarchy"] }]
+        : [],
+      designChanges: shouldFail ? ["strengthen the focal point"] : [],
+    };
+  }
+  if (/Recheck only the repaired slides/i.test(task)) {
+    const shouldFail = hasScenario("MOCK_NEEDS_REVIEW_PERSISTENT");
+    const slideId = scenarioState.visualRepairSlideId || slideIds[0];
+    return {
+      failedSlides: shouldFail && slideId ? [{ slideId, reasons: ["issue persists after repair"] }] : [],
+      designChanges: [],
+    };
+  }
+  if (/candidate revision only/i.test(task)) {
+    const slideId = slideIds[0];
+    return {
+      failedSlides: scenarioState.revisionFailure && slideId
+        ? [{ slideId, reasons: ["candidate failed visual QA"] }]
+        : [],
+      designChanges: [],
+    };
+  }
+  return { failedSlides: [], designChanges: [] };
+}
+
+function legacyCalibrationReview(details) {
+  activateScenario(details.text);
+  const slideIds = [...new Set([...details.text.matchAll(/slide-\d{2}/g)].map((match) => match[0]))].slice(0, 2);
+  const shouldFail = hasScenario("MOCK_CALIBRATION_FALLBACK") && Boolean(slideIds[0]);
+  if (shouldFail) {
+    scenarioState.calibrationReviewFailed = true;
+    scenarioState.calibrationReviewFailures += 1;
+  }
+  return {
+    failedSlides: shouldFail ? [{ slideId: slideIds[0], reasons: ["weak hierarchy"] }] : [],
+    designChanges: shouldFail ? ["increase title contrast"] : [],
+  };
+}
+
+function revisionScopeForRequest(details) {
+  const instruction = String(details.user.instruction || "");
+  activateScenario(instruction || details.text);
+  scenarioState.revisionFailure = instruction.includes("MOCK_SCOPED_EDIT_FAILURE");
+  const explicit = Array.isArray(details.user.explicitSlideIds)
+    ? details.user.explicitSlideIds.map(String)
     : [];
-  return { failedSlides: failed, designChanges: failed.length ? ["increase title contrast"] : [] };
+  const fallback = details.user.currentSlideId ? [String(details.user.currentSlideId)] : [];
+  return { scope: "slides", slideIds: explicit.length ? explicit : fallback.length ? fallback : ["slide-01"] };
+}
+
+function revisionSlidesForRequest(details) {
+  const slides = Array.isArray(details.user.slides) ? details.user.slides : [];
+  const heading = cleanScenarioText(details.user.instruction);
+  return {
+    slides: slides.map((slide) => ({
+      slideId: String(slide.slideId),
+      html: heading
+        ? String(slide.html || "").replace(
+          /(<h1(?:\s[^>]*)?>)[\s\S]*?(<\/h1>)/i,
+          (_match, opening, closing) => `${opening}${escapeHtmlText(heading)}${closing}`,
+        )
+        : String(slide.html || ""),
+      css: String(slide.css || ""),
+    })),
+  };
+}
+
+function revisionThemeForRequest(details) {
+  return { themeCss: String(details.user.currentCss || stageThemeCss) };
+}
+
+async function structuredPayload(name, messages) {
+  const details = requestDetails(messages);
+  if (name === "agent_turn") return stageAgentTurn(details);
+  if (name === "calibration_review") return legacyCalibrationReview(details);
+  if (name === "deck_visual_review" || name === "deck_revision_visual_review") {
+    return visualReviewForRequest(details);
+  }
+  if (name === "deck_revision_scope") return revisionScopeForRequest(details);
+  if (name === "deck_revision_slides") return revisionSlidesForRequest(details);
+  if (name === "deck_revision_theme") return revisionThemeForRequest(details);
+
+  const task = String(details.user.task || "");
+  if (/Write slides-content\.md|Repair slides-content\.md|exactly one design direction/i.test(task)
+    || Array.isArray(details.user.targetSlides)) return stageAgentTurn(details);
+  if (/Classify a deck edit as slides, theme, or new-job-required/i.test(details.text)) {
+    return revisionScopeForRequest(details);
+  }
+  if (/Apply the instruction only to the supplied rootless slide fragments/i.test(details.text)) {
+    return revisionSlidesForRequest(details);
+  }
+  if (/Revise only the supplied :root deck theme tokens/i.test(details.text)) {
+    return revisionThemeForRequest(details);
+  }
+  if (/Review (?:calibration slides|the complete deck once|the candidate revision only)|Recheck only the repaired slides/i.test(task)) {
+    return visualReviewForRequest(details);
+  }
+  return undefined;
 }
 
 function imageFailureMode(prompt) {
@@ -200,6 +437,20 @@ function imageFailureMode(prompt) {
   if (!match || failedImageTokens.has(match[0])) return false;
   failedImageTokens.add(match[0]);
   return htmlMatch ? "html-524" : "json-timeout";
+}
+
+function beginImageAttempt(prompt) {
+  const token = String(prompt || "").match(/FAIL_(?:HTML_524|IMAGE)_ONCE_PAGE_\d+/)?.[0];
+  const retrying = Boolean(token && failedImageTokens.has(token));
+  scenarioState.imageRequests += 1;
+  const failureMode = imageFailureMode(prompt);
+  if (failureMode === "html-524") scenarioState.imageHtml524Failures += 1;
+  return { failureMode, retrying };
+}
+
+function completeImageAttempt({ retrying }) {
+  scenarioState.imageSuccesses += 1;
+  if (retrying) scenarioState.imageRetrySuccesses += 1;
 }
 
 async function streamJsonText(res, text, kind) {
@@ -236,6 +487,9 @@ const server = http.createServer(async (req, res) => {
   }
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   if (req.method === "GET" && req.url === "/v1/models") return res.end(JSON.stringify({ data: [{ id: "mock-vision" }] }));
+  if (req.method === "GET" && req.url === "/v1/__diagnostics") {
+    return res.end(JSON.stringify({ ok: true, scenario: scenarioDiagnostics() }));
+  }
   if (req.method === "POST" && req.url === "/v1/images/edits") {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
@@ -266,7 +520,8 @@ const server = http.createServer(async (req, res) => {
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       return res.end("<!DOCTYPE html><html><body>gateway timeout</body></html>");
     }
-    const failureMode = imageFailureMode(decodedPrompt);
+    const attempt = beginImageAttempt(decodedPrompt);
+    const { failureMode } = attempt;
     if (failureMode === "html-524") {
       res.statusCode = 524;
       res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -276,6 +531,7 @@ const server = http.createServer(async (req, res) => {
       res.statusCode = 504;
       return res.end(JSON.stringify({ error: { message: "The operation was aborted due to timeout" } }));
     }
+    completeImageAttempt(attempt);
     return res.end(JSON.stringify({ data: [{ url: `http://127.0.0.1:${port}/mock-image.png`, revised_prompt: gatewayName }] }));
   }
   if (req.method === "POST" && req.url === "/v1/images/generations") {
@@ -295,7 +551,8 @@ const server = http.createServer(async (req, res) => {
       res.statusCode = 400;
       return res.end(JSON.stringify({ error: { message: "Prompt must contain an explicit drawing instruction" } }));
     }
-    const failureMode = imageFailureMode(parsed.prompt);
+    const attempt = beginImageAttempt(parsed.prompt);
+    const { failureMode } = attempt;
     if (failureMode === "html-524") {
       res.statusCode = 524;
       res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -305,6 +562,7 @@ const server = http.createServer(async (req, res) => {
       res.statusCode = 504;
       return res.end(JSON.stringify({ error: { message: "The operation was aborted due to timeout" } }));
     }
+    completeImageAttempt(attempt);
     return res.end(JSON.stringify({ data: [{ url: `http://127.0.0.1:${port}/mock-image.png`, revised_prompt: gatewayName }] }));
   }
   if (req.method === "POST" && req.url === "/v1/responses") {
@@ -314,29 +572,16 @@ const server = http.createServer(async (req, res) => {
     const name = parsed?.text?.format?.name;
     const requestText = JSON.stringify(parsed?.input || []);
     if (requestText.includes("mock-delay")) await new Promise((resolve) => setTimeout(resolve, 5_000));
-    if (name === "html_deck" && (parsed.model === "mock-html-timeout" || requestText.includes("mock-html-timeout"))) {
-      res.statusCode = 504;
-      return res.end(JSON.stringify({ error: { message: "The operation was aborted due to timeout" } }));
-    }
-    if (["html_deck", "html_patch"].includes(name) && /data:image\/(?:png|jpe?g|webp);base64,/i.test(requestText)) {
-      res.statusCode = 400;
-      return res.end(JSON.stringify({ error: { message: "HTML text prompt must not contain inline image data" } }));
-    }
-    const payload = requestText.includes("mock-official-sse")
+    let payload = requestText.includes("mock-official-sse")
       ? { ok: true }
-      : name === "agent_turn"
-        ? stageAgentTurn(requestText)
-      : name === "calibration_review"
-        ? calibrationReviewForRequest(requestText)
-      : name === "image_decomposition"
-      ? decomposition
-      : name === "deck_outline"
-        ? outlineForRequest(requestText)
-      : name === "html_deck"
-        ? htmlDeckForRequest(requestText)
-        : name === "html_patch"
-          ? htmlPatchForRequest(requestText)
+      : await structuredPayload(name, parsed.input);
+    if (payload === undefined) {
+      payload = name === "image_decomposition"
+        ? decomposition
+        : name === "deck_outline"
+          ? outlineForRequest(requestText)
           : deckForRequest(requestText);
+    }
     if (parsed.stream) return streamJsonText(res, JSON.stringify(payload), "responses");
     return res.end(JSON.stringify({ output_text: JSON.stringify(payload) }));
   }
@@ -355,10 +600,6 @@ const server = http.createServer(async (req, res) => {
       const content = repairing ? JSON.stringify({ ok: true }) : "not valid json";
       return res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content } }] }));
     }
-    if (text.includes("完整 HtmlDeckSpec") && (parsed.model === "mock-html-timeout" || text.includes("mock-html-timeout"))) {
-      res.statusCode = 504;
-      return res.end(JSON.stringify({ error: { message: "The operation was aborted due to timeout" } }));
-    }
     if (parsed.model === "mock-timeout" && text.includes("依次分析所附")) {
       res.statusCode = 504;
       return res.end(JSON.stringify({ error: { message: "Model service timed out" } }));
@@ -367,19 +608,14 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: [{ type: "text", text: JSON.stringify({ title: "empty", slides: [] }) }] } }] }));
     }
     const schemaName = parsed?.response_format?.json_schema?.name;
-    const payload = schemaName === "agent_turn"
-      ? stageAgentTurn(text)
-      : schemaName === "calibration_review"
-        ? calibrationReviewForRequest(text)
-      : text.includes("changesJson 必须")
-      ? htmlPatchForRequest(text)
-      : text.includes("DECK_OUTLINE_JSON")
+    let payload = await structuredPayload(schemaName, parsed.messages);
+    if (payload === undefined) {
+      payload = text.includes("DECK_OUTLINE_JSON")
         ? outlineForRequest(text)
-      : text.includes("完整 HtmlDeckSpec")
-        ? htmlDeckForRequest(text)
         : text.includes("依次分析所附")
           ? decomposition
           : deckForRequest(text);
+    }
     if (parsed.stream) return streamJsonText(res, JSON.stringify(payload), "chat");
     return res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: JSON.stringify(payload) } }] }));
   }
