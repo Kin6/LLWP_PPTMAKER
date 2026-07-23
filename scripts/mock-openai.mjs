@@ -8,6 +8,8 @@ const port = Number(process.env.MOCK_PORT || 4010);
 const disableImageFailures = process.env.MOCK_DISABLE_IMAGE_FAILURES === "1";
 const forcedImageFailureMode = process.env.MOCK_IMAGE_FAILURE_MODE || "";
 const streamDelayMs = Math.max(0, Number(process.env.MOCK_STREAM_DELAY_MS) || 0);
+const alwaysFailImages = process.env.MOCK_IMAGE_ALWAYS_FAIL === "1";
+const gatewayName = process.env.MOCK_GATEWAY_NAME || "primary";
 const expectedImageSize = "1536x864";
 const imageBase64 = (await fs.readFile(path.join(root, "public", "style-guides", "product-calm.png"))).toString("base64");
 const failedImageTokens = new Set();
@@ -206,9 +208,16 @@ const server = http.createServer(async (req, res) => {
     for await (const chunk of req) chunks.push(chunk);
     const multipart = Buffer.concat(chunks).toString("latin1");
     const fieldNames = [...multipart.matchAll(/;\s*name="([^"]+)"/g)].map((match) => match[1]);
-    if (!multipart.includes('name="image"') || multipart.includes('name="image[]"')) {
+    const promptMatch = multipart.match(/name="prompt"\r\n\r\n([\s\S]*?)\r\n--/);
+    const decodedPrompt = promptMatch ? Buffer.from(promptMatch[1], "latin1").toString("utf8") : "";
+    const expectsOfficialFields = decodedPrompt.includes("mock-official-edit");
+    const hasExpectedImageField = expectsOfficialFields
+      ? multipart.includes('name="image[]"')
+      : multipart.includes('name="image"') && !multipart.includes('name="image[]"');
+    if (!hasExpectedImageField) {
       res.statusCode = 400;
-      return res.end(JSON.stringify({ error: { message: `Missing request parameter: image (received: ${fieldNames.join(", ")})` } }));
+      const expected = expectsOfficialFields ? "image[]" : "image";
+      return res.end(JSON.stringify({ error: { message: `Missing request parameter: ${expected} (received: ${fieldNames.join(", ")})` } }));
     }
     if (!multipart.includes(`name="size"\r\n\r\n${expectedImageSize}`)) {
       res.statusCode = 400;
@@ -219,8 +228,11 @@ const server = http.createServer(async (req, res) => {
       res.statusCode = 400;
       return res.end(JSON.stringify({ error: { message: "Prompt must contain an explicit drawing instruction" } }));
     }
-    const promptMatch = multipart.match(/name="prompt"\r\n\r\n([\s\S]*?)\r\n--/);
-    const decodedPrompt = promptMatch ? Buffer.from(promptMatch[1], "latin1").toString("utf8") : "";
+    if (alwaysFailImages) {
+      res.statusCode = 524;
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      return res.end("<!DOCTYPE html><html><body>gateway timeout</body></html>");
+    }
     const failureMode = imageFailureMode(decodedPrompt);
     if (failureMode === "html-524") {
       res.statusCode = 524;
@@ -231,12 +243,17 @@ const server = http.createServer(async (req, res) => {
       res.statusCode = 504;
       return res.end(JSON.stringify({ error: { message: "The operation was aborted due to timeout" } }));
     }
-    return res.end(JSON.stringify({ data: [{ url: `http://127.0.0.1:${port}/mock-image.png` }] }));
+    return res.end(JSON.stringify({ data: [{ url: `http://127.0.0.1:${port}/mock-image.png`, revised_prompt: gatewayName }] }));
   }
   if (req.method === "POST" && req.url === "/v1/images/generations") {
     let body = "";
     for await (const chunk of req) body += chunk;
     const parsed = JSON.parse(body || "{}");
+    if (alwaysFailImages) {
+      res.statusCode = 524;
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      return res.end("<!DOCTYPE html><html><body>gateway timeout</body></html>");
+    }
     if (parsed.size !== expectedImageSize) {
       res.statusCode = 400;
       return res.end(JSON.stringify({ error: { message: `Expected 16:9 image size ${expectedImageSize}` } }));
@@ -255,7 +272,7 @@ const server = http.createServer(async (req, res) => {
       res.statusCode = 504;
       return res.end(JSON.stringify({ error: { message: "The operation was aborted due to timeout" } }));
     }
-    return res.end(JSON.stringify({ data: [{ url: `http://127.0.0.1:${port}/mock-image.png` }] }));
+    return res.end(JSON.stringify({ data: [{ url: `http://127.0.0.1:${port}/mock-image.png`, revised_prompt: gatewayName }] }));
   }
   if (req.method === "POST" && req.url === "/v1/responses") {
     let body = "";
@@ -263,6 +280,7 @@ const server = http.createServer(async (req, res) => {
     const parsed = JSON.parse(body || "{}");
     const name = parsed?.text?.format?.name;
     const requestText = JSON.stringify(parsed?.input || []);
+    if (requestText.includes("mock-delay")) await new Promise((resolve) => setTimeout(resolve, 5_000));
     if (name === "html_deck" && (parsed.model === "mock-html-timeout" || requestText.includes("mock-html-timeout"))) {
       res.statusCode = 504;
       return res.end(JSON.stringify({ error: { message: "The operation was aborted due to timeout" } }));
@@ -271,7 +289,9 @@ const server = http.createServer(async (req, res) => {
       res.statusCode = 400;
       return res.end(JSON.stringify({ error: { message: "HTML text prompt must not contain inline image data" } }));
     }
-    const payload = name === "image_decomposition"
+    const payload = requestText.includes("mock-official-sse")
+      ? { ok: true }
+      : name === "image_decomposition"
       ? decomposition
       : name === "deck_outline"
         ? outlineForRequest(requestText)
@@ -288,6 +308,16 @@ const server = http.createServer(async (req, res) => {
     for await (const chunk of req) body += chunk;
     const parsed = JSON.parse(body || "{}");
     const text = JSON.stringify(parsed?.messages || []);
+    if (text.includes("mock-delay")) await new Promise((resolve) => setTimeout(resolve, 5_000));
+    if (text.includes("mock-compatible-repair")) {
+      if (parsed.response_format) {
+        res.statusCode = 400;
+        return res.end(JSON.stringify({ error: { message: "response_format is unsupported" } }));
+      }
+      const repairing = /repair the previous output|修复上一次输出/i.test(String(parsed.messages?.at(-1)?.content || ""));
+      const content = repairing ? JSON.stringify({ ok: true }) : "not valid json";
+      return res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content } }] }));
+    }
     if (text.includes("完整 HtmlDeckSpec") && (parsed.model === "mock-html-timeout" || text.includes("mock-html-timeout"))) {
       res.statusCode = 504;
       return res.end(JSON.stringify({ error: { message: "The operation was aborted due to timeout" } }));

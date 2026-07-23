@@ -1,39 +1,27 @@
 import path from "node:path";
 import fs from "node:fs/promises";
-import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import express from "express";
-import { FormData as UndiciFormData, ProxyAgent, fetch as undiciFetch } from "undici";
+import { loadServerConfig } from "./config.mjs";
+import { createImageClient } from "./images/client.mjs";
+import { createModelClient } from "./model/client.mjs";
+import { HttpError } from "./shared/errors.mjs";
+import { createHttpClient } from "./shared/http.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const root = path.resolve(__dirname, "..");
 
-const openAiApiKey = resolveEnvironmentSecret("OPENAI_API_KEY");
-const openAiApiBase = resolveEnvironmentSecret("OPENAI_API_BASE") || resolveEnvironmentSecret("OPENAI_BASE_URL");
-const explicitOpenAiApiFallbackBase = resolveEnvironmentSecret("OPENAI_API_FALLBACK_BASE");
-const explicitTextApiBase = resolveEnvironmentSecret("TEXT_API_BASE_URL");
-const explicitImageApiBase = resolveEnvironmentSecret("IMAGE_API_BASE_URL");
-const explicitImageApiFallbackBase = resolveEnvironmentSecret("IMAGE_API_FALLBACK_BASE_URL");
-const explicitTextModel = resolveEnvironmentSecret("TEXT_MODEL");
-const explicitImageModel = resolveEnvironmentSecret("IMAGE_MODEL");
-const configuredImageTimeoutMs = boundedInteger(resolveEnvironmentSecret("IMAGE_API_TIMEOUT_MS"), 240_000, 900_000, 600_000);
-const configuredImageMaxRetries = boundedInteger(resolveEnvironmentSecret("IMAGE_API_MAX_RETRIES"), 0, 2, 1);
-const imageOutputSize = "1536x864";
 const maxModelTextInputLength = 8_000_000;
-const textApiBaseUrl = explicitTextApiBase || openAiApiBase || "https://api.openai.com/v1";
-const imageApiBaseUrl = explicitImageApiBase || openAiApiBase || "https://api.openai.com/v1";
-const imageApiFallbackBaseUrl = explicitImageApiFallbackBase || explicitOpenAiApiFallbackBase || defaultGatewayFallback(imageApiBaseUrl);
-const textModel = explicitTextModel || "gpt-5.6-terra";
-const imageModel = explicitImageModel || "gpt-image-2";
-const defaultApiProvider = isOfficialOpenAIBase(textApiBaseUrl) ? "openai" : "compatible";
-const outboundProxyUrl = resolveProxyUrl();
-const outboundProxyAgent = outboundProxyUrl ? new ProxyAgent(outboundProxyUrl) : null;
-
-const isProduction = process.env.NODE_ENV === "production" || process.argv.includes("--production");
-const portArgIndex = process.argv.indexOf("--port");
-const port = portArgIndex >= 0 ? Number(process.argv[portArgIndex + 1]) : Number(process.env.PORT || 5173);
-const host = String(process.env.HOST || "127.0.0.1").trim();
+const serverConfig = loadServerConfig({ env: process.env, argv: process.argv.slice(2), rootDir: root });
+const httpClient = createHttpClient({ proxyUrl: serverConfig.proxyUrl });
+const modelClient = createModelClient({ config: serverConfig, http: httpClient });
+const imageClient = createImageClient({ config: serverConfig, http: httpClient });
+const configuredImageTimeoutMs = serverConfig.image.timeoutMs;
+const configuredImageMaxRetries = serverConfig.image.maxRetries;
+const isProduction = serverConfig.production;
+const port = serverConfig.port;
+const host = serverConfig.host;
 
 const app = express();
 app.use(express.json({ limit: "42mb" }));
@@ -316,8 +304,8 @@ app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
     mode: "hybrid",
-    envKeyConfigured: Boolean(openAiApiKey),
-    proxyConfigured: Boolean(outboundProxyAgent),
+    envKeyConfigured: Boolean(serverConfig.text.apiKey),
+    proxyConfigured: Boolean(serverConfig.proxyUrl),
     apiDefaults: {
       imageTimeoutMs: configuredImageTimeoutMs,
       imageMaxRetries: configuredImageMaxRetries,
@@ -330,7 +318,7 @@ app.post("/api/ai/test", async (req, res) => {
   const startedAt = Date.now();
   try {
     const config = normalizeTextConfig(req.body?.config || {});
-    const response = await fetchWithTimeout(`${config.baseUrl}/models`, { headers: authHeaders(config), method: "GET" }, 20_000);
+    const response = await httpClient.fetch(`${config.baseUrl}/models`, { headers: authHeaders(config), method: "GET" }, { timeoutMs: 20_000 });
     const payload = await readJson(response);
     if (!response.ok) throw upstreamError(response.status, payload);
     res.json({ ok: true, model: config.model, provider: config.provider, latencyMs: Date.now() - startedAt, keySource: config.keySource });
@@ -534,80 +522,33 @@ app.post("/api/ai/generate-images", async (req, res) => {
     let apiCalls = 0;
 
     for (const job of jobs) {
-      let prompt;
-      const maxAttempts = config.maxRetries + 1;
-      const fallbackBaseUrl = retryGatewayBase(config.baseUrl, imageApiFallbackBaseUrl);
-
-      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-        try {
-          const attemptBaseUrl = attempt > 1 && fallbackBaseUrl ? fallbackBaseUrl : config.baseUrl;
-          const officialImageApi = isOfficialOpenAIBase(attemptBaseUrl);
-          let response;
-          if (!guideBytes && !references.length) {
-            prompt = buildImagePrompt(job, guide, 0, "none");
-            const generationBody = {
-              model: config.model,
-              prompt,
-              size: imageOutputSize,
-              quality: config.quality,
-              ...(officialImageApi ? { output_format: "png" } : {}),
-            };
-            apiCalls += 1;
-            response = await fetchWithTimeout(`${attemptBaseUrl}/images/generations`, {
-              method: "POST",
-              headers: { ...authHeaders(config), "Content-Type": "application/json" },
-              body: JSON.stringify(generationBody),
-            }, config.timeoutMs);
-          } else {
-            const form = new UndiciFormData();
-            form.append("model", config.model);
-            form.append("size", imageOutputSize);
-            form.append("quality", config.quality);
-            let referenceMode = "style-single";
-            if (officialImageApi) {
-              form.append("output_format", "png");
-              if (guideBytes) form.append("image[]", new Blob([guideBytes], { type: "image/png" }), `style-${styleId}.png`);
-              references.forEach((reference, index) => {
-                const decoded = decodeDataUrl(reference.dataUrl);
-                form.append("image[]", new Blob([decoded.bytes], { type: decoded.mime }), `user-reference-${index + 1}.${mimeExtension(decoded.mime)}`);
-              });
-              referenceMode = guideBytes ? "style-and-user-multi" : "user-multi";
-            } else if (references.length) {
-              const decoded = decodeDataUrl(references[0].dataUrl);
-              form.append("image", new Blob([decoded.bytes], { type: decoded.mime }), `user-reference-1.${mimeExtension(decoded.mime)}`);
-              referenceMode = "user-single";
-            } else if (guideBytes) {
-              form.append("image", new Blob([guideBytes], { type: "image/png" }), `style-${styleId}.png`);
-            }
-            prompt = buildImagePrompt(job, guide, references.length, referenceMode);
-            form.append("prompt", prompt);
-            apiCalls += 1;
-            response = await fetchWithTimeout(`${attemptBaseUrl}/images/edits`, {
-              method: "POST",
-              headers: authHeaders(config),
-              body: form,
-            }, config.timeoutMs);
-          }
-          const payload = await readJson(response);
-          if (!response.ok) throw upstreamError(response.status, payload);
-          const item = payload?.data?.[0];
-          const url = await imageResultToDataUrl(item);
-          if (!url) throw new HttpError(502, "Image 2 没有返回可用图片。");
-          images.push({ slideIndex: job.slideIndex, url, prompt, revisedPrompt: item?.revised_prompt || "" });
-          break;
-        } catch (error) {
-          const canRetry = attempt < maxAttempts && isRetryableImageError(error);
-          if (canRetry) {
-            await delay(Math.min(6_000, 1_500 * attempt));
-            continue;
-          }
-          if (attempt > 1 && error instanceof HttpError) {
-            const prefix = fallbackBaseUrl ? "备用网关重试后仍失败" : `已自动重试 ${attempt - 1} 次`;
-            throw new HttpError(error.status, `${prefix}：${error.message}`);
-          }
-          throw error;
-        }
-      }
+      const officialImageApi = config.provider === "openai";
+      const referenceMode = !guideBytes && !references.length
+        ? "none"
+        : officialImageApi
+          ? guideBytes ? "style-and-user-multi" : "user-multi"
+          : references.length ? "user-single" : "style-single";
+      const prompt = buildImagePrompt(job, guide, references.length, referenceMode);
+      const providerReferences = officialImageApi
+        ? [
+            ...(guideBytes ? [{ name: `style-${styleId}.png`, dataUrl: `data:image/png;base64,${guideBytes.toString("base64")}` }] : []),
+            ...references.map((reference, index) => ({ name: `user-reference-${index + 1}.png`, dataUrl: reference.dataUrl })),
+          ]
+        : references.length
+          ? [{ name: "user-reference-1.png", dataUrl: references[0].dataUrl }]
+          : guideBytes
+            ? [{ name: `style-${styleId}.png`, dataUrl: `data:image/png;base64,${guideBytes.toString("base64")}` }]
+            : [];
+      const result = await imageClient.generateAsset({
+        prompt,
+        references: providerReferences,
+        aspectRatio: "16:9",
+        quality: config.quality,
+        timeoutMs: config.timeoutMs,
+        maxRetries: config.maxRetries,
+      });
+      apiCalls += result.apiCalls;
+      images.push({ slideIndex: job.slideIndex, url: result.dataUrl, prompt, revisedPrompt: result.revisedPrompt });
     }
 
     res.json({ ok: true, images, meta: { model: config.model, apiCalls, keySource: config.keySource } });
@@ -639,43 +580,23 @@ app.post("/api/ai/decompose-images", async (req, res) => {
 });
 
 function normalizeTextConfig() {
-  return finishConfig({
-    provider: defaultApiProvider,
-    baseUrl: textApiBaseUrl,
-    model: textModel,
-    allowNoKey: isLocalApiBase(textApiBaseUrl),
-  });
+  return withKeySource(serverConfig.text);
 }
 
 function normalizeImageConfig(raw) {
-  return finishConfig({
-    provider: "openai",
-    baseUrl: imageApiBaseUrl,
-    model: imageModel,
-    allowNoKey: isLocalApiBase(imageApiBaseUrl),
-    quality: ["low", "medium", "high"].includes(raw.quality) ? raw.quality : "medium",
+  return withKeySource({
+    ...serverConfig.image,
+    quality: ["low", "medium", "high"].includes(raw.quality) ? raw.quality : serverConfig.image.quality,
     timeoutMs: boundedInteger(raw.timeoutMs, 240_000, 900_000, configuredImageTimeoutMs),
     maxRetries: boundedInteger(raw.maxRetries, 0, 2, configuredImageMaxRetries),
   });
 }
 
-function finishConfig({ provider, baseUrl, model, allowNoKey, quality, timeoutMs, maxRetries }) {
-  const normalizedBaseUrl = String(baseUrl || "").trim().replace(/\/+$/, "");
-  let parsedUrl;
-  try { parsedUrl = new URL(normalizedBaseUrl); } catch { throw new HttpError(400, "API Base URL 格式不正确。"); }
-  if (!["http:", "https:"].includes(parsedUrl.protocol)) throw new HttpError(400, "API Base URL 只支持 http 或 https。");
-  const envKey = openAiApiKey;
-  if (!allowNoKey && !envKey) throw new HttpError(400, "缺少系统环境变量 OPENAI_API_KEY。请在本机用户或计算机环境变量中设置后重启服务。");
-  return {
-    provider,
-    baseUrl: normalizedBaseUrl,
-    model: cleanText(model, 120),
-    apiKey: envKey,
-    keySource: envKey ? "environment" : "none",
-    quality,
-    timeoutMs,
-    maxRetries,
-  };
+function withKeySource(config) {
+  if (!config.apiKey && !isLocalApiBase(config.baseUrl)) {
+    throw new HttpError(400, "缺少系统环境变量 OPENAI_API_KEY。请在本机用户或计算机环境变量中设置后重启服务。");
+  }
+  return { ...config, keySource: config.apiKey ? "environment" : "none" };
 }
 
 function normalizeSource(raw) {
@@ -1107,111 +1028,28 @@ function requestDeckOutlineModel(config, prompt, images = [], onProgress) {
 async function requestOpenAIResponses(config, prompt, schema, schemaName, images = [], onProgress) {
   const timeoutMs = schemaName === "image_decomposition" ? 60_000 : 150_000;
   assertModelTextInputWithinLimit(prompt);
-  const userContent = [{ type: "input_text", text: prompt.user }];
-  images.forEach((image) => {
-    userContent.push({ type: "input_text", text: `附件：${image.name}${image.summary ? `；${image.summary}` : ""}` });
-    userContent.push({ type: "input_image", image_url: image.dataUrl, detail: "high" });
+  return modelClient.completeStructured({
+    messages: [{ role: "system", content: prompt.system }, { role: "user", content: prompt.user }],
+    schema, schemaName, images, timeoutMs, onProgress,
   });
-  const requestBody = {
-    model: config.model,
-    input: [
-      { role: "system", content: [{ type: "input_text", text: prompt.system }] },
-      { role: "user", content: userContent },
-    ],
-    text: { format: { type: "json_schema", name: schemaName, strict: true, schema } },
-    ...(onProgress ? { stream: true } : {}),
-  };
-  onProgress?.({ type: "request", message: "模型请求已发送" });
-  const response = await fetchWithTimeout(`${config.baseUrl}/responses`, {
-    method: "POST",
-    headers: { ...authHeaders(config), "Content-Type": "application/json" },
-    body: JSON.stringify(requestBody),
-  }, timeoutMs);
-  if (onProgress) {
-    if (!response.ok) throw upstreamError(response.status, await readJson(response));
-    const text = await readResponsesStream(response, onProgress);
-    return { value: parseModelJson(text), apiCalls: 1 };
-  }
-  const payload = await readJson(response);
-  if (!response.ok) throw upstreamError(response.status, payload);
-  return { value: parseModelJson(extractResponseText(payload)), apiCalls: 1 };
 }
 
 async function requestChatCompletions(config, prompt, images = [], schemaName = "deck_spec", onProgress) {
   const timeoutMs = schemaName === "image_decomposition" ? 60_000 : 150_000;
   assertModelTextInputWithinLimit(prompt);
-  const userContent = images.length
-    ? [{ type: "text", text: prompt.user }, ...images.flatMap((image) => [
-        { type: "text", text: `附件：${image.name}${image.summary ? `；${image.summary}` : ""}` },
-        { type: "image_url", image_url: { url: image.dataUrl } },
-      ])]
-    : prompt.user;
-  const body = {
-    model: config.model,
-    messages: [{ role: "system", content: prompt.system }, { role: "user", content: userContent }],
-    response_format: { type: "json_object" },
-    temperature: 0.25,
-    ...(onProgress ? { stream: true } : {}),
-  };
-  onProgress?.({ type: "request", message: "模型请求已发送" });
-  let apiCalls = 1;
-  let response = await fetchWithTimeout(`${config.baseUrl}/chat/completions`, {
-    method: "POST", headers: { ...authHeaders(config), "Content-Type": "application/json" }, body: JSON.stringify(body),
-  }, timeoutMs);
-  if (!response.ok && response.status === 400) {
-    const firstError = await readJson(response);
-    delete body.response_format;
-    onProgress?.({ type: "request", message: "兼容模式正在重试" });
-    apiCalls += 1;
-    response = await fetchWithTimeout(`${config.baseUrl}/chat/completions`, {
-      method: "POST", headers: { ...authHeaders(config), "Content-Type": "application/json" }, body: JSON.stringify(body),
-    }, timeoutMs);
-    if (!response.ok) throw upstreamError(response.status, await readJson(response) || firstError);
-  }
-  if (!response.ok) throw upstreamError(response.status, await readJson(response));
-  const firstText = onProgress
-    ? await readChatCompletionStream(response, onProgress)
-    : extractChatCompletionText(await readJson(response));
-  const firstValue = tryParseModelJson(firstText);
-  if (hasStructuredContent(firstValue, schemaName)) return { value: firstValue, apiCalls };
-
-  const repairInstruction = schemaName === "deck_spec"
-    ? "请修复上一次输出。只返回一个有效 JSON 对象，根对象必须包含 title、theme、story 和非空 slides 数组。slides 必须严格遵守用户指定页数，每页包含 title、subtitle、layout、claim、bullets、speakerNotes、sourceNotes、sourceBlockIds、imageIndex、callouts、visualBrief、imagePrompt。不要输出解释、Markdown 或代码围栏。"
+  const schema = schemaName === "deck_spec"
+    ? deckSchema
     : schemaName === "deck_outline"
-      ? "请修复上一次输出。只返回轻量 DECK_OUTLINE_JSON 对象，根对象必须包含 title、theme、story 和非空 slides 数组；每页只包含 title、purpose、evidence、sourceBlockIds、visualAnchor，并严格遵守指定页数。"
-    : schemaName === "html_deck"
-      ? "请修复上一次输出。只返回完整 HtmlDeckSpec JSON，根对象必须包含 id、title、width、height、revision、theme、非空 slides、variables、comments 和 drawings。不要输出 HTML、解释、Markdown 或代码围栏。"
-      : schemaName === "html_patch"
-        ? "请修复上一次输出。只返回 JSON 对象，根对象必须包含 summary 和非空 patches 数组；每个 Patch 包含 slideId、nodeId、operation 和 changesJson。不要输出解释、Markdown 或代码围栏。"
-        : "请修复上一次输出。只返回一个有效 JSON 对象，根对象必须包含非空 slides 数组，每项包含 slideIndex、composition、safeArea 和 parts。不要输出解释、Markdown 或代码围栏。";
-  const repairMessages = [...body.messages];
-  if (firstText) repairMessages.push({ role: "assistant", content: firstText });
-  repairMessages.push({ role: "user", content: repairInstruction });
-  const repairBody = { ...body, messages: repairMessages, temperature: 0 };
-  onProgress?.({ type: "phase", message: "结构校验未通过，正在自动修复" });
-  onProgress?.({ type: "request", message: "结构修复请求已发送" });
-  response = await fetchWithTimeout(`${config.baseUrl}/chat/completions`, {
-    method: "POST", headers: { ...authHeaders(config), "Content-Type": "application/json" }, body: JSON.stringify(repairBody),
-  }, timeoutMs);
-  if (!response.ok) throw upstreamError(response.status, await readJson(response));
-  apiCalls += 1;
-  const repairedText = onProgress
-    ? await readChatCompletionStream(response, onProgress)
-    : extractChatCompletionText(await readJson(response));
-  const repairedValue = tryParseModelJson(repairedText);
-  if (!hasStructuredContent(repairedValue, schemaName)) {
-    const message = schemaName === "deck_spec"
-      ? "模型连续两次没有返回可用的幻灯片结构。请确认文本模型支持 JSON 输出，或在 API 设置中更换模型。"
-      : schemaName === "deck_outline"
-        ? "模型连续两次没有返回可用的叙事大纲。请确认文本模型支持 JSON 输出，或在 API 设置中更换模型。"
+      ? deckOutlineSchema
       : schemaName === "html_deck"
-        ? "模型连续两次没有返回可用的 HtmlDeckSpec。已保留安全初稿。"
+        ? htmlDeckSchema
         : schemaName === "html_patch"
-          ? "模型连续两次没有返回可用的局部修改 Patch，原稿未改变。"
-          : "模型连续两次没有返回可用的视觉拆解结构。请更换支持图片理解和 JSON 输出的模型。";
-    throw new HttpError(502, message);
-  }
-  return { value: repairedValue, apiCalls };
+          ? htmlPatchSchema
+          : decompositionSchema;
+  return modelClient.completeStructured({
+    messages: [{ role: "system", content: prompt.system }, { role: "user", content: prompt.user }],
+    schema, schemaName, images, timeoutMs, onProgress,
+  });
 }
 
 function normalizeDeckOutline(raw, source) {
@@ -1309,12 +1147,6 @@ function normalizeRect(value, fallback) {
   return { x: Number.isFinite(x) ? x : fallback.x, y: Number.isFinite(y) ? y : fallback.y, w, h };
 }
 
-function decodeDataUrl(dataUrl) {
-  const match = /^data:([^;,]+);base64,(.+)$/s.exec(dataUrl);
-  if (!match) throw new HttpError(400, "参考图片格式不正确。");
-  return { mime: match[1], bytes: Buffer.from(match[2], "base64") };
-}
-
 function cleanDataUrl(value) {
   const text = String(value || "").trim();
   if (!/^data:image\/(png|jpe?g|webp);base64,/i.test(text)) return "";
@@ -1322,83 +1154,11 @@ function cleanDataUrl(value) {
   return text;
 }
 
-async function imageResultToDataUrl(item) {
-  if (item?.b64_json) return `data:image/png;base64,${item.b64_json}`;
-  const remoteUrl = String(item?.url || "").trim();
-  if (!remoteUrl) return "";
-  if (remoteUrl.startsWith("data:image/")) return cleanDataUrl(remoteUrl);
-  let parsed;
-  try { parsed = new URL(remoteUrl); } catch { throw new HttpError(502, "Image 2 返回了无效图片地址。"); }
-  if (!["http:", "https:"].includes(parsed.protocol)) throw new HttpError(502, "Image 2 返回了不支持的图片地址。");
-  const response = await fetchWithTimeout(remoteUrl, { method: "GET" }, 90_000);
-  if (!response.ok) throw new HttpError(502, `无法下载 Image 2 返回的图片 (${response.status})。`);
-  const bytes = Buffer.from(await response.arrayBuffer());
-  if (!bytes.length || bytes.length > 12_000_000) throw new HttpError(502, "Image 2 返回的图片为空或过大。");
-  const rawMime = String(response.headers.get("content-type") || "image/png").split(";")[0].toLowerCase();
-  const mime = ["image/png", "image/jpeg", "image/webp"].includes(rawMime) ? rawMime : "image/png";
-  return `data:${mime};base64,${bytes.toString("base64")}`;
-}
-
-function mimeExtension(mime) {
-  return mime.includes("png") ? "png" : mime.includes("webp") ? "webp" : "jpg";
-}
-
 function authHeaders(config) { return config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}; }
 function clamp01(value) { return Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0; }
 
-function extractResponseText(payload) {
-  if (typeof payload?.output_text === "string") return payload.output_text;
-  return (payload?.output || []).flatMap((item) => item?.content || []).map((item) => item?.text || item?.value || "").filter(Boolean).join("\n");
-}
-
-function extractChatCompletionText(payload) {
-  const choice = payload?.choices?.[0] || {};
-  const message = choice.message || {};
-  const content = flattenTextContent(message.content);
-  if (content) return content;
-  const reasoning = flattenTextContent(message.reasoning_content);
-  if (reasoning) return reasoning;
-  if (typeof choice.text === "string") return choice.text;
-  return extractResponseText(payload);
-}
-
-function flattenTextContent(value) {
-  if (typeof value === "string") return value.trim();
-  if (Array.isArray(value)) return value.map(flattenTextContent).filter(Boolean).join("\n");
-  if (!value || typeof value !== "object") return "";
-  if (typeof value.text === "string") return value.text.trim();
-  if (typeof value.value === "string") return value.value.trim();
-  if (typeof value.content === "string") return value.content.trim();
-  return "";
-}
-
-function tryParseModelJson(text) {
-  try { return parseModelJson(text); } catch { return null; }
-}
-
-function hasStructuredContent(value, schemaName) {
-  if (!value || typeof value !== "object") return false;
-  if (schemaName === "deck_spec") return Array.isArray(value.slides) && value.slides.length > 0;
-  if (schemaName === "deck_outline") return Array.isArray(value.slides) && value.slides.length > 0 && value.story;
-  if (schemaName === "html_deck") return Array.isArray(value.slides) && value.slides.length > 0 && value.theme && Array.isArray(value.variables);
-  if (schemaName === "html_patch") return Array.isArray(value.patches) && value.patches.length > 0;
-  return Array.isArray(value.slides) && value.slides.length > 0;
-}
-
 function hasExactSlideCount(value, expected) {
   return Array.isArray(value?.slides) && value.slides.length === expected;
-}
-
-function parseModelJson(text) {
-  const cleaned = String(text || "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-  try { return JSON.parse(cleaned); } catch {
-    const start = cleaned.indexOf("{");
-    const end = cleaned.lastIndexOf("}");
-    if (start >= 0 && end > start) {
-      try { return JSON.parse(cleaned.slice(start, end + 1)); } catch { /* handled below */ }
-    }
-    throw new HttpError(502, "模型返回的不是有效 JSON，请换用支持结构化输出的模型。");
-  }
 }
 
 async function sendNdjsonStream(res, task) {
@@ -1422,110 +1182,6 @@ async function sendNdjsonStream(res, task) {
   }
 }
 
-async function readResponsesStream(response, onProgress) {
-  let text = "";
-  let completedText = "";
-  await readSseEvents(response, (eventName, data) => {
-    const type = String(data?.type || eventName || "");
-    if (type === "response.output_text.delta" && typeof data?.delta === "string") {
-      text += data.delta;
-      onProgress({ type: "delta", deltaChars: data.delta.length, totalChars: text.length });
-      return;
-    }
-    if (type === "response.completed") {
-      completedText = extractResponseText(data?.response || data);
-      return;
-    }
-    if (type === "response.failed" || type === "error") {
-      const message = data?.response?.error?.message || data?.error?.message || data?.message || "模型流式响应失败。";
-      throw new HttpError(502, cleanText(message, 500));
-    }
-  });
-  const result = text || completedText;
-  if (!result) throw new HttpError(502, "模型流式响应没有返回文本内容。");
-  return result;
-}
-
-async function readChatCompletionStream(response, onProgress) {
-  const contentType = String(response.headers.get("content-type") || "").toLowerCase();
-  if (!contentType.includes("text/event-stream")) {
-    return extractChatCompletionText(await readJson(response));
-  }
-  let text = "";
-  await readSseEvents(response, (_eventName, data) => {
-    const errorMessage = data?.error?.message;
-    if (errorMessage) throw new HttpError(502, cleanText(errorMessage, 500));
-    const delta = chatDeltaText(data?.choices?.[0]?.delta?.content);
-    if (!delta) return;
-    text += delta;
-    onProgress({ type: "delta", deltaChars: delta.length, totalChars: text.length });
-  });
-  if (!text) throw new HttpError(502, "兼容模型的流式响应没有返回文本内容。");
-  return text;
-}
-
-function chatDeltaText(value) {
-  if (typeof value === "string") return value;
-  if (Array.isArray(value)) return value.map(chatDeltaText).join("");
-  if (!value || typeof value !== "object") return "";
-  if (typeof value.text === "string") return value.text;
-  if (typeof value.value === "string") return value.value;
-  if (typeof value.content === "string") return value.content;
-  return "";
-}
-
-async function readSseEvents(response, onEvent) {
-  if (!response.body) throw new HttpError(502, "模型服务没有返回可读取的响应流。");
-  const decoder = new TextDecoder();
-  let buffer = "";
-  const consume = (block) => {
-    if (!block.trim()) return;
-    let eventName = "";
-    const dataLines = [];
-    for (const line of block.split(/\r?\n/)) {
-      if (line.startsWith("event:")) eventName = line.slice(6).trim();
-      if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
-    }
-    const raw = dataLines.join("\n");
-    if (!raw || raw === "[DONE]") return;
-    let data;
-    try { data = JSON.parse(raw); } catch { return; }
-    onEvent(eventName, data);
-  };
-  for await (const chunk of response.body) {
-    buffer += decoder.decode(chunk, { stream: true });
-    const blocks = buffer.split(/\r?\n\r?\n/);
-    buffer = blocks.pop() || "";
-    blocks.forEach(consume);
-  }
-  buffer += decoder.decode();
-  consume(buffer);
-}
-
-async function fetchWithTimeout(url, options, timeoutMs) {
-  try {
-    const host = new URL(url).hostname;
-    const dispatcher = outboundProxyAgent && !["127.0.0.1", "localhost", "::1"].includes(host)
-      ? outboundProxyAgent
-      : undefined;
-    return await undiciFetch(url, { ...options, dispatcher, signal: AbortSignal.timeout(timeoutMs) });
-  }
-  catch (error) {
-    if (error?.name === "TimeoutError") throw new HttpError(504, `模型服务在 ${Math.round(timeoutMs / 60_000)} 分钟内未完成响应。`);
-    throw new HttpError(502, `无法连接模型服务：${error?.message || "网络错误"}`);
-  }
-}
-
-function isRetryableImageError(error) {
-  const status = Number(error?.status);
-  const message = String(error?.message || "").toLowerCase();
-  return [408, 429, 500, 502, 503, 504].includes(status)
-    || /timeout|timed out|aborted due to timeout|rate limit|temporar/.test(message);
-}
-
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 async function readJson(response) {
   const text = await response.text();
@@ -1586,59 +1242,8 @@ function extractDisplayText(value, depth = 0) {
   }
   return Object.values(value).map((item) => extractDisplayText(item, depth + 1)).filter(Boolean).slice(0, 2).join("：");
 }
-function isOfficialOpenAIBase(value) {
-  try { return new URL(value).hostname.toLowerCase() === "api.openai.com"; }
-  catch { return false; }
-}
-function defaultGatewayFallback(primaryValue) {
-  try {
-    return new URL(primaryValue).hostname.toLowerCase() === "api.chatanywhere.org"
-      ? "https://api.chatanywhere.tech/v1"
-      : "";
-  } catch { return ""; }
-}
-function retryGatewayBase(primaryValue, fallbackValue) {
-  const primary = String(primaryValue || "").trim().replace(/\/+$/, "");
-  const fallback = String(fallbackValue || "").trim().replace(/\/+$/, "");
-  if (!fallback || fallback === primary) return "";
-  try {
-    const primaryHost = new URL(primary).hostname.toLowerCase();
-    const fallbackHost = new URL(fallback).hostname.toLowerCase();
-    if (primaryHost === "api.openai.com" && fallbackHost !== "api.openai.com") return "";
-    if (primaryHost === "api.chatanywhere.org" || explicitImageApiFallbackBase || explicitOpenAiApiFallbackBase) return fallback;
-  } catch { return ""; }
-  return "";
-}
 function isLocalApiBase(value) {
   try { return ["127.0.0.1", "localhost", "::1"].includes(new URL(String(value)).hostname); } catch { return false; }
-}
-function resolveEnvironmentSecret(name) {
-  const inherited = String(process.env[name] || "").trim();
-  if (inherited || process.platform !== "win32") return inherited;
-  try {
-    const script = `$user=[Environment]::GetEnvironmentVariable('${name}','User'); if($user){$user}else{[Environment]::GetEnvironmentVariable('${name}','Machine')}`;
-    return String(execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
-      encoding: "utf8",
-      windowsHide: true,
-      timeout: 5_000,
-    }) || "").trim();
-  } catch {
-    return "";
-  }
-}
-function resolveProxyUrl() {
-  const envProxy = resolveEnvironmentSecret("HTTPS_PROXY") || resolveEnvironmentSecret("HTTP_PROXY") || resolveEnvironmentSecret("ALL_PROXY");
-  if (envProxy) return envProxy;
-  try {
-    const gitProxy = String(execFileSync("git", ["config", "--get", "http.proxy"], {
-      encoding: "utf8",
-      windowsHide: true,
-      timeout: 3_000,
-    }) || "").trim();
-    return /^https?:\/\//i.test(gitProxy) ? gitProxy : "";
-  } catch {
-    return "";
-  }
 }
 async function sendRuntimeAsset(res, relativePath, contentType) {
   try {
@@ -1650,7 +1255,6 @@ async function sendRuntimeAsset(res, relativePath, contentType) {
     res.status(404).send("Runtime asset not found");
   }
 }
-class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
 
 if (isProduction) {
   app.use(express.static(path.join(root, "dist")));
