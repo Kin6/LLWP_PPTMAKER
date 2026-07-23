@@ -26,8 +26,7 @@ test("outline artifact opens read-only while generation continues and close rest
     buffer: Buffer.from("metric,value\nmanual reporting,4 hours\ntraceability,63 percent"),
   });
   await expect(page.getByText("manufacturing-evidence.csv")).toBeVisible();
-  await page.getByRole("button", { name: "融合成片", exact: true }).click();
-  await page.getByRole("button", { name: /交互网页/ }).click();
+  await expect(page.getByRole("button", { name: "交互网页", exact: true })).toBeVisible();
 
   const accepted = page.waitForResponse((response) => (
     response.request().method() === "POST"
@@ -211,6 +210,51 @@ test("one failed build batch, calibration fallback, and an image 524 recover wit
       imageRetrySuccesses: 1,
       imageSuccesses: 1,
     },
+  });
+});
+
+test("a forbidden model aside is repaired once without exposing speaker notes", async ({ stack }, testInfo) => {
+  desktopOnly(testInfo.project.name);
+  const created = await stack.createFixtureJob("data-table", {
+    slideCount: 3,
+    scenario: "MOCK_FORBIDDEN_ASIDE_ONCE",
+  });
+
+  const completed = await stack.waitForJob(created.id, ["ready"], { timeoutMs: 150_000 });
+  expect(completed.revision).toBe(1);
+  const events = await stack.readEvents(created.id);
+  expect(events.filter((event) => (
+    event.stage === "calibrating"
+      && event.type === "progress"
+      && event.message === "正在请求模型生成校准页面"
+  ))).toHaveLength(2);
+  expect(events.some((event) => event.status === "failed")).toBe(false);
+  expect((await stack.getMockDiagnostics()).scenario).toMatchObject({
+    markers: ["MOCK_FORBIDDEN_ASIDE_ONCE"],
+    calibrationGenerationCount: 2,
+  });
+});
+
+test("an unscoped model selector is repaired once and the deck reaches ready", async ({ stack }, testInfo) => {
+  desktopOnly(testInfo.project.name);
+  const created = await stack.createFixtureJob("data-table", {
+    slideCount: 3,
+    scenario: "MOCK_UNSCOPED_SELECTOR_ONCE",
+  });
+
+  const completed = await stack.waitForJob(created.id, ["ready"], { timeoutMs: 150_000 });
+  expect(completed.revision).toBe(1);
+  const events = await stack.readEvents(created.id);
+  expect(events.filter((event) => (
+    event.stage === "calibrating"
+      && event.type === "progress"
+      && event.message === "正在请求模型生成校准页面"
+  ))).toHaveLength(2);
+  expect(events.some((event) => event.status === "failed")).toBe(false);
+  expect((await stack.getMockDiagnostics()).scenario).toMatchObject({
+    markers: ["MOCK_UNSCOPED_SELECTOR_ONCE"],
+    calibrationGenerationCount: 2,
+    unscopedSelectorResponses: 1,
   });
 });
 

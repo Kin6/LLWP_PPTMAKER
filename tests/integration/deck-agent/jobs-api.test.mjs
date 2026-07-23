@@ -170,6 +170,20 @@ describe("HTML deck jobs API", () => {
     expect(executor.start).toHaveBeenCalledWith(response.body.job.id, { resumeFrom: "outline" });
   });
 
+  it("normalizes the UI follow-total image count into a durable per-job budget", async () => {
+    const response = await request(app)
+      .post("/api/html-deck/jobs")
+      .send({
+        ...validRequest,
+        options: { ...validRequest.options, imageEnabled: true, imageCount: 0 },
+      })
+      .expect(202);
+
+    const input = await store.readJson(response.body.job.id, "job-input.json");
+    expect(input.options.imageEnabled).toBe(true);
+    expect(input.options.imageCount).toBe(validRequest.source.slideCount);
+  });
+
   it.each([
     ["duplicate block IDs", {
       ...validRequest,

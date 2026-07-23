@@ -102,7 +102,19 @@ npm start
 
 ## API 配置
 
-本地模式不需要 API Key。其他模式只从运行服务的本机系统环境变量读取 Key、Base URL 和模型。浏览器不会显示、保存或提交这些字段，服务端也会忽略客户端伪造的配置。
+本地模式不调用外部模型。标准 PPTX、融合成片和 HTML 模式需要文本模型；未设置 `OPENAI_API_KEY` 且未指向本地文本服务时，项目会自动复用启动服务的终端中已登录的 Codex CLI。浏览器不会显示、保存或提交 Key、Base URL 和模型，服务端也会忽略客户端伪造的配置。
+
+使用 Codex CLI 前，请先确认 `codex` 命令已安装，并在同一用户环境中完成登录。可以用系统环境变量显式选择和调整 CLI：
+
+```bash
+export TEXT_MODEL_BACKEND="codex-cli"  # 可选值：http、codex-cli
+export CODEX_CLI_PATH="codex"          # 可改为 Codex 可执行文件的绝对路径
+export CODEX_CLI_MODEL=""               # 留空时使用 Codex CLI 的默认模型
+export CODEX_CLI_REASONING_EFFORT="medium" # low、medium、high、xhigh
+npm run dev
+```
+
+Codex CLI 只是复用本机登录状态，文本仍会发送给远程模型，可能按所登录账户的方案或用量计费；它不是离线、免费的本地模型。若要强制使用 HTTP 文本接口，请设置 `TEXT_MODEL_BACKEND=http` 并配置相应的 Key 或本地兼容服务。
 
 Windows 用户环境变量示例：
 
@@ -114,6 +126,8 @@ Windows 用户环境变量示例：
 ```
 
 - Linux/macOS 请在启动服务的登录环境中 `export` 同名变量。
+- `TEXT_MODEL_BACKEND` 可设为 `http` 或 `codex-cli`；未显式设置时，缺少 `OPENAI_API_KEY` 的官方远程配置会自动选择 Codex CLI。
+- `CODEX_CLI_PATH`、`CODEX_CLI_MODEL` 和 `CODEX_CLI_REASONING_EFFORT` 分别控制 CLI 路径、模型和推理强度。
 - `OPENAI_API_BASE` 或 `OPENAI_BASE_URL` 可设置 OpenAI 兼容网关。
 - `TEXT_API_BASE_URL` 和 `IMAGE_API_BASE_URL` 可以让文本与图片使用不同服务。
 - `OPENAI_API_FALLBACK_BASE` 和 `IMAGE_API_FALLBACK_BASE_URL` 可以设置图片备用线路。
@@ -122,6 +136,8 @@ Windows 用户环境变量示例：
 - 单页图片默认等待 10 分钟，临时错误默认重试 1 次。
 - 主线路为 `api.chatanywhere.org` 时，重试可以自动切换到 `api.chatanywhere.tech`。
 - 服务会读取 `HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY`，必要时沿用 Git 的 HTTP 代理。
+
+图片生成不复用 Codex CLI 登录。图片服务需要 `IMAGE_API_KEY`，未设置时会回退使用 `OPENAI_API_KEY`；两者都没有时，图片生成会自动关闭，HTML 模式继续使用 HTML/CSS 完成视觉设计，不会因此阻断文本生成。
 
 项目不会读取 `.env` 或 `.env.local`。修改系统环境变量后需要重启服务。完整说明见 [API 配置](./API_SETUP.md)。
 

@@ -1,6 +1,6 @@
 # API 配置与生成实现
 
-本地模式不需要 API。标准模式只调用文本模型；融合成片模式调用文本模型与 GPT Image 2；交互网页模式使用独立的 HTML Job 流水线，按内容、设计、校准、页面批次、可选素材和视觉 QA 阶段调用模型。
+本地模式不调用外部模型。标准模式只调用文本模型；融合成片模式调用文本模型与 GPT Image 2；交互网页模式使用独立的 HTML Job 流水线，按内容、设计、校准、页面批次、可选素材和视觉 QA 阶段调用模型。PPTX 与 HTML 的文本请求都可以通过 HTTP API，或复用本机已登录的 Codex CLI。
 
 ## 请求流程
 
@@ -76,6 +76,31 @@ QA 先对所有页面执行 DOM 检查和 Playwright 截图，再做一次整套
 
 ### 系统环境变量
 
+#### 文本模型后端
+
+`TEXT_MODEL_BACKEND` 支持以下值：
+
+- `http`：使用 OpenAI 或兼容 HTTP API，需要相应的 Key；指向无需鉴权的本地兼容服务时可以不设置 Key。
+- `codex-cli`：复用启动服务的终端中已登录的 Codex CLI，不要求网站单独配置 `OPENAI_API_KEY`。
+
+未显式设置 `TEXT_MODEL_BACKEND` 时，如果没有 `OPENAI_API_KEY`，且文本地址不是本机 `localhost` / `127.0.0.1` / `::1`，服务会自动选择 `codex-cli`；否则选择 `http`。使用 CLI 前应先在同一用户环境中确认 `codex` 命令可执行且已完成登录。
+
+Linux/macOS CLI 示例：
+
+```bash
+export TEXT_MODEL_BACKEND="codex-cli"
+export CODEX_CLI_PATH="codex"
+export CODEX_CLI_MODEL=""                 # 留空时使用 CLI 默认模型
+export CODEX_CLI_REASONING_EFFORT="medium" # low、medium、high、xhigh
+npm run dev
+```
+
+`CODEX_CLI_PATH` 可以填写可执行文件的绝对路径。`CODEX_CLI_MODEL` 显式覆盖 CLI 模型；未设置时，CLI 后端会沿用显式设置的 `TEXT_MODEL`，两者都未设置则使用 Codex CLI 默认模型。
+
+Codex CLI 后端仍会把内容发送到远程模型，并可能按照当前 Codex 登录账户的订阅方案或用量计费。它不是离线推理，也不代表免费调用。
+
+#### HTTP 与图片服务
+
 Windows 示例：
 
 ```powershell
@@ -94,6 +119,8 @@ export TEXT_MODEL="gpt-5.6-terra"
 export IMAGE_MODEL="gpt-image-2"
 npm run dev
 ```
+
+图片生成与文本 CLI 登录相互独立。图片接口需要 `IMAGE_API_KEY`；未设置时会回退使用 `OPENAI_API_KEY`。如果两者都未配置，服务会自动关闭图片生成，HTML 模式仍会用 HTML/CSS 视觉完成页面，不会因缺少图片 Key 而中止。Codex CLI 登录不能代替图片 API Key。
 
 配置优先级：
 
@@ -146,13 +173,15 @@ Node worker 配置了 512 MiB old generation、64 MiB young generation 和 8 MiB
 ## 数据与隐私边界
 
 - 本地模式不会请求外部模型。
-- API 模式会把文字、表格、压缩图片和所需生成结果发送到用户配置的模型服务。
+- HTTP API 或 Codex CLI 文本模式都会把文字、表格、压缩图片和所需生成结果发送到相应的远程模型服务；Codex CLI 只是复用本机登录状态。
 - 系统环境 Key 不会被接口返回给前端，客户端提交的 Key、Base URL、模型和 Provider 会被服务端忽略。
 - 浏览器端 OCR 使用 Tesseract，不调用云端 OCR 服务；首次运行可能下载语言数据。
 - HTML 运行时位于 sandbox iframe，不能读取主应用的会话配置和 API Key。
 - 内置风格图会随图片请求发送，不应放入客户隐私或专有内容。
 
 ## 调用量与成本
+
+HTTP API 和 Codex CLI 都可能产生远程模型用量或费用；具体规则取决于 API 供应商或 Codex 登录账户。以下调用量用于理解流程，不表示免费额度。
 
 以 N 页 PPTX 融合成片为例，正常路径通常为：
 

@@ -186,6 +186,7 @@ export async function runOutlineStage(context) {
         stage: "outline",
         messages: buildOutlineMessages(context, skill, attempt, lastError, previousMarkdown),
         allowedTools,
+        requiredToolName: "write_outline",
         maxTurns: OUTLINE_MAX_TURNS,
         maxUpstreamCalls: upstreamCallBudget(OUTLINE_MAX_TURNS),
         timeoutMs: 120_000,

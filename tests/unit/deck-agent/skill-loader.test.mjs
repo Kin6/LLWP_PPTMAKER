@@ -4,12 +4,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseFragment } from "parse5";
 import { afterEach, describe, expect, it } from "vitest";
+import { MODEL_HTML_CONTRACT } from "../../../server/deck-agent/html-contract.mjs";
+import { validateSlideHtml } from "../../../server/deck-agent/html-policy.mjs";
 import { createSkillLoader } from "../../../server/deck-agent/skill-loader.mjs";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const skillRoot = path.join(repositoryRoot, "skills/generate-html-deck");
 const temporaryRoots = [];
-const expectedThemes = ["minimal-white", "corporate-clean", "swiss-grid", "editorial-serif", "academic-paper", "magazine-bold", "tokyo-night", "pitch-deck-vc"];
+const expectedThemes = ["minimal-white", "corporate-clean", "swiss-grid", "editorial-serif", "academic-paper", "magazine-bold", "tokyo-night", "pitch-deck-vc", "playful-classroom"];
 const expectedLayouts = ["cover", "section-divider", "two-column", "big-quote", "stat-highlight", "kpi-grid", "table", "timeline", "comparison", "process-steps", "image-hero", "thanks"];
 const expectedStageFiles = {
   outline: ["SKILL.md", "references/content-density.md", "references/source-provenance.md"],
@@ -138,6 +140,12 @@ describe("project Skill loader", () => {
 
     expect(design).toMatch(/call `write_theme` exactly once[\s\S]{0,160}only `designBriefMarkdown`/i);
     expect(building).toMatch(/doctype[\s\S]{0,120}`<html>`[\s\S]{0,120}`<head>`[\s\S]{0,120}`<body>`/i);
+    expect(building).toContain("`htmlContract.allowedTags`");
+    expect(building).toMatch(/speaker notes[\s\S]{0,180}server-owned metadata/i);
+    expect(building).toMatch(/service owns[\s\S]{0,160}`:root`[\s\S]{0,160}never emit/i);
+    expect(building).toMatch(/every comma-separated selector branch[\s\S]{0,120}`:slide`/i);
+    expect(building).not.toContain("Use a token-only `:root` rule");
+    expect(building).not.toContain("Use semantic elements");
     for (const attribute of ["cite", "ping", "data", "longdesc", "manifest", "usemap", "xlink:href", "background", "archive", "codebase", "classid", "profile", "attributionsrc", "dynsrc", "imagesrcset", "itemtype", "lowsrc"]) {
       expect(building).toContain(`\`${attribute}\``);
     }
@@ -201,7 +209,7 @@ describe("project Skill loader", () => {
     }
   });
 
-  it("registers exactly eight themes and twelve layouts", async () => {
+  it("registers exactly nine themes and twelve layouts", async () => {
     const catalog = JSON.parse(await readFile(path.join(skillRoot, "assets/catalog.json"), "utf8"));
 
     expect(catalog.themes.map((item) => item.id)).toEqual(expectedThemes);
@@ -226,6 +234,14 @@ describe("project Skill loader", () => {
     for (const layout of expectedLayouts) {
       const html = await readFile(path.join(skillRoot, `assets/layouts/${layout}.html`), "utf8");
       const elements = collectElements(parseFragment(html));
+      expect(elements.every((element) => MODEL_HTML_CONTRACT.allowedTags.includes(element.tagName))).toBe(true);
+      expect(() => validateSlideHtml({
+        html,
+        slideId: "slide-01",
+        sourceRefs: [],
+        sourceBlockIds: new Set(),
+        assetIds: new Set(),
+      })).not.toThrow();
       expect(elements.length).toBeGreaterThan(0);
       expect(elements.some((element) => element.tagName === "script" || element.tagName === "style")).toBe(false);
       expect(elements.some((element) => element.attrs.some((attribute) => attribute.name === "data-slide-root" || attribute.name.startsWith("on") || ["src", "href", "srcset"].includes(attribute.name)))).toBe(false);

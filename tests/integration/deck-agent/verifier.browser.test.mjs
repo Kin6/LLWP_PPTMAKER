@@ -209,6 +209,164 @@ describe("browser verifier", () => {
     expect(await readdir(profileRoot)).toEqual([]);
   }, 40_000);
 
+  it("waits for asynchronous Reveal initialization before navigation and measurement", async () => {
+    const revealSlideIds = ["slide-01", "slide-02", "slide-03", "slide-04"];
+    const revealManifest = {
+      slides: revealSlideIds.map((slideId, index) => ({
+        slideId,
+        title: `Slide ${index + 1}`,
+        speakerNotes: `Explain slide ${index + 1}.`,
+        sourceRefs: [],
+      })),
+    };
+    const revealOutline = {
+      slides: revealSlideIds.map((slideId, index) => ({
+        slideId,
+        speakerNotes: `Explain slide ${index + 1}.`,
+        sourceBlockIds: [],
+      })),
+    };
+    const revealDeck = `<!doctype html>
+<meta charset="utf-8">
+<style>
+html,body{width:1920px;height:1080px;margin:0;overflow:hidden;background:#fff}
+[data-slide-id]{box-sizing:border-box;display:none;position:absolute;inset:0;width:1920px;height:1080px;overflow:hidden;background:#fff;color:#111}
+[data-slide-id].present{display:block}
+.content{margin:100px;width:600px;height:200px;background:#075ccb}
+.too-tall{height:1250px}
+</style>
+<article class="present" data-slide-id="slide-01"><div class="content">One</div></article>
+<article data-slide-id="slide-02"><div class="content">Two</div></article>
+<article data-slide-id="slide-03"><div class="content">Three</div></article>
+<article data-slide-id="slide-04"><div class="content too-tall">Four</div></article>
+<script>
+let revealReady = false;
+globalThis.Reveal = {
+  isReady() { return revealReady; },
+  initialize() {
+    return new Promise((resolve) => setTimeout(() => {
+      revealReady = true;
+      resolve();
+    }, 150));
+  },
+  slide(index) {
+    if (!revealReady) throw new Error("Reveal.slide called before initialization completed");
+    const slides = [...document.querySelectorAll("[data-slide-id]")];
+    slides.forEach((slide, slideIndex) => slide.classList.toggle("present", slideIndex === index));
+  },
+};
+globalThis.Reveal.initialize();
+</script>`;
+    const profileRoot = await mkdtemp(path.join(tmpdir(), "deck-verifier-reveal-test-"));
+    temporaryRoots.push(profileRoot);
+    const renderer = createFakeRenderer(revealDeck, revealManifest);
+    const verifier = createVerifier({
+      renderer,
+      outlineReader: async () => revealOutline,
+      profileRoot,
+      timeoutMs: 30_000,
+    });
+
+    const result = await verifier.verify({
+      jobId,
+      revisionId,
+      slideIds: revealSlideIds,
+      captureContactSheet: false,
+    });
+
+    expect(result.slides.find((slide) => slide.slideId === "slide-04")?.issues)
+      .toContain("vertical-overflow");
+    expect(result.consoleErrors).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ message: expect.stringContaining("before initialization completed") }),
+    ]));
+    expect(await readdir(profileRoot)).toEqual([]);
+  }, 40_000);
+
+  it("fails clearly when Reveal initialization never becomes ready", async () => {
+    const stalledDeck = `<!doctype html>
+<meta charset="utf-8">
+<article data-slide-id="slide-01">One</article>
+<article data-slide-id="slide-02">Two</article>
+<script>
+globalThis.Reveal = {
+  isReady() { return false; },
+  initialize() { return new Promise(() => {}); },
+  slide() { throw new Error("Reveal.slide must not run while initialization is pending"); },
+};
+globalThis.Reveal.initialize();
+</script>`;
+    const profileRoot = await mkdtemp(path.join(tmpdir(), "deck-verifier-reveal-timeout-"));
+    temporaryRoots.push(profileRoot);
+    const renderer = createFakeRenderer(stalledDeck);
+    const verifier = createVerifier({
+      renderer,
+      outlineReader: async () => outline,
+      profileRoot,
+      timeoutMs: 30_000,
+      revealReadyTimeoutMs: 100,
+    });
+
+    await expect(verifier.verify({
+      jobId,
+      revisionId,
+      slideIds,
+      captureContactSheet: false,
+    })).rejects.toThrow("Reveal initialization timed out after 100ms");
+    expect(renderer.writes).toEqual([]);
+    expect(await readdir(profileRoot)).toEqual([]);
+  }, 40_000);
+
+  it("cancels while waiting for Reveal initialization", async () => {
+    const stalledDeck = `<!doctype html>
+<meta charset="utf-8">
+<article data-slide-id="slide-01">One</article>
+<article data-slide-id="slide-02">Two</article>
+<script>
+globalThis.Reveal = {
+  isReady() { return false; },
+  initialize() {
+    setTimeout(() => console.log("reveal-initialization-pending"), 100);
+    return new Promise(() => {});
+  },
+  slide() { throw new Error("Reveal.slide must not run while initialization is pending"); },
+};
+globalThis.Reveal.initialize();
+</script>`;
+    const profileRoot = await mkdtemp(path.join(tmpdir(), "deck-verifier-reveal-abort-"));
+    temporaryRoots.push(profileRoot);
+    const controller = new AbortController();
+    const renderer = createFakeRenderer(stalledDeck);
+    const browserFactory = {
+      async launchPersistentContext(userDataDir, options) {
+        const context = await chromium.launchPersistentContext(userDataDir, options);
+        context.pages()[0].on("console", (message) => {
+          if (message.text() === "reveal-initialization-pending") {
+            controller.abort(new Error("cancelled during Reveal initialization"));
+          }
+        });
+        return context;
+      },
+    };
+    const verifier = createVerifier({
+      renderer,
+      outlineReader: async () => outline,
+      browserFactory,
+      profileRoot,
+      timeoutMs: 30_000,
+      revealReadyTimeoutMs: 20_000,
+    });
+
+    await expect(verifier.verify({
+      jobId,
+      revisionId,
+      slideIds,
+      captureContactSheet: false,
+      signal: controller.signal,
+    })).rejects.toThrow("cancelled during Reveal initialization");
+    expect(renderer.writes).toEqual([]);
+    expect(await readdir(profileRoot)).toEqual([]);
+  }, 40_000);
+
   it("honors cancellation and removes the temporary profile", async () => {
     const profileRoot = await mkdtemp(path.join(tmpdir(), "deck-verifier-abort-"));
     temporaryRoots.push(profileRoot);

@@ -1,38 +1,16 @@
 import * as csstree from "css-tree";
+import { MODEL_CSS_CONTRACT } from "./css-contract.mjs";
+import { MODEL_HTML_CONTRACT } from "./html-contract.mjs";
 
 const SLIDE_ID = /^slide-\d{2}$/;
-const ALLOWED_PROPERTIES = new Set([
-  "display", "position", "inset", "top", "right", "bottom", "left",
-  "width", "height", "min-width", "max-width", "min-height", "max-height",
-  "grid-template-columns", "grid-template-rows", "grid-column", "grid-row",
-  "gap", "row-gap", "column-gap", "align-items", "align-content",
-  "justify-items", "justify-content", "place-items", "flex", "flex-direction",
-  "flex-wrap", "order", "overflow", "box-sizing", "padding", "padding-top",
-  "padding-right", "padding-bottom", "padding-left", "margin", "margin-top",
-  "margin-right", "margin-bottom", "margin-left", "border", "border-color",
-  "border-width", "border-style", "border-radius", "background",
-  "background-color", "color", "font-family", "font-size", "font-weight",
-  "line-height", "text-align", "text-transform", "letter-spacing", "opacity",
-  "object-fit", "object-position", "aspect-ratio", "white-space", "word-break",
-  "z-index", "transform",
-]);
-const SAFE_VALUE_FUNCTIONS = new Set([
-  "rgb", "rgba", "hsl", "hsla", "calc", "min", "max", "clamp", "minmax",
-  "repeat", "fit-content", "matrix", "matrix3d", "translate", "translatex",
-  "translatey", "translatez", "translate3d", "scale", "scalex", "scaley",
-  "scalez", "scale3d", "rotate", "rotatex", "rotatey", "rotatez", "rotate3d",
-  "skew", "skewx", "skewy", "perspective", "var",
-]);
+const RESERVED_MODEL_TAG_SELECTORS = new Set(MODEL_HTML_CONTRACT.reservedTags);
+const RESERVED_MODEL_CLASS_SELECTORS = new Set(MODEL_HTML_CONTRACT.reservedCssClasses);
+const ALLOWED_PROPERTIES = new Set(MODEL_CSS_CONTRACT.allowedProperties);
+const SAFE_VALUE_FUNCTIONS = new Set(MODEL_CSS_CONTRACT.allowedValueFunctions);
 const ALLOWED_SELECTOR_NODES = new Set([
   "PseudoClassSelector", "AttributeSelector", "Combinator", "ClassSelector", "TypeSelector",
 ]);
-const REQUIRED_THEME_TOKENS = new Set([
-  "--deck-bg", "--deck-surface", "--deck-text", "--deck-muted", "--deck-primary",
-  "--deck-secondary", "--deck-accent", "--deck-positive", "--deck-negative",
-  "--deck-font-sans", "--deck-font-serif", "--deck-title-size",
-  "--deck-heading-size", "--deck-body-size", "--deck-caption-size",
-  "--deck-radius", "--deck-space", "--deck-grid-gap",
-]);
+const REQUIRED_THEME_TOKENS = new Set(MODEL_CSS_CONTRACT.themeTokens);
 const THEME_COLOR_TOKENS = new Set([
   "--deck-bg", "--deck-surface", "--deck-text", "--deck-muted", "--deck-primary",
   "--deck-secondary", "--deck-accent", "--deck-positive", "--deck-negative",
@@ -140,7 +118,9 @@ function rewriteSelectorList(prelude, slideId) {
     const first = nodes[0];
     const syntheticRoot = isSyntheticRoot(first);
     const storedRoot = isExactStoredRoot(first, slideId);
-    if (!syntheticRoot && !storedRoot) throw new Error("Every selector branch must start with :slide");
+    if (!syntheticRoot && !storedRoot) {
+      throw new Error(`Every selector branch must start with :slide; received ${describeSelectorStart(first)}`);
+    }
     if (nodes[1] && nodes[1].type !== "Combinator") {
       throw new Error("The first selector compound must be exactly :slide");
     }
@@ -154,8 +134,21 @@ function rewriteSelectorList(prelude, slideId) {
       if (node.type === "Combinator" && ![" ", ">"].includes(node.name)) {
         throw new Error(`Host-escaping combinator is forbidden: ${node.name}`);
       }
+      if (node.type === "ClassSelector") {
+        const name = csstree.ident.decode(node.name);
+        if (RESERVED_MODEL_CLASS_SELECTORS.has(name)) {
+          throw new Error(`Reserved renderer CSS selector is forbidden: .${name}`);
+        }
+      }
       if (node.type === "TypeSelector") {
-        const name = node.name.toLowerCase();
+        let name = csstree.ident.decode(node.name).toLowerCase();
+        if (name === "section") {
+          node.name = "div";
+          name = "div";
+        }
+        if (RESERVED_MODEL_TAG_SELECTORS.has(name)) {
+          throw new Error(`Reserved renderer CSS selector is forbidden: ${name}`);
+        }
         if (!/^[a-z][a-z0-9-]*$/.test(name) || ["html", "body"].includes(name)) {
           throw new Error(`Forbidden host selector: ${node.name}`);
         }
@@ -171,6 +164,15 @@ function rewriteSelectorList(prelude, slideId) {
   });
 
   prelude.children = csstree.parse(rewritten.join(","), { context: "selectorList" }).children;
+}
+
+function describeSelectorStart(node) {
+  if (!node) return "an empty selector";
+  if (node.type === "PseudoClassSelector") return `:${String(node.name).slice(0, 60)}`;
+  if (node.type === "ClassSelector") return `.${csstree.ident.decode(node.name).slice(0, 60)}`;
+  if (node.type === "IdSelector") return `#${csstree.ident.decode(node.name).slice(0, 60)}`;
+  if (node.type === "TypeSelector") return csstree.ident.decode(node.name).slice(0, 60);
+  return node.type;
 }
 
 function isSyntheticRoot(node) {

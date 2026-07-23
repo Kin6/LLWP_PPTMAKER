@@ -1,0 +1,20 @@
+:root {
+  --deck-bg: #fff6fa;
+  --deck-surface: #ffffff;
+  --deck-text: #29213b;
+  --deck-muted: #635970;
+  --deck-primary: #b92f6a;
+  --deck-secondary: #166c87;
+  --deck-accent: #9a6508;
+  --deck-positive: #267447;
+  --deck-negative: #b42318;
+  --deck-font-sans: "Noto Sans SC", Arial, sans-serif;
+  --deck-font-serif: "Noto Serif SC", Georgia, serif;
+  --deck-title-size: 80px;
+  --deck-heading-size: 52px;
+  --deck-body-size: 32px;
+  --deck-caption-size: 20px;
+  --deck-radius: 8px;
+  --deck-space: 24px;
+  --deck-grid-gap: 32px;
+}

@@ -8,7 +8,8 @@
     { "id": "academic-paper", "file": "themes/academic-paper.css" },
     { "id": "magazine-bold", "file": "themes/magazine-bold.css" },
     { "id": "tokyo-night", "file": "themes/tokyo-night.css" },
-    { "id": "pitch-deck-vc", "file": "themes/pitch-deck-vc.css" }
+    { "id": "pitch-deck-vc", "file": "themes/pitch-deck-vc.css" },
+    { "id": "playful-classroom", "file": "themes/playful-classroom.css" }
   ],
   "layouts": [
     { "id": "cover", "file": "layouts/cover.html" },

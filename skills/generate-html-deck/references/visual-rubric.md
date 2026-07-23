@@ -14,12 +14,16 @@ Remove the calibration IDs from slide order, then partition only the remaining I
 
 Render or assemble one contact sheet containing every slide and review it once at a readable scale. Record `contactSheetReviewCount: 1` and a `contactSheetReview` object with every stable ID in `slideIds` plus the observed defects in `findings`. Check:
 
+Treat the supplied visible outline as authoritative when it conflicts with the design brief. Speaker notes are intentionally omitted: never require a presenter prompt, audience interaction, or note-only phrase to appear on a slide.
+
 - canvas and safe inset;
 - overflow, clipping, and footer collisions;
 - repeated alignment and spacing;
 - contrast and minimum readable body size;
 - source markers and empty asset slots;
 - cross-slide rhythm and unintended repetition.
+- topic and audience fit: reject a generic corporate/dashboard treatment when the subject calls for a clearly different visual language;
+- dominant visual anchors and purposeful use of the full safe canvas, including no-image HTML/CSS compositions.
 
 Name the slide IDs and concrete defects found. Do not claim a contact-sheet review that was not performed. A clean review records zero findings as `findings: []`; it does not invent a defect to force a repair.
 

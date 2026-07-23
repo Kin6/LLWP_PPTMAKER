@@ -39,9 +39,11 @@ const ASSET_FILENAME = /^asset-[a-z0-9-]+\.(?:png|jpe?g|webp)$/;
 const SLIDE_ID = /^slide-\d{2}$/;
 const SLOT_ID = /^[a-z0-9-]+$/;
 const IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
+const MAX_VISUAL_REVIEW_IMAGES = 8;
 const BUNDLED_THEME_IDS = new Set([
   "minimal-white", "corporate-clean", "swiss-grid", "editorial-serif",
   "academic-paper", "magazine-bold", "tokyo-night", "pitch-deck-vc",
+  "playful-classroom",
 ]);
 const VISUAL_REVIEW_SCHEMA = Object.freeze({
   type: "object",
@@ -119,6 +121,19 @@ function serializedError(error) {
   };
 }
 
+export function formatJobFailureMessage(error) {
+  const message = String(error instanceof Error ? error.message : error?.message || error).slice(0, 2_000);
+  const preferred = typeof error?.failedSlideId === "string"
+    ? [error.failedSlideId]
+    : Array.isArray(error?.slideIds) ? error.slideIds : [];
+  const slideIds = [...new Set(preferred
+    .map((slideId) => String(slideId))
+    .filter((slideId) => /^slide-\d{2}$/.test(slideId)))]
+    .slice(0, 50);
+  if (slideIds.length === 0) return message;
+  return `页面 ${slideIds.join("、")}：${message}`.slice(0, 2_000);
+}
+
 function validateStart(jobId, options) {
   if (!JOB_ID.test(jobId)) throw new TypeError("Invalid deck worker job id");
   if (!options || typeof options !== "object" || Array.isArray(options)) {
@@ -139,9 +154,16 @@ export function attachSlideGenerationAdapters(base, { jobId, runBuildStage }) {
     remainingSlideIds: slideIds,
     calibrationSlideIds: [],
     progressStage: options.stage || "building",
+    repairReport: options.report,
   });
-  base.reviseCalibration = ({ slideIds }) => base.generateSlides(slideIds, { stage: "calibrating" });
-  base.repairSlides = (slideIds) => base.generateSlides(slideIds, { stage: "repairing" });
+  base.reviseCalibration = ({ slideIds, report }) => base.generateSlides(slideIds, {
+    stage: "calibrating",
+    report,
+  });
+  base.repairSlides = (slideIds, options = {}) => base.generateSlides(slideIds, {
+    stage: "repairing",
+    report: options.report,
+  });
   return base;
 }
 
@@ -419,6 +441,36 @@ function qaArtifactPath(artifactId) {
   return slide ? `working/qa/slides/${slide[1]}.png` : undefined;
 }
 
+function selectReviewArtifacts(screenshotArtifactIds, contactSheetArtifactId) {
+  const screenshots = [...new Set(Array.isArray(screenshotArtifactIds)
+    ? screenshotArtifactIds.filter((artifactId) => typeof artifactId === "string" && artifactId)
+    : [])];
+  if (screenshots.length > 0 && screenshots.length <= MAX_VISUAL_REVIEW_IMAGES) return screenshots;
+  if (typeof contactSheetArtifactId === "string" && contactSheetArtifactId) return [contactSheetArtifactId];
+  return screenshots.slice(0, MAX_VISUAL_REVIEW_IMAGES);
+}
+
+function summarizePriorFindings(report, slideIds) {
+  if (!report || typeof report !== "object") return [];
+  const allowed = new Set(slideIds);
+  const consoleBySlide = new Map();
+  for (const item of Array.isArray(report.consoleErrors) ? report.consoleErrors : []) {
+    if (!allowed.has(item?.slideId)) continue;
+    const messages = consoleBySlide.get(item.slideId) || [];
+    messages.push(String(item.message || "").replace(/\s+/g, " ").slice(0, 500));
+    consoleBySlide.set(item.slideId, messages);
+  }
+  return (Array.isArray(report.slides) ? report.slides : [])
+    .filter((slide) => allowed.has(slide?.slideId))
+    .map((slide) => ({
+      slideId: slide.slideId,
+      issues: [...new Set((Array.isArray(slide.issues) ? slide.issues : [])
+        .map((issue) => String(issue).replace(/\s+/g, " ").slice(0, 500)))],
+      consoleErrors: [...new Set(consoleBySlide.get(slide.slideId) || [])],
+    }))
+    .filter((slide) => slide.issues.length > 0 || slide.consoleErrors.length > 0);
+}
+
 function candidatePrefix(revisionId) {
   if (!/^\.candidate-[0-9a-f-]+$/.test(revisionId || "")) throw new Error("Invalid candidate revision");
   return `revisions/${revisionId}`;
@@ -442,14 +494,25 @@ export function createProductionRevisionDependencies({
   modelClient,
   skillLoader,
   sourceBlocks,
+  readVisibleOutline,
   signal,
 } = {}) {
   if (!JOB_ID.test(jobId || "") || !store?.readJson || !store?.writeArtifact || !store?.runExclusive || !revisions?.readCurrent
     || !renderer?.assembleStandalone || !verifier?.verify || !modelClient?.completeStructured
-    || !skillLoader?.load || !Array.isArray(sourceBlocks)) {
+    || !skillLoader?.load || !Array.isArray(sourceBlocks) || typeof readVisibleOutline !== "function") {
     throw new TypeError("Production revision dependencies are incomplete");
   }
   const sourceBlockIds = new Set(sourceBlocks.map((block) => block?.id).filter(Boolean));
+
+  async function readPriorFindings(slideIds) {
+    const current = await revisions.readCurrent(jobId);
+    const report = await store.readJson(
+      jobId,
+      `revisions/${current.revisionId}/qa/report.json`,
+      { optional: true },
+    );
+    return summarizePriorFindings(report, slideIds);
+  }
 
   async function readRevisionManifest(number, suppliedCurrent) {
     const current = suppliedCurrent || await revisions.readCurrent(jobId);
@@ -523,13 +586,27 @@ export function createProductionRevisionDependencies({
         css,
       });
     }
+    const priorFindings = await readPriorFindings(slideIds);
     const patched = await oneStructuredCall(modelClient, {
       messages: [
         {
           role: "system",
-          content: "Apply the instruction only to the supplied rootless slide fragments. Return every supplied slide exactly once. Preserve source grounding, use only approved existing asset:// IDs, and return validated slide-scoped CSS without URLs, at-rules, scripts, inline styles, or service-owned attributes.",
+          content: [
+            "Apply the instruction only to the supplied rootless slide fragments and return every supplied slide exactly once.",
+            "Preserve all visible content and source grounding unless the instruction explicitly changes content. Never add or expose speaker notes.",
+            "Use only the existing safe HTML tags and approved asset:// IDs. Never emit section, aside, script, inline styles, service-owned attributes, URLs, or at-rules.",
+            "Return complete slide-scoped CSS. Preserve valid existing rules where possible; every selector must remain scoped to the supplied slide ID or :slide, and the 1920x1080 canvas must retain exactly one 72px safe inset.",
+            "Resolve every prior finding that applies to the requested instruction without creating clipping, overlap, unreadable text, or unrelated redesign.",
+          ].join("\n\n"),
         },
-        { role: "user", content: JSON.stringify({ instruction: request.instruction, slides: inputSlides }) },
+        {
+          role: "user",
+          content: JSON.stringify({
+            instruction: request.instruction,
+            priorFindings,
+            slides: inputSlides,
+          }),
+        },
       ],
       schema: REVISION_SLIDES_PATCH_SCHEMA,
       schemaName: "deck_revision_slides",
@@ -581,25 +658,44 @@ export function createProductionRevisionDependencies({
     };
   }
 
-  async function reviewCandidate({ candidate, slideIds, signal: stageSignal }) {
-    const bytes = await store.readArtifact(
-      jobId,
-      `${candidatePrefix(candidate.revisionId)}/qa/contact-sheet.png`,
-      { encoding: null },
-    );
-    const skill = await skillLoader.load("verifying");
+  async function reviewCandidate({ candidate, slideIds, instruction, signal: stageSignal }) {
+    const prefix = candidatePrefix(candidate.revisionId);
+    const useSlideImages = slideIds.length <= MAX_VISUAL_REVIEW_IMAGES;
+    const imageEntries = useSlideImages
+      ? slideIds.map((slideId) => ({ slideId, relativePath: `${prefix}/qa/slides/${slideId}.png` }))
+      : [{ slideId: "contact-sheet", relativePath: `${prefix}/qa/contact-sheet.png` }];
+    const [images, skill, designBrief, visibleOutline, priorFindings] = await Promise.all([
+      Promise.all(imageEntries.map(async ({ slideId, relativePath }) => ({
+        name: `${slideId}.png`,
+        dataUrl: `data:image/png;base64,${(await store.readArtifact(jobId, relativePath, { encoding: null })).toString("base64")}`,
+        summary: slideId === "contact-sheet"
+          ? "Candidate revision contact sheet"
+          : `Full-resolution 1920x1080 candidate screenshot for ${slideId}`,
+      }))),
+      skillLoader.load("verifying"),
+      store.readArtifact(jobId, "design-brief.md", { optional: true }),
+      readVisibleOutline(slideIds),
+      readPriorFindings(slideIds),
+    ]);
     return oneStructuredCall(modelClient, {
       messages: [
         { role: "system", content: skill.instructions },
-        { role: "user", content: JSON.stringify({ task: "Review the candidate revision only", slideIds }) },
+        {
+          role: "user",
+          content: JSON.stringify({
+            task: "Review only the candidate revision against the requested edit and objective regressions",
+            slideIds,
+            instruction,
+            priorFindings,
+            visibleOutline,
+            lockedDesignBrief: typeof designBrief === "string" ? designBrief.slice(0, 12_000) : "",
+            reviewInstruction: "Each per-slide attachment is a full-resolution 1920x1080 screenshot named by slide ID. Confirm that the requested defect and prior findings are resolved, then report only objective regressions such as clipping, overlap, unreadable text, source loss, content loss, or broken consistency. Do not introduce unrelated stylistic preferences or fail an unchanged 20px source footer merely because it appears smaller than body text. The visible outline is authoritative and intentionally excludes speaker notes.",
+          }),
+        },
       ],
       schema: VISUAL_REVIEW_SCHEMA,
       schemaName: "deck_revision_visual_review",
-      images: [{
-        name: "candidate-contact-sheet.png",
-        dataUrl: `data:image/png;base64,${bytes.toString("base64")}`,
-        summary: "Candidate revision contact sheet",
-      }],
+      images,
       timeoutMs: 120_000,
       signal: stageSignal || signal,
     });
@@ -637,7 +733,7 @@ export async function createProductionRuntime({ command, signal, emit }) {
     { createRenderer },
     { createVerifier, mergeQaEvidence },
     { createDeckJobOrchestrator },
-    { parseOutline },
+    { parseOutline, projectVisibleOutline },
     { runBuildStage },
     { assertJobTransition, TERMINAL_JOB_STATUSES },
   ] = await Promise.all([
@@ -708,7 +804,7 @@ export async function createProductionRuntime({ command, signal, emit }) {
     return validateThemeCss(css);
   }
 
-  async function reviewVisual({ slideIds, artifactIds, label }) {
+  async function reviewVisual({ slideIds, artifactIds, label, priorReport }) {
     const images = [];
     for (const artifactId of artifactIds.filter(Boolean)) {
       const relativePath = qaArtifactPath(artifactId);
@@ -720,11 +816,32 @@ export async function createProductionRuntime({ command, signal, emit }) {
         summary: label,
       });
     }
-    const skill = await skillLoader.load("verifying");
+    const [skill, designBrief, outline] = await Promise.all([
+      skillLoader.load("verifying"),
+      store.readArtifact(command.jobId, "design-brief.md", { optional: true }),
+      readOutline(),
+    ]);
     const result = await modelClient.completeStructured({
       messages: [
         { role: "system", content: skill.instructions },
-        { role: "user", content: JSON.stringify({ task: label, slideIds }) },
+        {
+          role: "user",
+          content: JSON.stringify({
+            task: label,
+            slideIds,
+            sourceContext: {
+              topic: input.source.topic,
+              audience: input.source.audience,
+              imageEnabled: input.options?.imageEnabled === true,
+            },
+            lockedDesignBrief: typeof designBrief === "string" ? designBrief.slice(0, 12_000) : "",
+            visibleOutline: projectVisibleOutline(outline, { slideIds }),
+            priorFindings: summarizePriorFindings(priorReport, slideIds),
+            reviewInstruction: priorReport
+              ? "The visible outline is the authoritative visible-content contract and intentionally excludes speaker notes. Ignore any conflicting presenter cue in the design brief; do not fail a slide for omitting note-only content. Recheck the supplied target slides against the previous blockers. Report only blockers that remain or objective regressions introduced by the repair. Judge layout safety, legibility, topic fit, visual hierarchy, full-canvas balance, and consistency. Intentional whitespace is acceptable when the composition remains balanced."
+              : "The visible outline is the authoritative visible-content contract and intentionally excludes speaker notes. Ignore any conflicting presenter cue in the design brief; do not fail a slide for omitting note-only content. Judge layout safety, legibility, topic fit, visual hierarchy, full-canvas balance, and cross-slide consistency. Report only concrete actionable failures; intentional whitespace is acceptable when the composition remains balanced.",
+          }),
+        },
       ],
       schema: VISUAL_REVIEW_SCHEMA,
       schemaName: "deck_visual_review",
@@ -770,15 +887,17 @@ export async function createProductionRuntime({ command, signal, emit }) {
     modelClient,
     skillLoader,
     sourceBlocks,
+    readVisibleOutline: async (slideIds) => projectVisibleOutline(await readOutline(), { slideIds }),
     signal,
   });
   Object.assign(base, revisionDependencies);
 
   attachSlideGenerationAdapters(base, { jobId: command.jobId, runBuildStage });
-  base.reviewCalibration = ({ slideIds, contactSheetArtifactId }) => reviewVisual({
+  base.reviewCalibration = ({ slideIds, screenshotArtifactIds, contactSheetArtifactId, priorReport }) => reviewVisual({
     slideIds,
-    artifactIds: [contactSheetArtifactId],
+    artifactIds: selectReviewArtifacts(screenshotArtifactIds, contactSheetArtifactId),
     label: "Review calibration slides for hierarchy, density, balance, and consistency",
+    priorReport,
   });
   base.writeDefaultTheme = async () => {
     const css = await loadThemePreset("minimal-white");
@@ -793,15 +912,16 @@ export async function createProductionRuntime({ command, signal, emit }) {
       calibrationOk: report.ok === true,
     }, { signal });
   };
-  base.reviewContactSheet = ({ slideIds, contactSheetArtifactId }) => reviewVisual({
+  base.reviewContactSheet = ({ slideIds, screenshotArtifactIds, contactSheetArtifactId }) => reviewVisual({
     slideIds,
-    artifactIds: [contactSheetArtifactId],
+    artifactIds: selectReviewArtifacts(screenshotArtifactIds, contactSheetArtifactId),
     label: "Review the complete deck once for hierarchy, repetition, density, balance, and consistency",
   });
-  base.reviewRepairedSlides = ({ slideIds, screenshotArtifactIds }) => reviewVisual({
+  base.reviewRepairedSlides = ({ slideIds, screenshotArtifactIds, contactSheetArtifactId, priorReport }) => reviewVisual({
     slideIds,
-    artifactIds: screenshotArtifactIds,
-    label: "Recheck only the repaired slides",
+    artifactIds: selectReviewArtifacts(screenshotArtifactIds, contactSheetArtifactId),
+    label: "Recheck only the repaired slides in the context of the final complete deck; report only the supplied slide IDs",
+    priorReport,
   });
   base.emitAssetFallback = (slideId, slotId, error) => emit({
     stage: "generating-assets",
@@ -846,7 +966,7 @@ export async function createProductionRuntime({ command, signal, emit }) {
 
   async function fail(jobId, stage, error) {
     if (signal.aborted) return;
-    const message = String(error instanceof Error ? error.message : error).slice(0, 2_000);
+    const message = formatJobFailureMessage(error);
     await store.updateJob(jobId, { status: "failed", failedStage: stage, error: message }, { signal });
     await emit({
       stage: "failed",

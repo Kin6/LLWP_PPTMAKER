@@ -7,6 +7,7 @@ const processor = unified().use(remarkParse).use(remarkGfm);
 const SLIDE_HEADING = /^幻灯片\s+(\d+)[:：]\s*(.+)$/;
 const SOURCE_COMMENT = /^<!--\s*source:([A-Za-z0-9._-]+)\s*-->$/;
 const VISUAL_LABEL = /^(布局|版式|配图|图片提示|视觉方向|坐标|字号|颜色|动画|layout|image prompt|css|html)$/i;
+const SPEAKER_NOTE_LABELS = new Set(["演讲备注", "讲稿提示"]);
 export const NO_EXTERNAL_MATERIALS = "未提供外部材料；内容基于模型通用知识生成，重要事实需核验。";
 
 export function parseOutline(markdown, { expectedSlideCount, sourceBlockIds }) {
@@ -44,6 +45,61 @@ export function parseOutline(markdown, { expectedSlideCount, sourceBlockIds }) {
   return { title: toString(h1[0]).trim(), narrative, slides };
 }
 
+export function removeSpeakerNotes(markdown) {
+  if (typeof markdown !== "string") throw new TypeError("Outline Markdown must be a string");
+  const tree = processor.parse(markdown);
+  const ranges = [];
+  let rangeStart;
+
+  for (const node of tree.children) {
+    const offset = node.position?.start?.offset;
+    if (!Number.isInteger(offset)) throw new Error("Markdown parser did not provide source positions");
+    const label = node.type === "heading" && node.depth === 3
+      ? readHeadingLabel(node)
+      : node.type === "paragraph" ? readStrongLabel(node) : undefined;
+    const endsSection = (node.type === "heading" && node.depth <= 2) || label !== undefined;
+
+    if (rangeStart !== undefined && endsSection) {
+      ranges.push([rangeStart, offset]);
+      rangeStart = undefined;
+    }
+    if (label && SPEAKER_NOTE_LABELS.has(label)) rangeStart = offset;
+  }
+  if (rangeStart !== undefined) ranges.push([rangeStart, markdown.length]);
+  if (ranges.length === 0) return markdown;
+
+  let cursor = 0;
+  let visible = "";
+  for (const [start, end] of ranges) {
+    visible += markdown.slice(cursor, start);
+    cursor = end;
+  }
+  return `${visible}${markdown.slice(cursor)}`;
+}
+
+export function projectVisibleOutline(outline, { slideIds } = {}) {
+  if (!outline || !Array.isArray(outline.slides)) throw new TypeError("Parsed outline is required");
+  const selected = slideIds === undefined ? undefined : new Set(slideIds);
+  return {
+    title: outline.title,
+    narrative: outline.narrative,
+    slides: outline.slides
+      .filter((slide) => !selected || selected.has(slide.slideId))
+      .map((slide) => ({
+        slideId: slide.slideId,
+        number: slide.number,
+        title: slide.title,
+        claim: slide.claim,
+        markdown: removeSpeakerNotes(
+          typeof slide.visibleMarkdown === "string"
+            ? slide.visibleMarkdown
+            : typeof slide.rawMarkdown === "string" ? slide.rawMarkdown : "",
+        ),
+        sourceBlockIds: Array.isArray(slide.sourceBlockIds) ? [...slide.sourceBlockIds] : [],
+      })),
+  };
+}
+
 function parseSlide(markdown, nodes, heading, slideIndex, sourceBlockIds) {
   const match = toString(heading).trim().match(SLIDE_HEADING);
   if (!match || Number(match[1]) !== slideIndex + 1) {
@@ -76,6 +132,8 @@ function parseSlide(markdown, nodes, heading, slideIndex, sourceBlockIds) {
     if (!sourceBlockIds.has(blockId)) throw new Error(`Unknown source reference: ${blockId}`);
   }
 
+  const rawMarkdown = sliceByPositions(markdown, nodes);
+  const visibleMarkdown = removeSpeakerNotes(rawMarkdown);
   return {
     slideId,
     number: slideIndex + 1,
@@ -84,8 +142,9 @@ function parseSlide(markdown, nodes, heading, slideIndex, sourceBlockIds) {
     speakerNotes,
     sourceBlockIds: [...new Set(refs)],
     sectionLabels: [...labels.keys()],
-    rawMarkdown: sliceByPositions(markdown, nodes),
-    densityScore: scoreNodes(nodes),
+    rawMarkdown,
+    visibleMarkdown,
+    densityScore: scoreNodes(processor.parse(visibleMarkdown).children),
   };
 }
 

@@ -3,7 +3,7 @@ html,body{width:100%;height:100%;margin:0;background:#000;overflow:hidden}
 body{font-family:Arial,"PingFang SC",sans-serif}
 .reveal{width:100%;height:100%}
 .reveal .slides>section{width:var(--deck-width);height:var(--deck-height);padding:0;text-align:left}
-.deck-slide{position:relative;box-sizing:border-box;width:var(--deck-width);height:var(--deck-height);padding:var(--deck-safe-inset);overflow:hidden;background:var(--deck-bg,#fff);color:var(--deck-text,#111);font-family:var(--deck-font-sans,Arial,sans-serif)}
+.deck-slide{position:relative;box-sizing:border-box;width:var(--deck-width);height:var(--deck-height);padding:0;overflow:hidden;background:var(--deck-bg,#fff);color:var(--deck-text,#111);font-family:var(--deck-font-sans,Arial,sans-serif)}
 .deck-slide,.deck-slide *{box-sizing:border-box}
 .deck-slide h1,.deck-slide h2,.deck-slide h3,.deck-slide p,.deck-slide ul,.deck-slide ol,.deck-slide figure,.deck-slide blockquote,.deck-slide table{margin-top:0}
 .deck-slide h1{font-size:var(--deck-title-size,72px);line-height:1.08}

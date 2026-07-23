@@ -13,6 +13,7 @@ const SOURCE_ID = /^[A-Za-z0-9._-]+$/;
 const NETWORK_PROTOCOLS = new Set(["http:", "https:", "ws:", "wss:"]);
 const VIEWPORT = Object.freeze({ width: 1920, height: 1080 });
 const DEFAULT_TIMEOUT_MS = 90_000;
+const DEFAULT_REVEAL_READY_TIMEOUT_MS = 10_000;
 const DEFAULT_SCREENSHOT_BYTES = 12 * 1024 * 1024;
 const DEFAULT_TOTAL_CAPTURE_BYTES = 256 * 1024 * 1024;
 const DEFAULT_PROFILE_BYTES = 128 * 1024 * 1024;
@@ -24,6 +25,7 @@ export function createVerifier({
   outlineReader,
   profileRoot = os.tmpdir(),
   timeoutMs = DEFAULT_TIMEOUT_MS,
+  revealReadyTimeoutMs = DEFAULT_REVEAL_READY_TIMEOUT_MS,
   maxScreenshotBytes = DEFAULT_SCREENSHOT_BYTES,
   maxTotalCaptureBytes = DEFAULT_TOTAL_CAPTURE_BYTES,
   maxProfileBytes = DEFAULT_PROFILE_BYTES,
@@ -41,6 +43,7 @@ export function createVerifier({
   }
   if (typeof profileRoot !== "string" || !profileRoot) throw new TypeError("profileRoot is required");
   assertPositiveLimit(timeoutMs, "Verification timeout");
+  assertPositiveLimit(revealReadyTimeoutMs, "Reveal readiness timeout");
   assertPositiveLimit(maxScreenshotBytes, "Screenshot quota");
   assertPositiveLimit(maxTotalCaptureBytes, "Capture quota");
   assertPositiveLimit(maxProfileBytes, "Profile quota");
@@ -118,18 +121,15 @@ export function createVerifier({
         const deckPath = path.join(profileDir, "verification-deck.html");
         await abortable(fs.writeFile(deckPath, html, { flag: "wx", mode: 0o600 }), lifecycle.signal);
         await abortable(page.goto(pathToFileURL(deckPath).href, { waitUntil: "load" }), lifecycle.signal);
+        await waitForRevealReady(
+          page,
+          Math.min(timeoutMs, revealReadyTimeoutMs),
+          lifecycle.signal,
+        );
         await abortable(page.evaluate(async () => {
           if (document.fonts) await document.fonts.ready;
         }), lifecycle.signal);
         await assertProfileQuota(profileDir, maxProfileBytes);
-
-        const domSlides = await abortable(page.evaluate(collectDomReport), lifecycle.signal);
-        const domById = new Map();
-        for (const item of domSlides) {
-          const existing = domById.get(item.slideId) || [];
-          existing.push(item);
-          domById.set(item.slideId, existing);
-        }
 
         const captures = [];
         const slides = [];
@@ -149,6 +149,10 @@ export function createVerifier({
           await abortable(page.evaluate(() => new Promise((resolve) => {
             requestAnimationFrame(() => requestAnimationFrame(resolve));
           })), lifecycle.signal);
+          const reports = await abortable(
+            page.evaluate(collectDomReport, slideId),
+            lifecycle.signal,
+          );
 
           const screenshot = await abortable(page.screenshot({
             type: "png",
@@ -160,7 +164,6 @@ export function createVerifier({
           assertCaptureQuota(screenshot, maxScreenshotBytes, totalCaptureBytes, maxTotalCaptureBytes);
           totalCaptureBytes += screenshot.length;
 
-          const reports = domById.get(slideId) || [];
           const issues = reports.length === 1 ? issuesFromDom(reports[0]) : [reports.length ? "duplicate-slide-root" : "missing-slide-root"];
           if (isBlankPng(screenshot)) issues.push("blank-canvas");
           if (blockedRequests.some((request) => request.slideId === slideId)) issues.push("network-request-blocked");
@@ -311,8 +314,9 @@ function validateManifest({ manifest, outline, slideIds }) {
   if (!sameStringArray(expectedOrder, slideIds)) throw new Error("Verification slide IDs must follow manifest order");
 }
 
-function collectDomReport() {
-  const roots = [...document.querySelectorAll("[data-slide-id]")];
+function collectDomReport(targetSlideId) {
+  const roots = [...document.querySelectorAll("[data-slide-id]")]
+    .filter((root) => root.dataset.slideId === targetSlideId);
   const allIds = [...document.querySelectorAll("[id]")].map((node) => node.id);
   const duplicateIdSet = new Set(allIds.filter((id, index) => allIds.indexOf(id) !== index));
   const fontErrors = document.fonts ? [...document.fonts].filter((font) => font.status === "error").length : 0;
@@ -335,6 +339,61 @@ function collectDomReport() {
       fontErrors,
     };
   });
+}
+
+async function waitForRevealReady(page, timeoutMs, signal) {
+  await abortable(page.evaluate(async (readinessTimeoutMs) => {
+    const reveal = globalThis.Reveal;
+    if (!reveal || typeof reveal.isReady !== "function") return;
+
+    const isReady = () => {
+      try {
+        return reveal.isReady() === true;
+      } catch {
+        return false;
+      }
+    };
+    if (isReady()) return;
+
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      let pollTimer;
+      const timeoutTimer = setTimeout(() => {
+        finish(() => reject(new Error(
+          `Reveal initialization timed out after ${readinessTimeoutMs}ms`,
+        )));
+      }, readinessTimeoutMs);
+      const onReady = () => finish(resolve);
+      const cleanup = () => {
+        clearTimeout(timeoutTimer);
+        clearTimeout(pollTimer);
+        if (typeof reveal.off === "function") {
+          try {
+            reveal.off("ready", onReady);
+          } catch {
+            // Polling still provides deterministic readiness when event cleanup is unavailable.
+          }
+        }
+      };
+      const finish = (complete) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        complete();
+      };
+      const poll = () => {
+        if (isReady()) {
+          finish(resolve);
+          return;
+        }
+        pollTimer = setTimeout(poll, 16);
+      };
+
+      if (typeof reveal.on === "function") reveal.on("ready", onReady);
+      if (isReady()) finish(resolve);
+      else poll();
+    });
+  }, timeoutMs), signal);
 }
 
 function issuesFromDom(report) {

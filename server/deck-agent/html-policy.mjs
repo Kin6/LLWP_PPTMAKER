@@ -1,13 +1,10 @@
 import { parse, parseFragment, serialize } from "parse5";
 import { validateSlideCss } from "./css-policy.mjs";
+import { MODEL_HTML_CONTRACT } from "./html-contract.mjs";
 
 const SLIDE_ID = /^slide-\d{2}$/;
 const ASSET_URL = /^asset:\/\/([a-z0-9-]+)$/;
-const ALLOWED_TAGS = new Set([
-  "div", "section", "header", "footer", "h1", "h2", "h3", "p", "span",
-  "strong", "em", "small", "ul", "ol", "li", "blockquote", "table",
-  "thead", "tbody", "tr", "th", "td", "figure", "figcaption", "img",
-]);
+const ALLOWED_TAGS = new Set(MODEL_HTML_CONTRACT.allowedTags);
 const MODEL_ATTRS = new Set([
   "class", "alt", "role", "aria-label", "data-role", "data-slot",
   "data-chart-id", "data-asset-slot",
@@ -17,6 +14,7 @@ const SERVICE_OWNED_ATTRS = new Set([
   "data-slide-root", "data-slide-id", "data-source-refs", "data-density", "data-asset-state",
 ]);
 const STORED_ASSET_STATES = new Set(["empty", "resolved"]);
+const REVEAL_RESERVED_CONTAINER = "section";
 
 export function validateSlideHtml({
   html,
@@ -93,6 +91,7 @@ function validateFragment({
     nodeCount += 1;
     if (nodeCount > maxNodes || depth > maxDepth) throw new Error("HTML structure exceeds limits");
     if (!node.tagName) return;
+    normalizeRevealContainer(node);
     if (!ALLOWED_TAGS.has(node.tagName)) throw new Error(`Forbidden HTML tag: ${node.tagName}`);
 
     const attributes = new Map((node.attrs || []).map((attribute) => [attribute.name, attribute.value]));
@@ -116,6 +115,12 @@ function validateFragment({
   }
 
   return { html: serialize(fragment), nodeCount };
+}
+
+function normalizeRevealContainer(node) {
+  if (node.tagName !== REVEAL_RESERVED_CONTAINER) return;
+  node.tagName = "div";
+  node.nodeName = "div";
 }
 
 function validateAttribute({ attribute, node, mode, allowedAttrs, assetIds }) {

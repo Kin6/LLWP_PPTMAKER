@@ -6,7 +6,12 @@ import {
 
 function normalizeVisualReview(value, allowedSlideIds, label) {
   const failedSlides = value?.failedSlides ?? [];
+  const designChanges = value?.designChanges ?? [];
   if (!Array.isArray(failedSlides)) throw new Error(`${label} must return failedSlides`);
+  if (!Array.isArray(designChanges)
+    || designChanges.some((change) => typeof change !== "string" || !change.trim())) {
+    throw new Error(`${label} must return valid designChanges`);
+  }
   const allowed = new Set(allowedSlideIds);
   const normalized = failedSlides.map((item) => {
     if (!item || typeof item.slideId !== "string" || !allowed.has(item.slideId)) {
@@ -20,7 +25,10 @@ function normalizeVisualReview(value, allowedSlideIds, label) {
       reasons: [...new Set(item.reasons.map((reason) => reason.trim().slice(0, 500)))],
     };
   });
-  return { failedSlides: normalized };
+  return {
+    failedSlides: normalized,
+    designChanges: [...new Set(designChanges.map((change) => change.trim().slice(0, 500)))],
+  };
 }
 
 async function resolveSlideIds(context) {
@@ -100,12 +108,22 @@ export async function runVerificationStage(context) {
 
   const visual = normalizeVisualReview(await context.reviewContactSheet({
     contactSheetArtifactId: deterministic.contactSheetArtifactId,
+    screenshotArtifactIds: deterministic.slides
+      .map((slide) => slide.screenshotArtifactId)
+      .filter(Boolean),
     slideIds,
     maxUpstreamCalls: 1,
   }), slideIds, "Whole-deck visual review");
-  const initial = mergeQaEvidence(deterministic, visual);
+  const initial = { ...mergeQaEvidence(deterministic, visual), designChanges: visual.designChanges };
   const failed = failedSlideIds(initial);
   if (!failed.length) return { status: "ready", report: initial };
+
+  await context.store?.writeJson?.(
+    context.jobId,
+    "working/qa/initial-report.json",
+    initial,
+    { signal: context.signal },
+  );
 
   await context.transition?.(context.jobId, "repairing");
   await context.repairSlides(failed, { report: initial, maxUpstreamCalls: 1 });
@@ -113,18 +131,20 @@ export async function runVerificationStage(context) {
   const deterministicFinal = await context.verifier.verify({
     jobId: context.jobId,
     revisionId: context.revisionId,
-    slideIds: failed,
-    captureContactSheet: false,
+    slideIds,
+    captureContactSheet: true,
     signal: context.signal,
   });
   const visualFinal = normalizeVisualReview(await context.reviewRepairedSlides({
     slideIds: failed,
     screenshotArtifactIds: deterministicFinal.slides
+      .filter((slide) => failed.includes(slide.slideId))
       .map((slide) => slide.screenshotArtifactId)
       .filter(Boolean),
+    contactSheetArtifactId: deterministicFinal.contactSheetArtifactId,
+    priorReport: initial,
     maxUpstreamCalls: 1,
   }), failed, "Targeted visual review");
-  const replacement = mergeQaEvidence(deterministicFinal, visualFinal);
-  const report = mergeVerificationReports(initial, replacement, failed);
+  const report = { ...mergeQaEvidence(deterministicFinal, visualFinal), designChanges: visualFinal.designChanges };
   return { status: report.ok ? "ready" : "needs-review", report };
 }

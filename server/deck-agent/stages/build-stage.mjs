@@ -1,4 +1,8 @@
 import { z } from "zod";
+import { MODEL_CSS_CONTRACT } from "../css-contract.mjs";
+import { MODEL_HTML_CONTRACT } from "../html-contract.mjs";
+import { createImagePlan } from "../image-plan.mjs";
+import { removeSpeakerNotes } from "../outline.mjs";
 import { writeSlideInputSchema } from "../tool-registry.mjs";
 import { upstreamCallBudget } from "../upstream-budget.mjs";
 
@@ -56,6 +60,25 @@ export class BatchError extends Error {
     super(message, options);
     this.name = "BatchError";
     this.slideIds = normalizeSlideIds(slideIds, "Failed slide IDs");
+    if (options?.failedSlideId !== undefined) {
+      const [failedSlideId] = normalizeSlideIds([options.failedSlideId], "Failed slide ID");
+      if (!this.slideIds.includes(failedSlideId)) {
+        throw new Error("Failed slide ID must be included in failed slide IDs");
+      }
+      this.failedSlideId = failedSlideId;
+    }
+    if (Array.isArray(options?.failures)) {
+      this.failures = options.failures.map((failure) => {
+        const [slideId] = normalizeSlideIds([failure?.slideId], "Failed slide ID");
+        if (!this.slideIds.includes(slideId)) {
+          throw new Error("Failed slide ID must be included in failed slide IDs");
+        }
+        return {
+          slideId,
+          message: String(failure?.message || "Slide validation failed").replace(/\s+/g, " ").slice(0, 1_000),
+        };
+      });
+    }
   }
 }
 
@@ -89,15 +112,18 @@ export async function runBuildStage(context) {
   const batches = partitionSlideBatches(remainingSlideIds);
   if (batches.length === 0) return { batches, firstPass: [], retriedSlideIds: [] };
 
-  const sharedPromptContext = await resolveSharedPromptContext(context, outline);
+  const [sharedPromptContext, repairContext, visualReferenceSlides] = await Promise.all([
+    resolveSharedPromptContext(context, outline),
+    resolveRepairContext(context, remainingSlideIds),
+    resolveVisualReferenceSlides(context, continuitySlideIds),
+  ]);
   const buildBatch = typeof context.buildBatch === "function"
     ? context.buildBatch
     : (request) => runAgentBatch(context, request);
 
   const makeRequest = (slideIds, retry = false, retryErrors = []) => {
-    const readOnlySlideIds = slideIds.length === 1
-      ? nearestCalibratedNeighbor(outline, slideIds[0], continuitySlideIds)
-      : [];
+    const anchorSlideId = slideIds[Math.floor((slideIds.length - 1) / 2)];
+    const readOnlySlideIds = nearestCalibratedNeighbor(outline, anchorSlideId, continuitySlideIds);
     return {
       jobId: context.jobId,
       revisionId: context.revisionId || "working",
@@ -113,6 +139,10 @@ export async function runBuildStage(context) {
         targetSlides: projectTargetSlides(outline, slideIds),
         neighboringSlides: neighboringSlides(outline, slideIds),
         readOnlySlides: projectNeighborSlides(outline, readOnlySlideIds),
+        visualReferenceSlides: visualReferenceSlides
+          .filter((slide) => readOnlySlideIds.includes(slide.slideId)),
+        repairDesignChanges: repairContext.designChanges,
+        repairSlides: repairContext.slides.filter((slide) => slideIds.includes(slide.slideId)),
       },
     };
   };
@@ -125,15 +155,26 @@ export async function runBuildStage(context) {
   context.signal?.throwIfAborted();
 
   const retriedSlideIds = collectFailedSlideIds(firstPass, batches);
+  const retryBatches = partitionSlideBatches(retriedSlideIds);
+  let retryPass = [];
   let retryResult;
-  if (retriedSlideIds.length > 0) {
-    retryResult = await buildBatch(makeRequest(
-      retriedSlideIds,
-      true,
-      collectBatchRetryErrors(firstPass, batches),
-    ));
+  if (retryBatches.length > 0) {
+    const retryErrors = collectBatchRetryErrors(firstPass, batches);
+    retryPass = await mapConcurrent(
+      retryBatches,
+      2,
+      (slideIds) => buildBatch(makeRequest(
+        slideIds,
+        true,
+        retryErrors.filter((error) => error.slideIds.some((slideId) => slideIds.includes(slideId))),
+      )),
+    );
+    context.signal?.throwIfAborted();
+    const failedRetry = retryPass.find((result) => result.status === "rejected");
+    if (failedRetry) throw failedRetry.reason;
+    if (retryPass.length === 1) retryResult = retryPass[0].value;
   }
-  return { batches, firstPass, retriedSlideIds, retryResult };
+  return { batches, firstPass, retriedSlideIds, retryBatches, retryPass, retryResult };
 }
 
 export function createSlideBatchSchema(slideIds) {
@@ -174,6 +215,16 @@ export function buildBuildStageMessages(promptContext, skill = {}, options = {})
         "Return one JSON object matching the supplied outputSchema. Do not return an agent or tool-call envelope, Markdown fences, or explanatory text.",
         "The slides array must contain every requiredSlideId exactly once and in the listed order. Generate complete html, css, assetSlots, and charts fields for every slide; assetSlots and charts must be [] when unused.",
         "Generate only the required slide IDs. Read-only slides provide continuity and must never be returned or rewritten.",
+        "Use only htmlContract.allowedTags in HTML; every unlisted tag is invalid. htmlContract.reservedTags belong to the server and must never appear in model HTML or CSS selectors. CSS selectors must also never reference htmlContract.reservedCssClasses.",
+        "Each css field is per-slide CSS, not theme CSS. Every comma-separated selector branch must start exactly with :slide. Never emit :root, bare selector branches, or custom properties; the server-owned theme is already locked.",
+        "Follow imagePlan exactly. Return at most imagePlan.maxAssetSlotsPerSlide asset slots on allowed pages, and return assetSlots: [] for every page outside imagePlan.assetSlotsAllowedSlideIds.",
+        "Speaker notes and 讲稿提示 are server-owned metadata and are intentionally absent from targetSlides. Never invent, render, paraphrase, hide, or copy presenter cues into any generated field.",
+        "Never emit a section element or a section type selector. Reveal owns section for slide navigation; use div or article containers instead.",
+        "When repairSlides is non-empty, repair each supplied previousHtml and previousCss against every listed issue and the shared repairDesignChanges. Preserve correct content and the locked design direction, change only what is needed, and return a complete replacement for every required slide. Never ignore an issue or blindly reproduce the previous layout. Do not fix clipping or overflow by deleting the dominant visual anchor or collapsing the composition into the upper half; resize, reposition, or rebuild that anchor inside the safe canvas.",
+        "Treat every slide as a designed 1920x1080 composition, not a document page. Use the locked slide composition map and visual motifs. Give each slide one dominant visual anchor, distribute content across the safe canvas, and reserve clear separation above the source footer; never leave the lower half accidentally empty or let content touch or cross the safe boundary.",
+        "The server-owned :slide root is an unpadded 1920x1080 canvas. Apply the 72px safe inset exactly once in the generated composition, either on the outermost composition wrapper or through explicit positions. Never add another four-sided safe inset inside an already inset full-canvas wrapper.",
+        "Avoid repeated header bars, bordered text boxes, and uniform card grids as the main visual system. When imagePlan generation and approved assets are both unavailable, create meaningful topic-linked visuals with allowed HTML elements and CSS geometry; do not imitate an image with a blank placeholder.",
+        "visualReferenceSlides contains read-only calibrated HTML/CSS visual DNA. Match its typography, spacing, motif treatment, and component language without returning or rewriting those reference IDs. Stored CSS selectors may already contain server slide IDs; emit only fresh :slide-scoped CSS for target slides.",
         "Use the locked design brief consistently. Theme values may be referenced only as var(--deck-*) tokens named by that brief; never invent custom properties.",
         String(promptContext.htmlCssContract || ""),
       ].filter(Boolean).join("\n\n"),
@@ -187,11 +238,14 @@ export function buildBuildStageMessages(promptContext, skill = {}, options = {})
         ...(options.retry ? {
           retryInstruction: "The previous batch failed protocol or page validation. Regenerate the complete current target batch and obey outputSchema exactly.",
           validationErrors: Array.isArray(options.retryErrors) ? options.retryErrors : [],
+          validationRemediation: buildValidationRemediation(options.retryErrors),
         } : {}),
+        htmlContract: MODEL_HTML_CONTRACT,
+        cssContract: MODEL_CSS_CONTRACT,
         outputTemplate: {
           slides: targetSlideIds.map((slideId) => ({
             slideId,
-            html: "<section class=\"slide-content\"><!-- complete rootless slide markup --></section>",
+            html: "<div class=\"slide-content\"><!-- complete rootless slide markup --></div>",
             css: ":slide .slide-content{display:grid}",
             assetSlots: [],
             charts: [],
@@ -208,7 +262,8 @@ async function runAgentBatch(context, request) {
     throw new TypeError("Build stage requires buildBatch or runner/tool dependencies");
   }
   const progressStage = resolveProgressStage(context.progressStage);
-  const skill = await context.skillLoader?.load?.("building") || {};
+  const skillStage = progressStage === "repairing" ? "repairing" : "building";
+  const skill = await context.skillLoader?.load?.(skillStage) || {};
   try {
     const schema = createSlideBatchSchema(request.targetSlideIds);
     const stageTools = context.tools.forStage("building", {
@@ -236,16 +291,38 @@ async function runAgentBatch(context, request) {
       emit: context.emit,
     });
     const slides = validateSlideBatch(result.value, request.targetSlideIds, stageTools.write_slide.schema);
+    const failures = [];
+    let completed = 0;
     for (let index = 0; index < slides.length; index += 1) {
       const slide = slides[index];
       context.signal?.throwIfAborted();
-      await stageTools.write_slide.execute(slide, {
-        jobId: context.jobId,
-        stage: progressStage,
-        signal: context.signal,
-        emit: context.emit,
-      });
-      await emitSlideWriteProgress(context.emit, progressStage, slide.slideId, index + 1, slides.length);
+      try {
+        await stageTools.write_slide.execute(slide, {
+          jobId: context.jobId,
+          stage: progressStage,
+          signal: context.signal,
+          emit: context.emit,
+        });
+      } catch (error) {
+        failures.push({
+          slideId: slide.slideId,
+          message: error?.message || `Slide ${slide.slideId} failed validation`,
+        });
+        continue;
+      }
+      completed += 1;
+      await emitSlideWriteProgress(context.emit, progressStage, slide.slideId, completed, slides.length);
+    }
+    if (failures.length > 0) {
+      const failedSlideIds = failures.map((failure) => failure.slideId);
+      throw new BatchError(
+        failedSlideIds,
+        failures.map((failure) => `${failure.slideId}: ${failure.message}`).join("; "),
+        {
+          failures,
+          ...(failures.length === 1 ? { failedSlideId: failures[0].slideId } : {}),
+        },
+      );
     }
     const incomplete = await incompleteSlideIds(context, request.slideIds);
     if (incomplete.length) throw new BatchError(incomplete, "Slide batch left incomplete page checkpoints");
@@ -260,14 +337,56 @@ async function runAgentBatch(context, request) {
 function collectBatchRetryErrors(results, batches) {
   return results.flatMap((result, index) => {
     if (result?.status !== "rejected") return [];
+    const granular = Array.isArray(result.reason?.failures)
+      ? result.reason.failures.filter((failure) => batches[index].includes(failure?.slideId))
+      : [];
+    if (granular.length > 0) {
+      return granular.map((failure) => ({
+        slideIds: [failure.slideId],
+        failedSlideId: failure.slideId,
+        message: String(failure.message || "Slide validation failed").replace(/\s+/g, " ").slice(0, 1_000),
+      }));
+    }
     const message = String(result.reason?.message || result.reason || "Slide batch failed")
       .replace(/\s+/g, " ")
       .slice(0, 1_000);
     const reported = Array.isArray(result.reason?.slideIds)
       ? result.reason.slideIds.filter((slideId) => batches[index].includes(slideId))
       : [];
-    return [{ slideIds: reported.length ? reported : [...batches[index]], message }];
+    const failedSlideId = result.reason?.failedSlideId;
+    return [{
+      slideIds: reported.length ? reported : [...batches[index]],
+      ...(typeof failedSlideId === "string" ? { failedSlideId } : {}),
+      message,
+    }];
   });
+}
+
+function buildValidationRemediation(retryErrors) {
+  const messages = Array.isArray(retryErrors)
+    ? retryErrors.map((item) => String(item?.message || ""))
+    : [];
+  const forbiddenTags = [...new Set(messages.flatMap((message) => (
+    [...message.matchAll(/Forbidden HTML tag:\s*([a-z0-9-]+)/gi)].map((match) => match[1].toLowerCase())
+  )))];
+  const remediation = [];
+  if (forbiddenTags.length > 0) {
+    remediation.push(
+      `Remove every forbidden tag: ${forbiddenTags.join(", ")}.`,
+      "Delete speaker-note or notes-container content instead of moving it into another visible element.",
+      `For legitimate visible side content, replace only the wrapper with ${MODEL_HTML_CONTRACT.fallbackContainerTags.join(" or ")} and update matching CSS selectors.`,
+    );
+  }
+  if (messages.some((message) => /selector branch must start with :slide|first selector compound must be exactly :slide/i.test(message))) {
+    remediation.push(
+      "Delete every :root rule from each per-slide css field; theme tokens are already provided by the server-owned theme.",
+      "Rewrite every comma-separated selector branch so it starts exactly with :slide; repeat :slide after every comma.",
+      "Use forms such as :slide .title{...} and :slide header, :slide footer{...}; never use a bare .class, element, or :root branch.",
+    );
+  }
+  if (remediation.length === 0) remediation.push("Fix every reported validation error.");
+  remediation.push("Validate every returned HTML and CSS field against htmlContract and cssContract before responding.");
+  return remediation;
 }
 
 function validateSlideBatch(value, targetSlideIds, writeSlideSchema) {
@@ -353,13 +472,80 @@ async function resolveSharedPromptContext(context, outline) {
   const allowedAssets = context.allowedAssets
     ?? await context.listAllowedAssets?.()
     ?? [];
+  const options = context.input?.options || context.options || {};
   return {
     title: outline.title,
     narrative: outline.narrative,
+    topic: context.input?.source?.topic || outline.title,
+    audience: context.input?.source?.audience || "",
     lockedDesignBriefSummary,
     allowedAssets,
+    imagePlan: createImagePlan(outline, options, allowedAssets),
     htmlCssContract: context.htmlCssContract || "Rootless validated HTML and slide-scoped validated CSS only.",
   };
+}
+
+async function resolveRepairContext(context, slideIds) {
+  if (!context.repairReport) return { designChanges: [], slides: [] };
+  const report = context.repairReport;
+  const reportSlides = new Map((Array.isArray(report.slides) ? report.slides : [])
+    .map((slide) => [slide?.slideId, slide]));
+  const consoleErrors = Array.isArray(report.consoleErrors) ? report.consoleErrors : [];
+
+  const designChanges = (Array.isArray(report.designChanges) ? report.designChanges : [])
+    .map((change) => String(change).replace(/\s+/g, " ").slice(0, 1_000));
+  const slides = await Promise.all(slideIds.map(async (slideId) => {
+    const issues = [
+      ...(Array.isArray(reportSlides.get(slideId)?.issues) ? reportSlides.get(slideId).issues : []),
+      ...consoleErrors
+        .filter((error) => error?.slideId === slideId)
+        .map((error) => `console:${String(error.message || "Unknown console error")}`),
+    ].map((issue) => String(issue).replace(/\s+/g, " ").slice(0, 1_000));
+    const [previousHtml, previousCss] = await Promise.all([
+      context.store?.readArtifact?.(
+        context.jobId,
+        `working/slides/${slideId}.html`,
+        { optional: true },
+      ),
+      context.store?.readArtifact?.(
+        context.jobId,
+        `working/slides/${slideId}.css`,
+        { optional: true },
+      ),
+    ]);
+    return {
+      slideId,
+      issues: [...new Set(issues)],
+      previousHtml: typeof previousHtml === "string" ? previousHtml.slice(0, 200_000) : "",
+      previousCss: typeof previousCss === "string" ? previousCss.slice(0, 120_000) : "",
+    };
+  }));
+  return { designChanges: [...new Set(designChanges)], slides };
+}
+
+async function resolveVisualReferenceSlides(context, slideIds) {
+  if (!slideIds.length || typeof context.store?.readArtifact !== "function") return [];
+  const references = await Promise.all(slideIds.map(async (slideId) => {
+    const [html, css] = await Promise.all([
+      context.store.readArtifact(
+        context.jobId,
+        `working/slides/${slideId}.html`,
+        { optional: true },
+      ),
+      context.store.readArtifact(
+        context.jobId,
+        `working/slides/${slideId}.css`,
+        { optional: true },
+      ),
+    ]);
+    if (typeof html !== "string" || typeof css !== "string") return undefined;
+    return {
+      slideId,
+      html: html.slice(0, 200_000),
+      css: css.slice(0, 120_000),
+    };
+  }));
+  return references.filter(Boolean);
 }
 
 async function incompleteSlideIds(context, slideIds) {
@@ -393,7 +579,11 @@ function projectTargetSlides(outline, slideIds) {
     slideId: slide.slideId,
     title: slide.title,
     claim: slide.claim,
-    rawMarkdown: slide.rawMarkdown,
+    rawMarkdown: removeSpeakerNotes(
+      typeof slide.visibleMarkdown === "string"
+        ? slide.visibleMarkdown
+        : typeof slide.rawMarkdown === "string" ? slide.rawMarkdown : "",
+    ),
   }));
 }
 

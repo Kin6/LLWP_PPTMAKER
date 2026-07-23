@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { validateSlideCss, validateThemeCss } from "../../../server/deck-agent/css-policy.mjs";
+import { MODEL_HTML_CONTRACT } from "../../../server/deck-agent/html-contract.mjs";
 
 const attacks = JSON.parse(readFileSync(new URL("../../fixtures/security/css-attacks.json", import.meta.url), "utf8"));
 const completeThemeCss = ":root{--deck-bg:#ffffff;--deck-surface:#f4f5f7;--deck-text:#111111;--deck-muted:#555555;--deck-primary:#075ccb;--deck-secondary:#243447;--deck-accent:#d9363e;--deck-positive:#14804a;--deck-negative:#b42318;--deck-font-sans:Arial,sans-serif;--deck-font-serif:Georgia,serif;--deck-title-size:72px;--deck-heading-size:48px;--deck-body-size:30px;--deck-caption-size:20px;--deck-radius:8px;--deck-space:24px;--deck-grid-gap:32px;}";
@@ -13,6 +14,7 @@ const bundledThemes = [
   "magazine-bold",
   "tokyo-night",
   "pitch-deck-vc",
+  "playful-classroom",
 ];
 
 describe("slide CSS policy", () => {
@@ -20,16 +22,48 @@ describe("slide CSS policy", () => {
     expect(() => validateSlideCss({ css, slideId: "slide-01" })).toThrow();
   });
 
-  it("rewrites every rooted selector branch to the exact server-owned slide", () => {
+  it("rewrites rooted selector branches and normalizes legacy section selectors", () => {
     const result = validateSlideCss({
       css: ":slide .title, :slide > section h2 { display:grid; color:#111111; gap:24px; letter-spacing:0 }",
       slideId: "slide-01",
     });
 
     expect(result.css).toContain('[data-slide-id="slide-01"] .title');
-    expect(result.css).toContain('[data-slide-id="slide-01"]>section h2');
+    expect(result.css).toContain('[data-slide-id="slide-01"]>div h2');
+    expect(result.css).not.toContain("section");
     expect(result.css).not.toContain(":slide");
     expect(result.ruleCount).toBe(1);
+  });
+
+  it("identifies the invalid selector start without echoing the full rule", () => {
+    expect(() => validateSlideCss({
+      css: ":root{color:#111111}",
+      slideId: "slide-01",
+    })).toThrow("Every selector branch must start with :slide; received :root");
+    expect(() => validateSlideCss({
+      css: ".cover{display:grid;color:#111111}",
+      slideId: "slide-01",
+    })).toThrow("Every selector branch must start with :slide; received .cover");
+  });
+
+  it("rejects exact renderer-owned speaker-note selectors without blocking similar class names", () => {
+    expect(MODEL_HTML_CONTRACT.reservedTags).toContain("aside");
+    expect(MODEL_HTML_CONTRACT.reservedCssClasses).toContain("notes");
+    for (const css of [
+      ":slide aside{display:block}",
+      ":slide > ASIDE.notes{display:block}",
+      String.raw`:slide a\73 ide{display:block}`,
+      ":slide .notes.notes{display:block}",
+      String.raw`:slide .n\6f tes{display:block}`,
+    ]) {
+      expect(() => validateSlideCss({ css, slideId: "slide-01" }))
+        .toThrow(/reserved renderer CSS selector/i);
+    }
+
+    expect(() => validateSlideCss({
+      css: ":slide .speaker-notes-copy, :slide .notes-summary{display:block}",
+      slideId: "slide-01",
+    })).not.toThrow();
   });
 
   it("rejects invalid slide identity and enforces byte and rule limits", () => {
@@ -58,6 +92,30 @@ describe("slide CSS policy", () => {
       css: ":slide .title{color:var(--deck-primary,#ffffff)}",
       slideId: "slide-01",
     })).toThrow(/theme token reference/i);
+  });
+
+  it("allows directional borders used by slide dividers", () => {
+    const result = validateSlideCss({
+      css: ":slide .top{border-top:2px solid var(--deck-primary)}:slide .right{border-right:1px solid var(--deck-muted)}:slide .bottom{border-bottom:3px solid var(--deck-accent)}:slide .left{border-left:4px solid var(--deck-positive)}",
+      slideId: "slide-01",
+    });
+
+    expect(result.css).toContain("border-top:2px solid var(--deck-primary)");
+    expect(result.css).toContain("border-right:1px solid var(--deck-muted)");
+    expect(result.css).toContain("border-bottom:3px solid var(--deck-accent)");
+    expect(result.css).toContain("border-left:4px solid var(--deck-positive)");
+  });
+
+  it("allows directional border longhands equivalent to allowed border shorthands", () => {
+    const result = validateSlideCss({
+      css: ":slide .top{border-top-color:var(--deck-primary);border-top-style:solid;border-top-width:2px}:slide .right{border-right-color:var(--deck-muted);border-right-style:dashed;border-right-width:1px}:slide .bottom{border-bottom-color:var(--deck-accent);border-bottom-style:solid;border-bottom-width:3px}:slide .left{border-left-color:var(--deck-positive);border-left-style:solid;border-left-width:4px}",
+      slideId: "slide-01",
+    });
+
+    expect(result.css).toContain("border-top-color:var(--deck-primary)");
+    expect(result.css).toContain("border-right-style:dashed");
+    expect(result.css).toContain("border-bottom-width:3px");
+    expect(result.css).toContain("border-left-color:var(--deck-positive)");
   });
 });
 

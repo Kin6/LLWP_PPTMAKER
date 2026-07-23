@@ -191,6 +191,65 @@ describe("useDeckAgentJob", () => {
     unmount();
   });
 
+  it("continues replaying after a historical terminal event from an earlier attempt", async () => {
+    vi.useFakeTimers();
+    window.history.replaceState(null, "", `/?job=${jobId}`);
+    api.getDeckJob.mockResolvedValue(snapshot({
+      status: "ready",
+      lastSeq: 5,
+      revision: 1,
+      actions: {
+        canCancel: false,
+        canRetry: false,
+        canMessage: true,
+        canUndo: false,
+        canDownload: true,
+      },
+    }));
+    api.streamDeckJobEvents
+      .mockImplementationOnce(async (
+        _id: string,
+        _after: number,
+        _signal: AbortSignal,
+        onEvent: (value: DeckJobEvent) => void,
+      ) => {
+        onEvent(event({ seq: 1, stage: "failed", type: "job", status: "failed" }));
+      })
+      .mockImplementationOnce(async (
+        _id: string,
+        _after: number,
+        _signal: AbortSignal,
+        onEvent: (value: DeckJobEvent) => void,
+      ) => {
+        onEvent(event({ seq: 2, stage: "calibrating", type: "job", status: "queued" }));
+        onEvent(event({ seq: 3, stage: "building", type: "stage", status: "done" }));
+        onEvent(event({ seq: 5, stage: "ready", type: "job", status: "done", revision: 1 }));
+      });
+
+    const { result, unmount } = renderHook(() => useDeckAgentJob());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+      await Promise.resolve();
+    });
+    expect(result.current.state.lastSeq).toBe(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250);
+      await Promise.resolve();
+    });
+    expect(result.current.state.lastSeq).toBe(5);
+    expect(api.streamDeckJobEvents).toHaveBeenCalledTimes(2);
+    expect(api.streamDeckJobEvents).toHaveBeenNthCalledWith(
+      2,
+      jobId,
+      1,
+      expect.any(AbortSignal),
+      expect.any(Function),
+    );
+    expect(result.current.state.events.map((item) => item.seq)).toEqual([1, 2, 3, 5]);
+
+    unmount();
+  });
+
   it("aborts in-flight restoration and transport work during StrictMode cleanup", async () => {
     window.history.replaceState(null, "", `/?job=${jobId}`);
     const restoreSignals: AbortSignal[] = [];

@@ -92,11 +92,11 @@ export type StyleProfile = {
 export const styleProfiles: StyleProfile[] = [
   {
     id: "blank",
-    name: "空白模板",
-    description: "不提供风格引导，只按内容组织中性版面。",
+    name: "智能匹配",
+    description: "根据主题与听众自动选择视觉语言；也可手动指定风格。",
     image: "",
     palette: ["#FBFBF8", "#191B1D", "#D8D9D4", "#6E716F"],
-    prompt: "content-led neutral presentation composition with no prescribed palette or decorative style",
+    prompt: "content-adaptive presentation composition whose visual language follows the topic and audience",
   },
   {
     id: "product-calm",

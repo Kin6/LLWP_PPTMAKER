@@ -15,7 +15,12 @@ import {
 import { createDeckJobRouter } from "../../../server/deck-agent/routes.mjs";
 import * as workerEntry from "../../../server/deck-agent/worker-entry.mjs";
 
-const { attachSlideGenerationAdapters, createWorkerExecutor, runWorkerCommand } = workerEntry;
+const {
+  attachSlideGenerationAdapters,
+  createWorkerExecutor,
+  formatJobFailureMessage,
+  runWorkerCommand,
+} = workerEntry;
 
 const validRequest = {
   source: {
@@ -419,6 +424,18 @@ describe("HTML deck recovery, cancellation, and event replay", () => {
 });
 
 describe("HTML deck worker executor", () => {
+  it("formats a public failure with validated slide IDs and no private cause content", () => {
+    const error = new Error("Forbidden HTML tag: aside", {
+      cause: new Error("PRIVATE_HTML_AND_MODEL_RESPONSE"),
+    });
+    error.slideIds = ["slide-01", "slide-02", "../../secret"];
+    error.failedSlideId = "slide-01";
+
+    expect(formatJobFailureMessage(error)).toBe("页面 slide-01：Forbidden HTML tag: aside");
+    expect(formatJobFailureMessage(new Error("ordinary failure"))).toBe("ordinary failure");
+    expect(formatJobFailureMessage(error)).not.toContain("PRIVATE_HTML_AND_MODEL_RESPONSE");
+  });
+
   it("passes the owning stage through each slide-generation adapter", async () => {
     const runBuildStage = vi.fn(async () => ({}));
     const base = { signal: new AbortController().signal };
@@ -429,8 +446,10 @@ describe("HTML deck worker executor", () => {
 
     await base.generateSlides(["slide-01"]);
     await base.generateSlides(["slide-02"], { stage: "calibrating" });
-    await base.reviseCalibration({ slideIds: ["slide-03"] });
-    await base.repairSlides(["slide-04"]);
+    const calibrationReport = { slides: [{ slideId: "slide-03", issues: ["visual:weak hierarchy"] }] };
+    const repairReport = { slides: [{ slideId: "slide-04", issues: ["vertical-overflow"] }] };
+    await base.reviseCalibration({ slideIds: ["slide-03"], report: calibrationReport });
+    await base.repairSlides(["slide-04"], { report: repairReport });
 
     expect(runBuildStage.mock.calls.map(([context]) => ({
       slideIds: context.remainingSlideIds,
@@ -441,6 +460,8 @@ describe("HTML deck worker executor", () => {
       { slideIds: ["slide-03"], progressStage: "calibrating" },
       { slideIds: ["slide-04"], progressStage: "repairing" },
     ]);
+    expect(runBuildStage.mock.calls[2][0].repairReport).toBe(calibrationReport);
+    expect(runBuildStage.mock.calls[3][0].repairReport).toBe(repairReport);
   });
 
   it("uses bounded worker resources and sends no configuration through workerData", async () => {

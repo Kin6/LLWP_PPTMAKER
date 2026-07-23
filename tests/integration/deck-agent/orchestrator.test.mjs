@@ -49,8 +49,10 @@ describe("whole-deck verification", () => {
       { slideId: "slide-03", issues: [], screenshotArtifactId: "shot-03" },
     ]);
     const repaired = report([
+      { slideId: "slide-01", issues: [], screenshotArtifactId: "shot-01-final" },
       { slideId: "slide-02", issues: [], screenshotArtifactId: "shot-02-fixed" },
-    ], { contactSheetArtifactId: undefined });
+      { slideId: "slide-03", issues: [], screenshotArtifactId: "shot-03-fixed" },
+    ], { contactSheetArtifactId: "contact-sheet-fixed" });
     const verifier = { verify: vi.fn().mockResolvedValueOnce(initial).mockResolvedValueOnce(repaired) };
     const context = {
       jobId,
@@ -72,18 +74,26 @@ describe("whole-deck verification", () => {
     const result = await runVerificationStage(context);
 
     expect(context.reviewContactSheet).toHaveBeenCalledTimes(1);
+    expect(context.reviewContactSheet).toHaveBeenCalledWith({
+      slideIds: ["slide-01", "slide-02", "slide-03"],
+      screenshotArtifactIds: ["shot-01", "shot-02", "shot-03"],
+      contactSheetArtifactId: "contact-sheet",
+      maxUpstreamCalls: 1,
+    });
     expect(context.repairSlides).toHaveBeenCalledTimes(1);
     expect(context.repairSlides).toHaveBeenCalledWith(
       ["slide-02", "slide-03"],
       expect.objectContaining({ report: expect.any(Object), maxUpstreamCalls: 1 }),
     );
     expect(verifier.verify).toHaveBeenNthCalledWith(2, expect.objectContaining({
-      slideIds: ["slide-02", "slide-03"],
-      captureContactSheet: false,
+      slideIds: ["slide-01", "slide-02", "slide-03"],
+      captureContactSheet: true,
     }));
     expect(context.reviewRepairedSlides).toHaveBeenCalledWith({
       slideIds: ["slide-02", "slide-03"],
-      screenshotArtifactIds: ["shot-02-fixed"],
+      screenshotArtifactIds: ["shot-02-fixed", "shot-03-fixed"],
+      contactSheetArtifactId: "contact-sheet-fixed",
+      priorReport: expect.objectContaining({ ok: false }),
       maxUpstreamCalls: 1,
     });
     expect(result.status).toBe("needs-review");

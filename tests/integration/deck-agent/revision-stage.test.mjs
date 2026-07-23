@@ -189,9 +189,18 @@ describe("revision worker wiring", () => {
     const verifier = {
       verify: vi.fn(async ({ revisionId, slideIds }) => {
         await store.writeArtifact(jobId, `revisions/${revisionId}/qa/contact-sheet.png`, Buffer.from("contact"));
+        await Promise.all(slideIds.map((slideId) => store.writeArtifact(
+          jobId,
+          `revisions/${revisionId}/qa/slides/${slideId}.png`,
+          Buffer.from(`full-resolution-${slideId}`),
+        )));
         return {
           ok: qaOk,
-          slides: slideIds.map((slideId) => ({ slideId, issues: qaOk ? [] : ["overflow"] })),
+          slides: slideIds.map((slideId) => ({
+            slideId,
+            issues: qaOk ? [] : ["overflow"],
+            screenshotArtifactId: `candidate-${slideId}`,
+          })),
           consoleErrors: [],
           contactSheetArtifactId: "candidate-contact-sheet",
         };
@@ -232,6 +241,11 @@ describe("revision worker wiring", () => {
       modelClient,
       skillLoader,
       sourceBlocks,
+      readVisibleOutline: vi.fn(async (slideIds) => ({
+        title: "Visible outline",
+        narrative: "Evidence to action",
+        slides: slideIds.map((slideId) => ({ slideId, title: "Before", markdown: "Visible content" })),
+      })),
       signal,
     });
     const orchestrator = createDeckJobOrchestrator({
@@ -253,6 +267,20 @@ describe("revision worker wiring", () => {
     expect((await store.readJob(jobId)).revision).toBe(2);
     expect(await store.readArtifact(jobId, "revisions/revision-000002/slides/slide-01.html")).toContain("After");
     expect(await store.readArtifact(jobId, "slides-content.md")).toBe(outline);
+    const patchRequest = JSON.parse(modelClient.completeStructured.mock.calls[1][0].messages.at(-1).content);
+    expect(patchRequest).toMatchObject({ instruction: "Make the title direct", priorFindings: [] });
+    const reviewCall = modelClient.completeStructured.mock.calls[2][0];
+    expect(reviewCall.images).toEqual([expect.objectContaining({
+      name: "slide-01.png",
+      summary: expect.stringMatching(/1920x1080.*slide-01/i),
+    })]);
+    const reviewRequest = JSON.parse(reviewCall.messages.at(-1).content);
+    expect(reviewRequest).toMatchObject({
+      instruction: "Make the title direct",
+      priorFindings: [],
+      visibleOutline: { title: "Visible outline" },
+    });
+    expect(reviewRequest.reviewInstruction).toMatch(/full-resolution 1920x1080/i);
 
     await revisions.undo(jobId, { expectedRevision: 2 });
     expect((await revisions.readCurrent(jobId)).number).toBe(1);

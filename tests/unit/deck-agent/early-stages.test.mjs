@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createAgentRunner } from "../../../server/deck-agent/agent-runner.mjs";
 import { createToolRegistry } from "../../../server/deck-agent/tool-registry.mjs";
 import { runOutlineStage } from "../../../server/deck-agent/stages/outline-stage.mjs";
-import { runDesignStage } from "../../../server/deck-agent/stages/design-stage.mjs";
+import { runDesignStage, selectThemeHint } from "../../../server/deck-agent/stages/design-stage.mjs";
 
 const sourceBlocks = [{ id: "block-a", type: "paragraph", text: "EVIDENCE_BODY_42" }];
 const validOutline = `# Test deck
@@ -44,6 +44,7 @@ const formattedTheme = validTheme
   .replace(/(--[a-z-]+):/g, "$1: ")
   .replace(/;/g, ";\n  ")
   .replace(/}$/, "\n}");
+const validDesignBrief = "# Direction\nTypography scale; palette; grid; spacing; image grammar; chart grammar; motion level; visual motif vocabulary; slide composition map; prohibited patterns.";
 
 function memoryStore() {
   const files = new Map();
@@ -99,7 +100,8 @@ function baseContext(overrides = {}) {
 describe("outline and design stages", () => {
   it("passes a complete Markdown template and accepts topic-only outlines", async () => {
     const context = baseContext({ sourceBlocks: [] });
-    context.runner.runStage.mockImplementationOnce(async ({ allowedTools, messages }) => {
+    context.runner.runStage.mockImplementationOnce(async ({ allowedTools, messages, requiredToolName }) => {
+      expect(requiredToolName).toBe("write_outline");
       const prompt = JSON.stringify(messages);
       expect(prompt).toContain("# 演示文稿标题");
       expect(prompt).toContain("## 幻灯片 1：页面标题");
@@ -196,17 +198,30 @@ describe("outline and design stages", () => {
 
   it("creates one design direction with one bounded model call and no confirmation", async () => {
     const context = baseContext();
+    context.input.source.slideCount = 8;
+    context.input.options = { imageEnabled: true, imageCount: 3 };
     context.store.files.set("slides-content.md", validOutline);
     context.runner.runStage.mockImplementationOnce(async ({ allowedTools, messages }) => {
       const prompt = JSON.stringify(messages);
       expect(prompt).toContain("corporate-clean");
       expect(prompt).toContain("# Test deck");
       expect(prompt).toContain("outlineMarkdown");
+      expect(prompt).toContain("用户材料");
+      expect(prompt).toContain("<!-- source:block-a -->");
+      expect(prompt).not.toContain("解释结论的背景");
+      expect(JSON.parse(messages.at(-1).content).outlineMarkdown).not.toContain("演讲备注");
       expect(prompt).toContain("write_theme");
       expect(prompt).toContain("designBriefMarkdown");
+      expect(prompt).toMatch(/1920x1080.*72px safe inset/i);
+      expect(prompt).toMatch(/at most 3 local images/i);
+      expect(JSON.parse(messages.at(-1).content).imagePolicy).toMatchObject({
+        generationEnabled: true,
+        generatedImageBudget: 3,
+        maxPerSlide: 1,
+      });
       expect(Object.keys(allowedTools)).toEqual(["write_theme"]);
       await allowedTools.write_theme.execute({
-        designBriefMarkdown: "# Direction\nTypography scale; palette; grid; spacing; image grammar; chart grammar; motion level; prohibited patterns.",
+        designBriefMarkdown: validDesignBrief,
       });
       return { upstreamCalls: 1 };
     });
@@ -226,6 +241,24 @@ describe("outline and design stages", () => {
     expect(context.waitForUser).not.toHaveBeenCalled();
   });
 
+  it("selects a playful bundled theme only for a matching topic and young audience", () => {
+    expect(selectThemeHint({
+      topic: "介绍小猪佩奇这部动画",
+      audience: "小学课堂汇报",
+      styleId: "blank",
+    })).toBe("playful-classroom");
+    expect(selectThemeHint({
+      topic: "季度财务分析",
+      audience: "管理层",
+      styleId: "blank",
+    })).toBe("minimal-white");
+    expect(selectThemeHint({
+      topic: "儿童产品市场分析",
+      audience: "管理层",
+      styleId: "consulting-grid",
+    })).toBe("swiss-grid");
+  });
+
   it("allows compatible-provider repair calls within the single design turn", async () => {
     const context = baseContext();
     context.store.files.set("slides-content.md", validOutline);
@@ -239,7 +272,7 @@ describe("outline and design stages", () => {
               id: "design-1",
               name: "write_theme",
               argumentsJson: JSON.stringify({
-                designBriefMarkdown: "# Direction\nTypography scale; palette; grid; spacing; image grammar; chart grammar; motion level; prohibited patterns.",
+                designBriefMarkdown: validDesignBrief,
               }),
             }],
           },
@@ -266,7 +299,7 @@ describe("outline and design stages", () => {
     const context = baseContext({ selectedThemeCss: formattedTheme });
     const tool = context.tools.forStage("design", context).write_theme;
     await tool.execute({
-      designBriefMarkdown: "Typography scale; palette; grid; spacing; image grammar; chart grammar; motion level; prohibited patterns.",
+      designBriefMarkdown: validDesignBrief,
     });
     expect(context.store.files.get("working/theme.css")).toBe(validTheme.replace(/;}$/, "}"));
   });

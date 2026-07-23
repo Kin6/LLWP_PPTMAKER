@@ -51,6 +51,8 @@ type HomeScreenProps = {
   slideCount: number;
   onSlideCountChange: (value: number) => void;
   envKeyConfigured: boolean;
+  textBackend: "http" | "codex-cli";
+  textModelAvailable: boolean;
   message: string;
   running: boolean;
   onSubmit: () => void;
@@ -76,6 +78,8 @@ export function HomeScreen({
   slideCount,
   onSlideCountChange,
   envKeyConfigured,
+  textBackend,
+  textModelAvailable,
   message,
   running,
   onSubmit,
@@ -93,8 +97,10 @@ export function HomeScreen({
         <div className="home-nav-inner">
           <div className="home-brand"><span><Layers3 size={15} /></span><strong>LLWP PPTMAKER</strong></div>
           <div className="home-nav-actions">
-            <span className={`env-status ${envKeyConfigured ? "ready" : "missing"}`}>
-              <Circle size={7} fill="currentColor" />{envKeyConfigured ? "系统 Key 已读取" : "未检测到系统 Key"}
+            <span className={`env-status ${textModelAvailable ? "ready" : "missing"}`}>
+              <Circle size={7} fill="currentColor" />{textBackend === "codex-cli"
+                ? "本机 Codex 模式"
+                : envKeyConfigured ? "系统 Key 已读取" : "文本模型未配置"}
             </span>
             <button className="workspace-link" onClick={onOpenWorkspace}><House size={14} />工作台</button>
           </div>

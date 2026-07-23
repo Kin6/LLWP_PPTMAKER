@@ -142,7 +142,8 @@ export function useDeckAgentJob(): UseDeckAgentJobResult {
                 || isTerminalDeckJobStatus(event.stage)) refreshSnapshot();
             },
           );
-          if (reachedTerminal || stopped || controller.signal.aborted) break;
+          const caughtUpToSnapshot = lastSeqRef.current >= (state.job?.lastSeq ?? 0);
+          if ((reachedTerminal && caughtUpToSnapshot) || stopped || controller.signal.aborted) break;
           await abortableDelay(delayMs, controller.signal);
           delayMs = 250;
         } catch (error: unknown) {

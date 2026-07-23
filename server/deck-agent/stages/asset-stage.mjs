@@ -1,5 +1,6 @@
 import { parseFragment, serialize } from "parse5";
 import { validateStoredSlideHtml as validateStoredSlideHtmlDefault } from "../html-policy.mjs";
+import { effectiveImageCount } from "../image-plan.mjs";
 
 const COMPLETED_ASSET_STATES = new Set(["resolved", "empty"]);
 const SLIDE_ID = /^slide-\d{2}$/;
@@ -32,15 +33,24 @@ export async function resolveAssetSlots(context) {
   if (!manifest || !Array.isArray(manifest.slides)) throw new TypeError("Asset stage requires a manifest");
 
   const options = context.input?.options || context.options || {};
+  const imageEnabled = context.imageEnabled ?? options.imageEnabled ?? false;
+  const imageCount = context.imageCount ?? options.imageCount ?? 0;
   const generationBudget = context.generationBudget || createGenerationBudget({
-    enabled: context.imageEnabled ?? options.imageEnabled ?? false,
-    limit: context.imageCount ?? options.imageCount ?? 0,
+    enabled: imageEnabled,
+    limit: effectiveImageCount({
+      enabled: imageEnabled,
+      imageCount,
+      slideCount: manifest.slides.length,
+    }),
   });
   if (typeof generationBudget.take !== "function") {
     throw new TypeError("Generation budget requires a take function");
   }
 
-  const stageContext = { ...context, manifest, generationBudget };
+  const designBriefSummary = context.designBriefSummary
+    ?? await context.readLockedDesignBriefSummary?.()
+    ?? "";
+  const stageContext = { ...context, manifest, generationBudget, designBriefSummary };
   const results = [];
   for (const slide of manifest.slides) {
     if (!SLIDE_ID.test(slide?.slideId) || !Array.isArray(slide.assetSlots)) continue;
@@ -99,6 +109,7 @@ export function buildAssetGenerationRequest(context, slot) {
   const safeArea = normalizeSafeArea(slot.safeArea);
   const purpose = cleanText(slot.purpose, 500);
   const aspectRatio = cleanText(slot.aspectRatio, 20);
+  const designDirection = cleanText(context.designBriefSummary, 2_000);
   const summaries = sourceSummaries.length
     ? sourceSummaries.map((summary) => `- ${summary}`).join("\n")
     : "- No additional source summary supplied.";
@@ -106,6 +117,7 @@ export function buildAssetGenerationRequest(context, slot) {
     `Create a presentation image for this purpose: ${purpose}`,
     `Aspect ratio: ${aspectRatio}`,
     `Subject safe area (normalized x/y/w/h): ${JSON.stringify(safeArea)}`,
+    ...(designDirection ? ["Locked deck visual direction:", designDirection] : []),
     "Relevant source summaries:",
     summaries,
     "Presentation text is forbidden inside the image. Do not render labels, captions, letters, numbers, logos, watermarks, or interface text.",

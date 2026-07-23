@@ -53,6 +53,30 @@ function changedFilesForInitial(slideIds, qaFiles = []) {
   ];
 }
 
+function statusFromQa(meta, fallback) {
+  if (meta?.qa?.ok === true) return "ready";
+  if (meta?.qa?.ok === false) return "needs-review";
+  return fallback;
+}
+
+function statusAfterCandidate(currentStatus, parentMeta, candidateMeta) {
+  if (currentStatus !== "needs-review") return currentStatus || "ready";
+  const unresolved = new Set();
+  let hasUnscopedFailure = false;
+  for (const slide of Array.isArray(parentMeta?.qa?.slides) ? parentMeta.qa.slides : []) {
+    if (Array.isArray(slide?.issues) && slide.issues.length > 0 && SLIDE_ID.test(slide?.slideId || "")) {
+      unresolved.add(slide.slideId);
+    }
+  }
+  for (const error of Array.isArray(parentMeta?.qa?.consoleErrors) ? parentMeta.qa.consoleErrors : []) {
+    if (SLIDE_ID.test(error?.slideId || "")) unresolved.add(error.slideId);
+    else hasUnscopedFailure = true;
+  }
+  if (hasUnscopedFailure || unresolved.size === 0) return "needs-review";
+  const repaired = new Set(candidateMeta.slideIds);
+  return [...unresolved].every((slideId) => repaired.has(slideId)) ? "ready" : "needs-review";
+}
+
 function withJobLock(store, jobId, operation) {
   return typeof store.runExclusive === "function" ? store.runExclusive(jobId, operation) : operation();
 }
@@ -245,6 +269,7 @@ export function createRevisionStore({
       const { candidateId, meta } = await candidateRecord(jobId, number);
       if (meta.parentRevision !== current.number) throw conflict("Candidate parent is no longer current");
       if (meta.qa?.ok !== true) throw conflict("Candidate revision has not passed QA");
+      const parentMeta = await readPublishedMeta(jobId, current.number);
       signal?.throwIfAborted();
 
       const revisionId = revisionIdFor(number);
@@ -256,16 +281,18 @@ export function createRevisionStore({
       await store.renameRevisionDirectory(jobId, candidateId, revisionId, { alreadyLocked: true, signal });
 
       const job = await store.readJob(jobId, { alreadyLocked: true });
-      const pointer = { revision: number, revisionId, status: current.status || job.status };
+      const previousStatus = current.status || job.status;
+      const status = statusAfterCandidate(previousStatus, parentMeta, meta);
+      const pointer = { revision: number, revisionId, status };
       await store.writeJson(jobId, "current-revision.json", pointer, { alreadyLocked: true });
       try {
-        await store.updateJob(jobId, { revision: number }, { alreadyLocked: true });
+        await store.updateJob(jobId, { revision: number, status }, { alreadyLocked: true });
       } catch (error) {
         try {
           await store.writeJson(jobId, "current-revision.json", {
             revision: current.number,
             revisionId: current.revisionId,
-            status: current.status || job.status,
+            status: previousStatus,
           }, { alreadyLocked: true });
         } catch (rollbackError) {
           throw new AggregateError([error, rollbackError], "Revision publication rollback failed");
@@ -289,16 +316,18 @@ export function createRevisionStore({
       if (!currentMeta.parentRevision) throw conflict("No parent revision is available");
       const parent = await readPublishedMeta(jobId, currentMeta.parentRevision);
       const job = await store.readJob(jobId, { alreadyLocked: true });
-      const pointer = { revision: parent.number, revisionId: parent.revisionId, status: current.status || job.status };
+      const currentStatus = current.status || job.status;
+      const status = statusFromQa(parent, currentStatus);
+      const pointer = { revision: parent.number, revisionId: parent.revisionId, status };
       await store.writeJson(jobId, "current-revision.json", pointer, { alreadyLocked: true });
       try {
-        await store.updateJob(jobId, { revision: parent.number }, { alreadyLocked: true });
+        await store.updateJob(jobId, { revision: parent.number, status }, { alreadyLocked: true });
       } catch (error) {
         try {
           await store.writeJson(jobId, "current-revision.json", {
             revision: current.number,
             revisionId: current.revisionId,
-            status: current.status || job.status,
+            status: currentStatus,
           }, { alreadyLocked: true });
         } catch (rollbackError) {
           throw new AggregateError([error, rollbackError], "Revision undo rollback failed");

@@ -58,6 +58,8 @@ const DESIGN_BRIEF_REQUIREMENTS = Object.freeze([
   ["image grammar", /image\s+grammar|图像语法|图片语法|图像规则|图片规则/i],
   ["chart grammar", /chart\s+grammar|图表语法|图表规则/i],
   ["motion level", /motion\s+level|动效等级|动画等级/i],
+  ["visual motif vocabulary", /visual\s+motif\s+vocabulary|视觉母题|视觉元素词汇|视觉语汇/i],
+  ["slide composition map", /slide\s+composition\s+map|逐页构图|页面构图地图|幻灯片构图地图/i],
   ["prohibited patterns", /prohibited\s+patterns|禁止模式|禁用模式/i],
 ]);
 

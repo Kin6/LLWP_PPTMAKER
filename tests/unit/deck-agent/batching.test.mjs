@@ -10,6 +10,8 @@ import {
   resolveAssetSlots,
 } from "../../../server/deck-agent/stages/asset-stage.mjs";
 import { validateStoredSlideHtml } from "../../../server/deck-agent/html-policy.mjs";
+import { MODEL_CSS_CONTRACT } from "../../../server/deck-agent/css-contract.mjs";
+import { MODEL_HTML_CONTRACT } from "../../../server/deck-agent/html-contract.mjs";
 import { writeSlideInputSchema } from "../../../server/deck-agent/tool-registry.mjs";
 
 describe("bounded slide batching", () => {
@@ -71,8 +73,8 @@ function outlineFor(count) {
 function generatedSlide(slideId) {
   return {
     slideId,
-    html: `<section><h1>${slideId}</h1></section>`,
-    css: ":slide section { display: grid; }",
+    html: `<div><h1>${slideId}</h1></div>`,
+    css: ":slide div { display: grid; }",
     assetSlots: [],
     charts: [],
   };
@@ -159,6 +161,36 @@ describe("build stage", () => {
     expect(prompt).toContain("Full markdown 2");
     expect(prompt).toContain("Locked palette, grid, and typography");
     expect(prompt).toContain("Rootless HTML; slide-scoped CSS");
+    const userRequest = JSON.parse(request.messages.at(-1).content);
+    expect(userRequest.htmlContract).toEqual(MODEL_HTML_CONTRACT);
+    expect(userRequest.htmlContract.allowedTags).not.toContain("section");
+    expect(userRequest.htmlContract.reservedTags).toContain("section");
+    expect(userRequest.htmlContract.fallbackContainerTags).toEqual(["div", "article"]);
+    expect(userRequest.cssContract).toEqual(MODEL_CSS_CONTRACT);
+    expect(userRequest.cssContract.canvas).toMatchObject({
+      width: "1920px",
+      height: "1080px",
+      serverRootPadding: "0px",
+      safeInset: "72px",
+    });
+    expect(userRequest.imagePlan).toMatchObject({
+      generationEnabled: false,
+      generatedImageBudget: 0,
+      maxAssetSlotsPerSlide: 1,
+      assetSlotsAllowedSlideIds: ["slide-01", "slide-02"],
+    });
+    expect(prompt).toMatch(/speaker notes.*server-owned metadata/i);
+    expect(prompt).toContain("every unlisted tag is invalid");
+    expect(prompt).toMatch(/every comma-separated selector branch must start exactly with :slide/i);
+    expect(prompt).toMatch(/never emit :root/i);
+    expect(prompt).toMatch(/never emit a section element or a section type selector/i);
+    expect(userRequest.outputTemplate.slides).toEqual(targetSlideIds.map((slideId) => ({
+      slideId,
+      html: '<div class="slide-content"><!-- complete rootless slide markup --></div>',
+      css: ":slide .slide-content{display:grid}",
+      assetSlots: [],
+      charts: [],
+    })));
     expect(prompt).not.toContain("argumentsJson");
 
     expect(harness.forStage).toHaveBeenCalledWith("building", expect.objectContaining({
@@ -166,6 +198,34 @@ describe("build stage", () => {
     }));
     expect(harness.writeSlide.execute).toHaveBeenCalledTimes(2);
     expect(harness.writeSlide.execute.mock.calls.map(([input]) => input.slideId)).toEqual(targetSlideIds);
+  });
+
+  it("withholds speaker notes from target slide prompts without removing visible sources", async () => {
+    const harness = structuredBuildHarness([generatedSlide("slide-01")], {
+      targetSlideIds: ["slide-01"],
+      outlineCount: 1,
+    });
+    harness.context.outline.slides[0].rawMarkdown = `## 幻灯片 1：标题
+
+**核心结论：** VISIBLE_CLAIM_42
+
+**要点：**
+- VISIBLE_FACT_42
+
+**讲稿提示：** PRIVATE_SPEAKER_NOTE_42
+
+**材料来源：**
+- VISIBLE_SOURCE_42 <!-- source:block-a -->`;
+
+    await runBuildStage(harness.context);
+
+    const request = JSON.parse(harness.completeStructuredStage.mock.calls[0][0].messages.at(-1).content);
+    expect(request.targetSlides[0].rawMarkdown).toContain("VISIBLE_CLAIM_42");
+    expect(request.targetSlides[0].rawMarkdown).toContain("VISIBLE_FACT_42");
+    expect(request.targetSlides[0].rawMarkdown).toContain("VISIBLE_SOURCE_42");
+    expect(request.targetSlides[0].rawMarkdown).toContain("<!-- source:block-a -->");
+    expect(request.targetSlides[0].rawMarkdown).not.toContain("讲稿提示");
+    expect(request.targetSlides[0].rawMarkdown).not.toContain("PRIVATE_SPEAKER_NOTE_42");
   });
 
   it.each([
@@ -217,6 +277,7 @@ describe("build stage", () => {
     const result = await runBuildStage(harness.context);
 
     expect(result.retriedSlideIds).toEqual(["slide-02"]);
+    expect(result.retryResult).toEqual(expect.objectContaining({ slideIds: ["slide-02"] }));
     expect(harness.completeStructuredStage).toHaveBeenCalledTimes(2);
     expect(harness.writeSlide.execute.mock.calls.map(([slide]) => slide.slideId)).toEqual([
       "slide-01", "slide-02", "slide-02",
@@ -224,8 +285,91 @@ describe("build stage", () => {
     const retryRequest = JSON.parse(harness.completeStructuredStage.mock.calls[1][0].messages.at(-1).content);
     expect(retryRequest.requiredSlideIds).toEqual(["slide-02"]);
     expect(retryRequest.validationErrors).toEqual([
-      { slideIds: ["slide-02"], message: "CSS policy rejected slide-02" },
+      {
+        slideIds: ["slide-02"],
+        failedSlideId: "slide-02",
+        message: "CSS policy rejected slide-02",
+      },
     ]);
+  });
+
+  it("repairs a forbidden aside once with the full HTML contract and exact remediation", async () => {
+    const targetSlideIds = ["slide-01", "slide-02"];
+    const harness = structuredBuildHarness(targetSlideIds.map(generatedSlide), { targetSlideIds });
+    harness.completeStructuredStage
+      .mockResolvedValueOnce({
+        value: {
+          slides: [
+            { ...generatedSlide("slide-01"), html: "<aside class=\"notes\">Do not render me</aside>" },
+            generatedSlide("slide-02"),
+          ],
+        },
+        upstreamCalls: 1,
+      })
+      .mockResolvedValueOnce({
+        value: { slides: [generatedSlide("slide-01")] },
+        upstreamCalls: 1,
+      });
+    harness.writeSlide.execute.mockImplementation(async (slide) => {
+      if (slide.html.includes("<aside")) throw new Error("Forbidden HTML tag: aside");
+      return { summary: `Slide ${slide.slideId} written` };
+    });
+
+    const result = await runBuildStage(harness.context);
+
+    expect(result.retriedSlideIds).toEqual(["slide-01"]);
+    expect(harness.writeSlide.execute.mock.calls.map(([slide]) => slide.slideId)).toEqual([
+      "slide-01", "slide-02", "slide-01",
+    ]);
+    const retryRequest = JSON.parse(harness.completeStructuredStage.mock.calls[1][0].messages.at(-1).content);
+    expect(retryRequest.htmlContract).toEqual(MODEL_HTML_CONTRACT);
+    expect(retryRequest.validationErrors).toEqual([{
+      slideIds: ["slide-01"],
+      failedSlideId: "slide-01",
+      message: "Forbidden HTML tag: aside",
+    }]);
+    expect(retryRequest.validationRemediation.join(" ")).toMatch(/Remove every forbidden tag: aside/i);
+    expect(retryRequest.validationRemediation.join(" ")).toMatch(/Delete speaker-note/i);
+    expect(retryRequest.validationRemediation.join(" ")).toMatch(/div or article/i);
+  });
+
+  it("repairs an unscoped selector once with the full CSS contract and exact remediation", async () => {
+    const targetSlideIds = ["slide-01", "slide-02"];
+    const harness = structuredBuildHarness(targetSlideIds.map(generatedSlide), { targetSlideIds });
+    harness.completeStructuredStage
+      .mockResolvedValueOnce({
+        value: {
+          slides: [
+            { ...generatedSlide("slide-01"), css: ":root{--deck-bg:#ffffff}.cover{display:grid}" },
+            generatedSlide("slide-02"),
+          ],
+        },
+        upstreamCalls: 1,
+      })
+      .mockResolvedValueOnce({
+        value: { slides: [generatedSlide("slide-01")] },
+        upstreamCalls: 1,
+      });
+    harness.writeSlide.execute.mockImplementation(async (slide) => {
+      if (slide.css.includes(":root")) {
+        throw new Error("Every selector branch must start with :slide; received :root");
+      }
+      return { summary: `Slide ${slide.slideId} written` };
+    });
+
+    const result = await runBuildStage(harness.context);
+
+    expect(result.retriedSlideIds).toEqual(["slide-01"]);
+    const retryRequest = JSON.parse(harness.completeStructuredStage.mock.calls[1][0].messages.at(-1).content);
+    expect(retryRequest.cssContract).toEqual(MODEL_CSS_CONTRACT);
+    expect(retryRequest.validationErrors).toEqual([{
+      slideIds: ["slide-01"],
+      failedSlideId: "slide-01",
+      message: "Every selector branch must start with :slide; received :root",
+    }]);
+    expect(retryRequest.validationRemediation.join(" ")).toMatch(/delete every :root rule/i);
+    expect(retryRequest.validationRemediation.join(" ")).toMatch(/repeat :slide after every comma/i);
+    expect(retryRequest.validationRemediation.join(" ")).toMatch(/:slide header, :slide footer/i);
   });
 
   it("uses the calibration progress stage while retaining the building tool policy", async () => {
@@ -242,6 +386,28 @@ describe("build stage", () => {
       stage: "calibrating",
     }));
     expect(harness.forStage).toHaveBeenCalledWith("building", expect.any(Object));
+  });
+
+  it("gives every batch one shared bounded image plan", async () => {
+    const targetSlideIds = ["slide-01", "slide-02"];
+    const harness = structuredBuildHarness(targetSlideIds.map(generatedSlide), {
+      targetSlideIds,
+      outlineCount: 8,
+    });
+    harness.context.input = {
+      options: { imageEnabled: true, imageCount: 3 },
+    };
+    harness.context.allowedAssets = [];
+
+    await runBuildStage(harness.context);
+
+    const request = JSON.parse(harness.completeStructuredStage.mock.calls[0][0].messages.at(-1).content);
+    expect(request.imagePlan).toMatchObject({
+      generatedImageBudget: 3,
+      maxAssetSlotsPerSlide: 1,
+      generationEligibleSlideIds: ["slide-01", "slide-02", "slide-04"],
+      assetSlotsAllowedSlideIds: ["slide-01", "slide-02", "slide-04"],
+    });
   });
 
   it("retries only failed targets once without rewriting successful batches", async () => {
@@ -297,6 +463,73 @@ describe("build stage", () => {
     ]);
   });
 
+  it("keeps retries bounded when multiple first-pass batches fail", async () => {
+    const targetSlideIds = [
+      "slide-01", "slide-02", "slide-03",
+      "slide-04", "slide-05", "slide-06",
+    ];
+    let activeRetries = 0;
+    let maximumRetries = 0;
+    const buildBatch = vi.fn(async ({ slideIds, retry, retryErrors }) => {
+      if (!retry) throw new BatchError(slideIds, `Initial failure for ${slideIds.join(",")}`);
+      activeRetries += 1;
+      maximumRetries = Math.max(maximumRetries, activeRetries);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      activeRetries -= 1;
+      expect(retryErrors).toHaveLength(1);
+      expect(retryErrors[0].slideIds).toEqual(slideIds);
+      return slideIds.map((slideId) => ({ slideId, ok: true }));
+    });
+
+    const result = await runBuildStage({
+      jobId: "job-test",
+      signal: new AbortController().signal,
+      outline: outlineFor(6),
+      remainingSlideIds: targetSlideIds,
+      buildBatch,
+    });
+
+    expect(result.retriedSlideIds).toEqual(targetSlideIds);
+    expect(result.retryBatches).toEqual([
+      ["slide-01", "slide-02", "slide-03"],
+      ["slide-04", "slide-05", "slide-06"],
+    ]);
+    expect(buildBatch).toHaveBeenCalledTimes(4);
+    expect(buildBatch.mock.calls.filter(([request]) => request.retry).map(([request]) => request.slideIds))
+      .toEqual(result.retryBatches);
+    expect(Math.max(...buildBatch.mock.calls.map(([request]) => request.slideIds.length))).toBe(3);
+    expect(maximumRetries).toBe(2);
+    expect(result.retryPass.map((entry) => entry.status)).toEqual(["fulfilled", "fulfilled"]);
+    expect(result.retryResult).toBeUndefined();
+  });
+
+  it("propagates a failed bounded retry without starting a third round", async () => {
+    const targetSlideIds = [
+      "slide-01", "slide-02", "slide-03",
+      "slide-04", "slide-05", "slide-06",
+    ];
+    const finalFailure = new BatchError(
+      ["slide-04", "slide-05", "slide-06"],
+      "Second batch still invalid",
+    );
+    const buildBatch = vi.fn(async ({ slideIds, retry }) => {
+      if (!retry) throw new BatchError(slideIds, "Initial batch failure");
+      if (slideIds.includes("slide-04")) throw finalFailure;
+      return slideIds.map((slideId) => ({ slideId, ok: true }));
+    });
+
+    await expect(runBuildStage({
+      jobId: "job-test",
+      signal: new AbortController().signal,
+      outline: outlineFor(6),
+      remainingSlideIds: targetSlideIds,
+      buildBatch,
+    })).rejects.toBe(finalFailure);
+
+    expect(buildBatch).toHaveBeenCalledTimes(4);
+    expect(buildBatch.mock.calls.filter(([request]) => request.retry)).toHaveLength(2);
+  });
+
   it("uses a calibrated neighbor as read-only context for one remaining slide", async () => {
     const buildBatch = vi.fn(async () => []);
 
@@ -318,6 +551,36 @@ describe("build stage", () => {
     }));
   });
 
+  it("gives multi-slide batches the nearest calibrated page as read-only visual DNA", async () => {
+    const buildBatch = vi.fn(async () => []);
+    const files = new Map([
+      ["working/slides/slide-01.html", "<section class=\"calibrated\">Cover</section>"],
+      ["working/slides/slide-01.css", "[data-slide-id=\"slide-01\"] .calibrated{display:grid}"],
+      ["working/slides/slide-05.html", "<section class=\"calibrated\">Dense</section>"],
+      ["working/slides/slide-05.css", "[data-slide-id=\"slide-05\"] .calibrated{display:grid}"],
+    ]);
+
+    await runBuildStage({
+      jobId: "job-test",
+      outline: outlineFor(6),
+      remainingSlideIds: ["slide-02", "slide-03", "slide-04"],
+      calibrationSlideIds: ["slide-01", "slide-05"],
+      store: { readArtifact: vi.fn(async (_jobId, name) => files.get(name)) },
+      buildBatch,
+    });
+
+    expect(buildBatch).toHaveBeenCalledWith(expect.objectContaining({
+      readOnlySlideIds: ["slide-01"],
+      promptContext: expect.objectContaining({
+        visualReferenceSlides: [{
+          slideId: "slide-01",
+          html: "<section class=\"calibrated\">Cover</section>",
+          css: "[data-slide-id=\"slide-01\"] .calibrated{display:grid}",
+        }],
+      }),
+    }));
+  });
+
   it("loads the persisted design brief when building page prompts", async () => {
     const buildBatch = vi.fn(async () => []);
     const readLockedDesignBriefSummary = vi.fn(async () => "Persisted palette, grid, and image grammar");
@@ -335,6 +598,50 @@ describe("build stage", () => {
         lockedDesignBriefSummary: "Persisted palette, grid, and image grammar",
       }),
     }));
+  });
+
+  it("scopes visual repair issues and previous page code to each repair batch", async () => {
+    const buildBatch = vi.fn(async () => []);
+    const previous = new Map([
+      ["working/slides/slide-01.html", "<section>previous one</section>"],
+      ["working/slides/slide-01.css", ":slide .one{display:grid}"],
+      ["working/slides/slide-02.html", "<section>previous two</section>"],
+      ["working/slides/slide-02.css", ":slide .two{display:grid}"],
+    ]);
+
+    await runBuildStage({
+      jobId: "job-test",
+      progressStage: "repairing",
+      outline: outlineFor(2),
+      remainingSlideIds: ["slide-01", "slide-02"],
+      store: { readArtifact: vi.fn(async (_jobId, name) => previous.get(name)) },
+      repairReport: {
+        designChanges: ["Use the lower half of the canvas"],
+        slides: [
+          { slideId: "slide-01", issues: ["visual:lower half is empty"] },
+          { slideId: "slide-02", issues: ["vertical-overflow"] },
+        ],
+        consoleErrors: [{ slideId: "slide-02", message: "layout failed" }],
+      },
+      buildBatch,
+    });
+
+    const [request] = buildBatch.mock.calls[0];
+    expect(request.promptContext.repairDesignChanges).toEqual(["Use the lower half of the canvas"]);
+    expect(request.promptContext.repairSlides).toEqual([
+      {
+        slideId: "slide-01",
+        issues: ["visual:lower half is empty"],
+        previousHtml: "<section>previous one</section>",
+        previousCss: ":slide .one{display:grid}",
+      },
+      {
+        slideId: "slide-02",
+        issues: ["vertical-overflow", "console:layout failed"],
+        previousHtml: "<section>previous two</section>",
+        previousCss: ":slide .two{display:grid}",
+      },
+    ]);
   });
 
   it("recovers the read-only neighbor from persisted page checkpoints", async () => {
@@ -414,7 +721,7 @@ describe("asset stage", () => {
       jobId: "job-test",
       signal: new AbortController().signal,
       manifest,
-      input: { options: { imageEnabled: true, imageCount: 2, imageQuality: "medium", imageTimeoutMs: 300_000, imageMaxRetries: 1 } },
+      input: { options: { imageEnabled: true, imageCount: 0, imageQuality: "medium", imageTimeoutMs: 300_000, imageMaxRetries: 1 } },
       uploads: [{ id: "asset-upload", filename: "asset-upload.png" }],
       library: [{
         id: "asset-library",
@@ -434,6 +741,7 @@ describe("asset stage", () => {
       publishAsset,
       publishGeneratedAsset,
       markEmptyAssetSlot: markEmpty,
+      readLockedDesignBriefSummary: vi.fn(async () => "Flat editorial scenes with one coral focal accent."),
       emitAssetFallback: vi.fn(),
       checkpointAssetSlot: vi.fn(async (slideId, slotId, result) => {
         checkpoints.push(`${slideId}/${slotId}/${result.source || result.state}`);
@@ -461,6 +769,7 @@ describe("asset stage", () => {
       "slide-02/budget-empty/empty",
     ]);
     expect(generateAsset.mock.calls[0][0].prompt).toMatch(/presentation text is forbidden inside the image/i);
+    expect(generateAsset.mock.calls[0][0].prompt).toContain("Flat editorial scenes with one coral focal accent.");
     expect(generateAsset.mock.calls[0][0].prompt).toContain("Relevant landscape summary");
     expect(generateAsset.mock.calls[0][0].prompt).not.toContain("UNRELATED SECRET SOURCE");
     expect(generateAsset.mock.calls[0][0].prompt).not.toContain("Do not leak this title");

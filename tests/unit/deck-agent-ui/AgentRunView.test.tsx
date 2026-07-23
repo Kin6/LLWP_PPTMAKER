@@ -313,4 +313,72 @@ describe("AgentRunView", () => {
     expect(screen.queryByTitle("HTML 幻灯片预览")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "slides-content.md" })).toBeVisible();
   });
+
+  it("reconciles a successful retry without showing stale running or failed steps", async () => {
+    const ready = snapshot({
+      status: "ready",
+      lastSeq: 5,
+      revision: 1,
+      artifacts: [outlineArtifact, { ...previewArtifact, revision: 1 }],
+      actions: {
+        canCancel: false,
+        canRetry: false,
+        canMessage: true,
+        canUndo: true,
+        canDownload: true,
+      },
+    });
+    api.getDeckJob.mockResolvedValue(ready);
+
+    render(<AgentRunView jobId={jobId} initialRequest={request} onExit={vi.fn()} />);
+    await waitFor(() => expect(emitEvent).toBeTypeOf("function"));
+    act(() => {
+      emitEvent?.(event({
+        seq: 1,
+        stage: "calibrating",
+        type: "progress",
+        status: "running",
+        title: "校准代表页面",
+        message: "正在请求模型生成校准页面",
+        progress: { completed: 0, total: 1 },
+      }));
+      emitEvent?.(event({
+        seq: 2,
+        stage: "failed",
+        type: "error",
+        status: "failed",
+        title: "任务执行失败",
+        error: { code: "JOB_EXECUTION_FAILED", message: "old failure", retryable: true },
+      }));
+      emitEvent?.(event({
+        seq: 3,
+        stage: "calibrating",
+        type: "job",
+        status: "queued",
+        title: "任务已重新排队",
+      }));
+      emitEvent?.(event({
+        seq: 4,
+        stage: "calibrating",
+        type: "stage",
+        status: "running",
+        title: "校准代表页面",
+        progress: { completed: 0, total: 1 },
+      }));
+      emitEvent?.(event({
+        seq: 5,
+        stage: "ready",
+        type: "job",
+        status: "done",
+        title: "演示文稿已完成",
+        revision: 1,
+      }));
+    });
+
+    const calibration = await screen.findByRole("button", { name: "校准代表页面" });
+    expect(calibration.closest("section")).toHaveClass("is-done");
+    expect(screen.queryByText("正在请求模型生成校准页面")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "任务执行失败" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "演示文稿已完成" })).toBeVisible();
+  });
 });

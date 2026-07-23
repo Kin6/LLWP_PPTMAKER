@@ -5,7 +5,12 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { parseOutline, selectCalibrationSlides } from "../../../server/deck-agent/outline.mjs";
+import {
+  parseOutline,
+  projectVisibleOutline,
+  removeSpeakerNotes,
+  selectCalibrationSlides,
+} from "../../../server/deck-agent/outline.mjs";
 
 const execFileAsync = promisify(execFile);
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -95,6 +100,56 @@ describe("deck outline parser", () => {
 
     expect(outline.slides[0].sourceBlockIds).toEqual([]);
     expect(outline.slides[0].rawMarkdown).toContain("未提供外部材料");
+    expect(outline.slides[0].visibleMarkdown).not.toContain("讲稿提示");
+    expect(outline.slides[0].visibleMarkdown).not.toContain("从同学们熟悉的动画角色切入");
+    expect(outline.slides[0].visibleMarkdown).toContain("未提供外部材料");
+  });
+
+  it("removes note sections while preserving visible content and source provenance", () => {
+    const visible = removeSpeakerNotes(valid);
+    const outline = parseOutline(valid, { expectedSlideCount: 2, sourceBlockIds });
+    const projected = projectVisibleOutline(outline, { slideIds: ["slide-02"] });
+
+    expect(visible).not.toContain("演讲备注");
+    expect(visible).not.toContain("从经营结果切入");
+    expect(visible).not.toContain("依次解释三个断点");
+    expect(visible).toContain("生产数据依赖人工汇总");
+    expect(visible).toContain("<!-- source:block-018 -->");
+    expect(visible).toContain("<!-- source:block-031 -->");
+    expect(projected).toMatchObject({
+      title: "智能制造转型方案",
+      slides: [{
+        slideId: "slide-02",
+        title: "三个信息断点造成主要损失",
+        sourceBlockIds: ["block-031"],
+      }],
+    });
+    expect(projected.slides[0].markdown).not.toContain("依次解释三个断点");
+    expect(projected.slides[0].markdown).toContain("<!-- source:block-031 -->");
+  });
+
+  it("removes a heading-style note section through the next labeled section", () => {
+    const markdown = `# Deck\n\n## 幻灯片 1：标题\n\n### 核心结论\n\n可见结论\n\n### 讲稿提示\n\nPRIVATE_NOTE\n\n- 只供讲者参考\n\n### 材料来源\n\n可见来源`;
+
+    expect(removeSpeakerNotes(markdown)).toBe(
+      "# Deck\n\n## 幻灯片 1：标题\n\n### 核心结论\n\n可见结论\n\n### 材料来源\n\n可见来源",
+    );
+  });
+
+  it("preserves whitespace outside note ranges byte for byte", () => {
+    const before = "# Deck\n\n\n\n## 幻灯片 1：标题\n\n**核心结论：** 可见\n\n";
+    const note = "**讲稿提示：** PRIVATE\n\n- 仅供讲者\n\n";
+    const after = "**材料来源：**\n\n```text\nVISIBLE\n\n\nDATA\n```\n\n\n";
+
+    expect(removeSpeakerNotes(`${before}${note}${after}`)).toBe(`${before}${after}`);
+  });
+
+  it("does not let speaker-note length affect visible density", () => {
+    const longNotes = valid.replace("从经营结果切入。", "仅供讲者".repeat(2_000));
+    const baseline = parseOutline(valid, { expectedSlideCount: 2, sourceBlockIds });
+    const expanded = parseOutline(longNotes, { expectedSlideCount: 2, sourceBlockIds });
+
+    expect(expanded.slides[0].densityScore).toBe(baseline.slides[0].densityScore);
   });
 
   it("still requires a source comment when source blocks were supplied", () => {

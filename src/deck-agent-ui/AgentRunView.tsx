@@ -118,7 +118,9 @@ export function AgentRunView({ jobId, initialRequest, onExit }: AgentRunViewProp
     const groups = new Map(state.stageGroups.map((group) => [group.stage, group]));
     const stages = new Set<DeckJobStatus>();
     for (const group of state.stageGroups) {
-      if (group.stage !== "queued") stages.add(group.stage);
+      const historicalTerminal = TERMINAL_STATUS[group.stage] !== undefined
+        && group.stage !== state.status;
+      if (group.stage !== "queued" && !historicalTerminal) stages.add(group.stage);
     }
     for (const artifact of timelineArtifacts) stages.add(artifact.stage);
     if (state.status && state.status !== "queued") stages.add(state.status);
@@ -127,23 +129,30 @@ export function AgentRunView({ jobId, initialRequest, onExit }: AgentRunViewProp
       const group = groups.get(stage);
       const last = latestEvent(group?.events ?? []);
       const artifacts = timelineArtifacts.filter((artifact) => artifact.stage === stage);
-      const status = group?.status
+      const completedBySuccessfulJob = ["ready", "needs-review"].includes(state.status ?? "")
+        && TERMINAL_STATUS[stage] === undefined;
+      const status = completedBySuccessfulJob
+        ? "done"
+        : group?.status
         ?? (state.status === stage ? TERMINAL_STATUS[stage] ?? "running" : undefined)
         ?? (artifacts.length ? "done" : "queued");
-      const message = last?.error?.message ?? last?.message
+      const effectiveLast = status === "done" && last?.status !== "done"
+        ? [...(group?.events ?? [])].reverse().find((item) => item.status === "done")
+        : last;
+      const message = effectiveLast?.error?.message ?? effectiveLast?.message
         ?? (stage === "failed" ? state.job?.error : undefined);
       return {
         key: stage,
-        title: last?.title ?? STAGE_TITLES[stage] ?? stage,
+        title: effectiveLast?.title ?? last?.title ?? STAGE_TITLES[stage] ?? stage,
         status,
         message,
-        progress: last?.progress,
+        progress: effectiveLast?.progress,
         artifacts,
         canRetry: status === "failed" && state.actions.canRetry,
         defaultExpanded: stage === "outline" && artifacts.length > 0
           ? true
           : state.status === "failed" && artifacts.length > 0 ? true : undefined,
-        eventSeq: last?.type === "message" ? undefined : last?.seq,
+        eventSeq: effectiveLast?.type === "message" ? undefined : effectiveLast?.seq,
       };
     });
   }, [state.actions.canRetry, state.job?.error, state.stageGroups, state.status, timelineArtifacts]);

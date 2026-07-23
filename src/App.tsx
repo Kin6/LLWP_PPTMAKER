@@ -81,7 +81,7 @@ function App() {
   const [activeHtmlJobId, setActiveHtmlJobId] = useState<string | null>(readDeckJobId);
   const [screen, setScreen] = useState<Screen>(() => activeHtmlJobId ? "workspace" : "home");
   const [prompt, setPrompt] = useState("");
-  const [preset, setPreset] = useState<GenerationPreset>("api-visual");
+  const [preset, setPreset] = useState<GenerationPreset>("html-interactive");
   const [attachments, setAttachments] = useState<ParsedAttachment[]>([]);
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const [presetMenuOpen, setPresetMenuOpen] = useState(false);
@@ -114,6 +114,9 @@ function App() {
   const [isExporting, setExporting] = useState(false);
   const [connection, setConnection] = useState<"idle" | "testing" | "success" | "error">("idle");
   const [envKeyConfigured, setEnvKeyConfigured] = useState(false);
+  const [textBackend, setTextBackend] = useState<"http" | "codex-cli">("http");
+  const [textModelAvailable, setTextModelAvailable] = useState(false);
+  const [imageGenerationAvailable, setImageGenerationAvailable] = useState(true);
   const [apiCalls, setApiCalls] = useState(0);
   const [liveApiCalls, setLiveApiCalls] = useState(0);
   const [failedStep, setFailedStep] = useState<StepId | null>(null);
@@ -137,14 +140,19 @@ function App() {
   useEffect(() => {
     fetch("/api/health").then((response) => response.json()).then((data) => {
       setEnvKeyConfigured(Boolean(data.envKeyConfigured));
+      setTextBackend(data.textBackend === "codex-cli" ? "codex-cli" : "http");
+      setTextModelAvailable(Boolean(data.textModelAvailable ?? data.envKeyConfigured));
+      const nextImageGenerationAvailable = data.imageGenerationAvailable !== false;
+      setImageGenerationAvailable(nextImageGenerationAvailable);
       const defaults = data.apiDefaults;
-      if (defaults) {
-        setApiConfig((current) => ({
-          ...current,
+      setApiConfig((current) => ({
+        ...current,
+        ...(!nextImageGenerationAvailable ? { imageEnabled: false, imageCount: 0 } : {}),
+        ...(defaults ? {
           imageTimeoutSeconds: clamp(Number(defaults.imageTimeoutMs) / 1_000, 240, 900),
           imageMaxRetries: clamp(Number(defaults.imageMaxRetries), 0, 2),
-        }));
-      }
+        } : {}),
+      }));
     }).catch(() => undefined);
   }, []);
 
@@ -656,6 +664,8 @@ function App() {
         slideCount={slideCount}
         onSlideCountChange={setSlideCount}
         envKeyConfigured={envKeyConfigured}
+        textBackend={textBackend}
+        textModelAvailable={textModelAvailable}
         message={homeMessage}
         running={isRunning}
         onSubmit={startFromComposer}
@@ -751,6 +761,8 @@ function App() {
               config={apiConfig}
               onChange={setApiConfig}
               envKeyConfigured={envKeyConfigured}
+              textBackend={textBackend}
+              imageGenerationAvailable={imageGenerationAvailable}
               connection={connection}
               onTest={testConnection}
             />

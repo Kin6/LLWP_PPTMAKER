@@ -119,7 +119,9 @@ export async function runRevisionStage(context, request) {
     const visual = await context.reviewCandidate({
       candidate,
       slideIds,
+      instruction: request.instruction,
       contactSheetArtifactId: dom.contactSheetArtifactId,
+      screenshotArtifactIds: dom.slides.map((slide) => slide.screenshotArtifactId).filter(Boolean),
       maxUpstreamCalls: 1,
       signal: context.signal,
     });

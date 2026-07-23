@@ -26,6 +26,7 @@ const modelClient = createModelClient({ config: serverConfig, http: httpClient }
 const imageClient = createImageClient({ config: serverConfig, http: httpClient });
 const configuredImageTimeoutMs = serverConfig.image.timeoutMs;
 const configuredImageMaxRetries = serverConfig.image.maxRetries;
+const imageGenerationAvailable = Boolean(serverConfig.image.apiKey) || isLocalApiBase(serverConfig.image.baseUrl);
 const isProduction = serverConfig.production;
 const port = serverConfig.port;
 const host = serverConfig.host;
@@ -224,6 +225,11 @@ app.get("/api/health", (_req, res) => {
     ok: true,
     mode: "hybrid",
     envKeyConfigured: Boolean(serverConfig.text.apiKey),
+    textBackend: serverConfig.text.backend,
+    textModelAvailable: serverConfig.text.backend === "codex-cli"
+      || Boolean(serverConfig.text.apiKey)
+      || isLocalApiBase(serverConfig.text.baseUrl),
+    imageGenerationAvailable,
     proxyConfigured: Boolean(serverConfig.proxyUrl),
     apiDefaults: {
       imageTimeoutMs: configuredImageTimeoutMs,
@@ -237,6 +243,27 @@ app.post("/api/ai/test", async (req, res) => {
   const startedAt = Date.now();
   try {
     const config = normalizeTextConfig(req.body?.config || {});
+    if (config.backend === "codex-cli") {
+      const result = await modelClient.completeStructured({
+        messages: [{ role: "user", content: "Return {\"ok\":true} to confirm structured output is available." }],
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["ok"],
+          properties: { ok: { type: "boolean" } },
+        },
+        schemaName: "connection_test",
+        timeoutMs: 30_000,
+      });
+      res.json({
+        ok: result.value.ok === true,
+        model: result.model,
+        provider: result.provider,
+        latencyMs: Date.now() - startedAt,
+        keySource: "codex-cli",
+      });
+      return;
+    }
     const response = await httpClient.fetch(`${config.baseUrl}/models`, { headers: authHeaders(config), method: "GET" }, { timeoutMs: 20_000 });
     const payload = await readJson(response);
     if (!response.ok) throw upstreamError(response.status, payload);
@@ -422,6 +449,7 @@ function normalizeImageConfig(raw) {
 }
 
 function withKeySource(config) {
+  if (config.backend === "codex-cli") return { ...config, keySource: "codex-cli" };
   if (!config.apiKey && !isLocalApiBase(config.baseUrl)) {
     throw new HttpError(400, "缺少系统环境变量 OPENAI_API_KEY。请在本机用户或计算机环境变量中设置后重启服务。");
   }
@@ -451,6 +479,11 @@ function normalizeHtmlDeckJobInput(raw) {
   const shared = normalizeSource({ ...raw.source, images: [], sourceBlocks: [] });
   return {
     ...input,
+    options: imageGenerationAvailable ? input.options : {
+      ...input.options,
+      imageEnabled: false,
+      imageCount: 0,
+    },
     source: {
       ...input.source,
       topic: shared.topic,
@@ -548,7 +581,7 @@ function buildDeckPrompt(source) {
 
 所有可见文案只能面向演示受众，禁止泄露制作过程、模型指令和内部脚手架。除非用户材料本身明确讨论这些概念，否则不要出现 DeckSpec、Image 2、API、提示词、工作流、如何生成 PPT、页面组装、视觉拆解等生产术语。图片只是证据和视觉参考，不要从图片中臆测看不清的信息。严格输出 JSON。`;
   const imageList = source.images.map((image, index) => `图片 ${index + 1}: ${image.name}；${image.summary || "用户上传的内容参考"}`).join("\n");
-  const styleLabel = source.styleId === "blank" ? "未指定，使用空白模板" : styleGuides[source.styleId].label;
+  const styleLabel = source.styleId === "blank" ? "未指定，由内容自动匹配" : styleGuides[source.styleId].label;
   const structuredMaterials = formatSourceBlocks(source.sourceBlocks);
   const user = `主题：${source.topic}\n受众：${source.audience}\n页数：必须恰好 ${source.slideCount} 页，不得少页、补占位页或额外增加附录\n选定风格：${styleLabel}\n\n用户任务说明：\n${source.textInput || "（请根据上传材料组织演示）"}\n\n结构化材料（blockId 是唯一可引用证据标识）：\n${structuredMaterials || "（无结构化附件）"}\n\n兼容表格输入：\n${source.tableInput || "（无，禁止自行创建表格内容）"}\n\n图片使用说明：\n${source.imageBrief || "（无）"}\n${imageList || "（未上传图片）"}\n\n先在 story 中给出唯一核心主张、受众洞察、完整叙事弧和证据缺口，再生成恰好 ${source.slideCount} 页。整套页面必须形成连续链条：第 1 页建立核心问题或判断；中间页面依次给出背景、机制、证据、影响或方案，每页都承接上一页并为下一页制造必要性；最后 1 页解决开场问题并收束为明确结论或行动。不要把同一个观点换词重复。speakerNotes 可以记录“承接上一页”和“引向下一页”的过渡逻辑，但这些制作说明不能进入可见标题、正文或图片文案。
 

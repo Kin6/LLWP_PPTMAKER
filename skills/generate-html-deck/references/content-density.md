@@ -1,6 +1,6 @@
 # Content Density
 
-Treat the validated outline as the content contract. Preserve every claim, required fact, table value, speaker note, and source reference. Do not solve overflow by deleting evidence or inventing shorter claims.
+Treat the validated visible outline as the slide-content contract. Preserve every claim, required fact, table value, and source reference. Speaker notes are intentionally withheld from model input, stay in manifest metadata, and are injected by the renderer; never infer or place presenter cues in visible slide HTML. Do not solve overflow by deleting evidence or inventing shorter claims.
 
 ## Classify Before Layout
 
@@ -19,8 +19,10 @@ Keep one dominant reading path. Turn repeated facts into a grid or sequence, but
 ## Fixed Geometry
 
 - Author every slide for a `1920px` by `1080px` canvas.
-- Keep meaningful content inside the `72px` safe inset.
+- The server-owned slide root is an unpadded full canvas. Apply the `72px` safe inset exactly once in the generated composition; do not nest another four-sided safe wrapper inside it.
+- Keep meaningful content inside that single `72px` safe inset.
 - Reserve stable regions for title, evidence, source footer, and any asset slot.
+- Use the safe canvas vertically as well as horizontally. Except for an intentional sparse divider, do not pack all meaningful content into the upper half or let the content region touch the source footer.
 - Treat clipping, horizontal scroll, footer collision, and text below the safe region as failures.
 - Use system font stacks and explicit line-height; do not rely on a downloaded font to make text fit.
 

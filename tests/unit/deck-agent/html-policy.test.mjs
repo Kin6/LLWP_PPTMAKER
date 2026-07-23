@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { MODEL_HTML_CONTRACT } from "../../../server/deck-agent/html-contract.mjs";
 import {
   sanitizeSlide,
   validateSlideHtml,
@@ -29,6 +30,21 @@ describe("slide HTML policy", () => {
     expect(result.html).not.toContain("data-slide-id");
     expect(result.html).not.toContain("data-source-refs");
     expect(result.nodeCount).toBeGreaterThan(0);
+  });
+
+  it("uses the runtime contract while reserving Reveal and speaker-note containers", () => {
+    expect(MODEL_HTML_CONTRACT.allowedTags).toContain("article");
+    expect(MODEL_HTML_CONTRACT.allowedTags).toContain("br");
+    expect(MODEL_HTML_CONTRACT.allowedTags).not.toContain("section");
+    expect(MODEL_HTML_CONTRACT.reservedTags).toContain("aside");
+    expect(MODEL_HTML_CONTRACT.reservedTags).toContain("section");
+    expect(MODEL_HTML_CONTRACT.fallbackContainerTags).toEqual(["div", "article"]);
+    expect(() => validateSlideHtml({ ...base, html: "<article><p>指标</p></article>" }))
+      .not.toThrow();
+    expect(() => validateSlideHtml({ ...base, html: "<h1>第一行<br>第二行</h1>" }))
+      .not.toThrow();
+    expect(() => validateSlideHtml({ ...base, html: "<aside><p>讲稿</p></aside>" }))
+      .toThrow(/Forbidden HTML tag: aside/i);
   });
 
   it("accepts only exact service-owned asset states when revalidating stored fragments", () => {
@@ -64,10 +80,17 @@ describe("slide HTML policy", () => {
     expect(() => validateSlideHtml({ ...base, html: `<p aria-label="${"x".repeat(4_097)}">x</p>` })).toThrow(/too long/i);
   });
 
-  it("serializes stably across a second validation pass", () => {
+  it("normalizes legacy section containers to div and serializes stably", () => {
     const first = validateSlideHtml({ ...base, html: "<section><h2>证据</h2><p>结论</p></section>" });
     const second = validateSlideHtml({ ...base, html: first.html });
+    const stored = validateStoredSlideHtml({
+      ...base,
+      html: '<section class="legacy"><p>历史内容</p></section>',
+    });
+
+    expect(first.html).toBe("<div><h2>证据</h2><p>结论</p></div>");
     expect(second).toEqual(first);
+    expect(stored.html).toBe('<div class="legacy"><p>历史内容</p></div>');
   });
 
   it("sanitizes HTML and CSS through the combined generation boundary", () => {

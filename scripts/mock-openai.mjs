@@ -25,6 +25,9 @@ function freshScenarioState(key = "", markers = []) {
     calibrationReviewFailed: false,
     calibrationReviewFailures: 0,
     calibrationOverflowResponses: 0,
+    forbiddenAsideUsed: false,
+    unscopedSelectorUsed: false,
+    unscopedSelectorResponses: 0,
     buildFailureUsed: false,
     buildBatchRequests: 0,
     buildFailures: 0,
@@ -71,6 +74,7 @@ function scenarioDiagnostics() {
     calibrationGenerationCount: scenarioState.calibrationGenerationCount,
     calibrationReviewFailures: scenarioState.calibrationReviewFailures,
     calibrationOverflowResponses: scenarioState.calibrationOverflowResponses,
+    unscopedSelectorResponses: scenarioState.unscopedSelectorResponses,
     buildBatchRequests: scenarioState.buildBatchRequests,
     buildFailures: scenarioState.buildFailures,
     buildSuccesses: scenarioState.buildSuccesses,
@@ -304,9 +308,29 @@ async function stageSlideBatch(details, { agentTurn = false } = {}) {
       toolCalls: targets.map((slide) => writeSlideCall(slide, { calibrationOverflow, state: activeScenario })),
     };
   }
-  return {
-    slides: targets.map((slide) => slidePayload(slide, { calibrationOverflow, state: activeScenario })),
-  };
+  const slides = targets.map((slide) => slidePayload(slide, { calibrationOverflow, state: activeScenario }));
+  if (calibrationRequest
+    && hasScenario("MOCK_FORBIDDEN_ASIDE_ONCE", activeScenario)
+    && !activeScenario.forbiddenAsideUsed
+    && slides[0]) {
+    activeScenario.forbiddenAsideUsed = true;
+    slides[0] = {
+      ...slides[0],
+      html: '<aside class="notes">Mock speaker notes must stay server-owned.</aside>',
+    };
+  }
+  if (calibrationRequest
+    && hasScenario("MOCK_UNSCOPED_SELECTOR_ONCE", activeScenario)
+    && !activeScenario.unscopedSelectorUsed
+    && slides[0]) {
+    activeScenario.unscopedSelectorUsed = true;
+    activeScenario.unscopedSelectorResponses += 1;
+    slides[0] = {
+      ...slides[0],
+      css: `:root{--deck-bg:#ffffff}.mock-slide{display:grid}${slides[0].css}`,
+    };
+  }
+  return { slides };
 }
 
 async function stageAgentTurn(details) {
@@ -319,7 +343,7 @@ async function stageAgentTurn(details) {
     return { message: "Outline published", final: true, toolCalls: [{ id: "stage-outline-1", name: "write_outline", argumentsJson: JSON.stringify({ markdown }) }] };
   }
   if (/exactly one design direction|single design direction/i.test(task) || /exactly one design direction|single design direction/i.test(details.text)) {
-    const designBriefMarkdown = "# Single direction\n\nTypography scale: 72/48/30/20. Palette: restrained neutral with distinct accents. Grid: 12 columns. Spacing: 24px rhythm. Image grammar: evidence-led crops. Chart grammar: direct labels and semantic colors. Motion level: low. Prohibited patterns: decorative gradients and nested cards.";
+    const designBriefMarkdown = "# Single direction\n\nTypography scale: 72/48/30/20. Palette: restrained neutral with distinct accents. Grid: 12 columns. Spacing: 24px rhythm. Image grammar: evidence-led crops. Chart grammar: direct labels and semantic colors. Motion level: low. Visual motif vocabulary: numbered signals, evidence lines, and bold typographic anchors. Slide composition map: each slide receives one dominant anchor across two layout families. Prohibited patterns: decorative gradients and nested cards.";
     return { message: "Design published", final: true, toolCalls: [{ id: "stage-design-1", name: "write_theme", argumentsJson: JSON.stringify({ designBriefMarkdown }) }] };
   }
   if (Array.isArray(details.user.targetSlides)) {

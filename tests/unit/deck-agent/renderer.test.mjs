@@ -109,6 +109,9 @@ describe("fixed deck renderer", () => {
 
     expect(html).toContain("--deck-width:1920px");
     expect(html).toContain("--deck-height:1080px");
+    expect(html).toContain("--deck-safe-inset:72px");
+    expect(html).toMatch(/\.deck-slide\{[^}]*padding:0;/);
+    expect(html).not.toContain("padding:var(--deck-safe-inset)");
     expect(html).toContain("connect-src 'none'");
     expect(html).toContain("style-src-attr 'unsafe-inline'");
     expect(html).not.toContain("navigate-to");
@@ -139,6 +142,27 @@ describe("fixed deck renderer", () => {
     expect(html).toContain('<aside class="notes">Explain &lt;the evidence&gt; &amp; the next step.');
     expect(html).not.toContain("<the evidence>");
     expect(html.match(/<aside class="notes">/g)).toHaveLength(2);
+  });
+
+  it("normalizes legacy stored section markup and selectors before Reveal assembly", async () => {
+    const prefix = `revisions/${revisionId}`;
+    await store.writeArtifact(
+      jobId,
+      `${prefix}/slides/slide-02.html`,
+      '<section class="legacy-shell"><h1>Decision</h1></section>',
+    );
+    await store.writeArtifact(
+      jobId,
+      `${prefix}/slides/slide-02.css`,
+      '[data-slide-id="slide-02"] > section.legacy-shell { display:grid }',
+    );
+
+    const html = await renderer.assembleStandalone({ jobId, revisionId });
+
+    expect(html).toContain('<div class="legacy-shell"><h1>Decision</h1></div>');
+    expect(html).toContain('[data-slide-id="slide-02"]>div.legacy-shell{display:grid}');
+    expect(html).not.toContain('<section class="legacy-shell"');
+    expect(html).not.toContain('[data-slide-id="slide-02"]>section.legacy-shell');
   });
 
   it("embeds escaped, schema-validated chart options for the fixed ECharts runtime", async () => {

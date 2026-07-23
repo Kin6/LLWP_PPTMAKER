@@ -124,6 +124,45 @@ describe("revision store", () => {
     expect((await store.readJob(jobId)).revision).toBe(parent.number);
   });
 
+  it("promotes needs-review after all failed pages pass and restores it on undo", async () => {
+    await store.writeJson(jobId, "working/qa/report.json", {
+      ok: false,
+      slides: [{ slideId: "slide-03", issues: ["visual:overlap"] }],
+      consoleErrors: [],
+    });
+    const parent = await revisions.createInitial(jobId, { status: "needs-review" });
+    await store.updateJob(jobId, { status: "needs-review" });
+    const candidate = await createPassingCandidate(revisions, parent.number);
+
+    await revisions.publishCandidate(jobId, candidate.number, { expectedRevision: parent.number });
+
+    expect(await revisions.readCurrent(jobId)).toMatchObject({ number: candidate.number, status: "ready" });
+    expect(await store.readJob(jobId)).toMatchObject({ revision: candidate.number, status: "ready" });
+
+    await revisions.undo(jobId, { expectedRevision: candidate.number });
+    expect(await revisions.readCurrent(jobId)).toMatchObject({ number: parent.number, status: "needs-review" });
+    expect(await store.readJob(jobId)).toMatchObject({ revision: parent.number, status: "needs-review" });
+  });
+
+  it("keeps needs-review when the candidate does not cover every failed page", async () => {
+    await store.writeJson(jobId, "working/qa/report.json", {
+      ok: false,
+      slides: [
+        { slideId: "slide-02", issues: ["visual:clipping"] },
+        { slideId: "slide-03", issues: ["visual:overlap"] },
+      ],
+      consoleErrors: [],
+    });
+    const parent = await revisions.createInitial(jobId, { status: "needs-review" });
+    await store.updateJob(jobId, { status: "needs-review" });
+    const candidate = await createPassingCandidate(revisions, parent.number);
+
+    await revisions.publishCandidate(jobId, candidate.number, { expectedRevision: parent.number });
+
+    expect(await revisions.readCurrent(jobId)).toMatchObject({ number: candidate.number, status: "needs-review" });
+    expect(await store.readJob(jobId)).toMatchObject({ revision: candidate.number, status: "needs-review" });
+  });
+
   it("resolves only immutable source artifacts, current preview/download, and job assets", async () => {
     await store.writeArtifact(jobId, "slides-content.md", "# Immutable outline\n");
     const parent = await revisions.createInitial(jobId, { status: "ready" });

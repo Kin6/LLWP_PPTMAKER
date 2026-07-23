@@ -1,6 +1,6 @@
 # Layout Catalog
 
-Read `assets/catalog.json`, then use the closest original fragment under `assets/layouts/` as a structure guide. Do not copy a layout wrapper around the service-owned slide root.
+Read `assets/catalog.json`, then use the closest original fragment under `assets/layouts/` as a structure guide. Treat layouts as structural vocabulary rather than page templates: vary scale, alignment, and the dominant visual anchor according to the locked composition map. Do not copy a layout wrapper around the service-owned slide root.
 
 | Layout | Use for | Required named slots |
 | --- | --- | --- |

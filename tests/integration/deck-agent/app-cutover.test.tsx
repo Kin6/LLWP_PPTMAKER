@@ -118,8 +118,7 @@ describe("App HTML cutover", () => {
     const user = userEvent.setup();
     const { container } = render(<App />);
 
-    await user.click(screen.getByRole("button", { name: "融合成片" }));
-    await user.click(screen.getByRole("button", { name: /交互网页/ }));
+    expect(screen.getByRole("button", { name: "交互网页" })).toBeVisible();
     await user.type(screen.getByLabelText("描述演示主题和核心材料"), "可信 AI 决策");
     await user.type(screen.getByLabelText(/目标受众/), "管理层");
     fireEvent.change(screen.getByLabelText(/精确页数/), { target: { value: "11" } });

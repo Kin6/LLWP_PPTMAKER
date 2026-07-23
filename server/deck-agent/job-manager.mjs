@@ -152,11 +152,14 @@ export function normalizeDeckJobInput(raw) {
   const images = rawImages.map(normalizedImage);
 
   const rawOptions = raw.options || {};
+  const imageEnabled = Boolean(rawOptions.imageEnabled);
+  const rawImageCount = Number(rawOptions.imageCount);
+  const slideCount = Number(rawSource.slideCount);
   const normalized = {
     source: {
       topic: cleanText(rawSource.topic, 500) || "未命名演示文稿",
       audience: cleanText(rawSource.audience, 500),
-      slideCount: Number(rawSource.slideCount),
+      slideCount,
       textInput: cleanText(rawSource.textInput, 2_000_000),
       tableInput: cleanText(rawSource.tableInput, 1_000_000),
       imageBrief: cleanText(rawSource.imageBrief, 10_000),
@@ -165,8 +168,8 @@ export function normalizeDeckJobInput(raw) {
       sourceBlocks,
     },
     options: {
-      imageEnabled: Boolean(rawOptions.imageEnabled),
-      imageCount: Number(rawOptions.imageCount),
+      imageEnabled,
+      imageCount: imageEnabled && rawImageCount === 0 ? slideCount : rawImageCount,
       imageQuality: rawOptions.imageQuality,
       imageTimeoutMs: Number(rawOptions.imageTimeoutMs),
       imageMaxRetries: Number(rawOptions.imageMaxRetries),

@@ -43,10 +43,12 @@ export function WorkflowRow({ step, index, activities, onRetry, retrying }: {
   );
 }
 
-export function ApiSettings({ config, onChange, envKeyConfigured, connection, onTest }: {
+export function ApiSettings({ config, onChange, envKeyConfigured, textBackend, imageGenerationAvailable, connection, onTest }: {
   config: ApiConfig;
   onChange: (value: ApiConfig) => void;
   envKeyConfigured: boolean;
+  textBackend: "http" | "codex-cli";
+  imageGenerationAvailable: boolean;
   connection: "idle" | "testing" | "success" | "error";
   onTest: () => void;
 }) {
@@ -54,9 +56,12 @@ export function ApiSettings({ config, onChange, envKeyConfigured, connection, on
   return (
     <section className="api-settings">
       <div className="section-line"><div><span className="eyebrow">SYSTEM ENVIRONMENT</span><h2>API 设置</h2></div><ShieldCheck size={15} /></div>
-      <div className="api-note"><strong>{envKeyConfigured ? "已检测到系统 API Key" : "未检测到系统 API Key"}</strong><br />密钥、服务地址和模型只从本机系统环境变量读取，不会显示、保存或由浏览器提交。请配置 <code>OPENAI_API_KEY</code>、<code>OPENAI_API_BASE</code>、<code>TEXT_MODEL</code> 和 <code>IMAGE_MODEL</code> 后重启服务。</div>
-      <label className="toggle-row"><span><strong>Image 2 视觉生成</strong><small>生成整页图或独立主视觉，按页面计费</small></span><input type="checkbox" checked={config.imageEnabled} onChange={(event) => patch({ imageEnabled: event.target.checked })} /></label>
-      {config.imageEnabled && <div className="image-config"><label className="wide"><span>成片模式</span><select value={config.imageTextMode} onChange={(event) => patch({ imageTextMode: event.target.value as ApiConfig["imageTextMode"] })}><option value="integrated">整页图文融合（推荐成片）</option><option value="native">原生分层（编辑优先）</option></select><small className="field-hint">整页融合让文字直接参与画面构图；原生分层便于编辑，但文字与图片的视觉融合度会降低。</small></label><label><span>生图页数</span><select value={config.imageCount} onChange={(event) => patch({ imageCount: clamp(Number(event.target.value), 0, 50) })}><option value={0}>跟随 PPT 总页数</option>{Array.from({ length: 50 }, (_, index) => index + 1).map((count) => <option key={count} value={count}>{count} 页</option>)}</select></label><label><span>质量</span><select value={config.imageQuality} onChange={(event) => patch({ imageQuality: event.target.value as ApiConfig["imageQuality"] })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label><label><span>单页最长等待</span><select value={config.imageTimeoutSeconds} onChange={(event) => patch({ imageTimeoutSeconds: clamp(Number(event.target.value), 240, 900) })}><option value={240}>4 分钟</option><option value={360}>6 分钟</option><option value={600}>10 分钟（推荐）</option><option value={900}>15 分钟</option></select></label><label><span>超时自动重试</span><select value={config.imageMaxRetries} onChange={(event) => patch({ imageMaxRetries: clamp(Number(event.target.value), 0, 2) })}><option value={0}>不重试</option><option value={1}>重试 1 次（推荐）</option><option value={2}>重试 2 次</option></select></label><small className="field-hint wide">第三方网关可能早于本地上限中止请求；自动重试耗尽后仍可从失败页继续。</small></div>}
+      <div className="api-note"><strong>{textBackend === "codex-cli" ? "已选择本机 Codex CLI" : envKeyConfigured ? "已检测到系统 API Key" : "文本模型未配置"}</strong><br />{textBackend === "codex-cli"
+        ? "文本生成复用当前终端的 Codex 登录状态，网站不再要求单独填写 Key。"
+        : <>密钥、服务地址和模型只从本机系统环境变量读取，不会显示、保存或由浏览器提交。请配置 <code>OPENAI_API_KEY</code>、<code>OPENAI_API_BASE</code> 和 <code>TEXT_MODEL</code> 后重启服务。</>}
+        {!imageGenerationAvailable && <><br />当前未配置图片生成服务，交互网页会使用 HTML/CSS 视觉完成页面。</>}</div>
+      <label className="toggle-row"><span><strong>Image 2 视觉生成</strong><small>{imageGenerationAvailable ? "生成整页图或独立主视觉，按页面计费" : "未配置图片服务"}</small></span><input type="checkbox" disabled={!imageGenerationAvailable} checked={config.imageEnabled && imageGenerationAvailable} onChange={(event) => patch({ imageEnabled: event.target.checked })} /></label>
+      {config.imageEnabled && imageGenerationAvailable && <div className="image-config"><label className="wide"><span>成片模式</span><select value={config.imageTextMode} onChange={(event) => patch({ imageTextMode: event.target.value as ApiConfig["imageTextMode"] })}><option value="integrated">整页图文融合（推荐成片）</option><option value="native">原生分层（编辑优先）</option></select><small className="field-hint">整页融合让文字直接参与画面构图；原生分层便于编辑，但文字与图片的视觉融合度会降低。</small></label><label><span>生图页数</span><select value={config.imageCount} onChange={(event) => patch({ imageCount: clamp(Number(event.target.value), 0, 50) })}><option value={0}>跟随 PPT 总页数</option>{Array.from({ length: 50 }, (_, index) => index + 1).map((count) => <option key={count} value={count}>{count} 页</option>)}</select></label><label><span>质量</span><select value={config.imageQuality} onChange={(event) => patch({ imageQuality: event.target.value as ApiConfig["imageQuality"] })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label><label><span>单页最长等待</span><select value={config.imageTimeoutSeconds} onChange={(event) => patch({ imageTimeoutSeconds: clamp(Number(event.target.value), 240, 900) })}><option value={240}>4 分钟</option><option value={360}>6 分钟</option><option value={600}>10 分钟（推荐）</option><option value={900}>15 分钟</option></select></label><label><span>超时自动重试</span><select value={config.imageMaxRetries} onChange={(event) => patch({ imageMaxRetries: clamp(Number(event.target.value), 0, 2) })}><option value={0}>不重试</option><option value={1}>重试 1 次（推荐）</option><option value={2}>重试 2 次</option></select></label><small className="field-hint wide">第三方网关可能早于本地上限中止请求；自动重试耗尽后仍可从失败页继续。</small></div>}
       <button className={`connection-button ${connection}`} onClick={onTest} disabled={connection === "testing"}>{connection === "testing" ? <Loader2 className="spin" size={14} /> : <Cloud size={14} />}{connection === "success" ? "连接正常" : connection === "error" ? "重试连接" : "测试连接"}</button>
     </section>
   );
