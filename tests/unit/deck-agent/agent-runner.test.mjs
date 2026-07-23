@@ -158,6 +158,21 @@ describe("restricted Agent runner", () => {
     }))).rejects.toThrow(/upstream-call budget.*2/i);
   });
 
+  it("rejects more than three upstream calls from one logical model turn", async () => {
+    const modelClient = {
+      completeStructured: vi.fn().mockResolvedValue({
+        value: agentTurn({ message: "done", final: true }),
+        apiCalls: 4,
+      }),
+    };
+    const runner = createAgentRunner({ modelClient });
+
+    await expect(runner.runStage(stageOptions({
+      maxTurns: 2,
+      maxUpstreamCalls: 6,
+    }))).rejects.toThrow(/per-turn upstream-call budget 3/i);
+  });
+
   it("does not begin another turn after the cumulative upstream budget is spent", async () => {
     const modelClient = {
       completeStructured: vi.fn()

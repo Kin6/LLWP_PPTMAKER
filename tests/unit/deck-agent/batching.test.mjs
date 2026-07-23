@@ -68,6 +68,31 @@ function outlineFor(count) {
 }
 
 describe("build stage", () => {
+  it("budgets one build turn for compatible-provider repair calls", async () => {
+    const runner = { runStage: vi.fn(async () => ({ upstreamCalls: 3 })) };
+    const store = {
+      readArtifact: vi.fn(async () => "<section>built</section>"),
+      readJson: vi.fn(async () => ({ slides: [] })),
+    };
+
+    await runBuildStage({
+      jobId: "job-test",
+      signal: new AbortController().signal,
+      outline: outlineFor(1),
+      remainingSlideIds: ["slide-01"],
+      runner,
+      store,
+      skillLoader: { load: vi.fn(async () => ({ instructions: "build" })) },
+      tools: { forStage: vi.fn(() => ({})) },
+    });
+
+    expect(runner.runStage).toHaveBeenCalledWith(expect.objectContaining({
+      stage: "building",
+      maxTurns: 1,
+      maxUpstreamCalls: 3,
+    }));
+  });
+
   it("retries only failed targets once without rewriting successful batches", async () => {
     const outline = outlineFor(10);
     const buildBatch = vi.fn(async ({ slideIds, retry }) => {

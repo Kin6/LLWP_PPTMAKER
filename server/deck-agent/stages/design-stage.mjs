@@ -1,3 +1,5 @@
+import { upstreamCallBudget } from "../upstream-budget.mjs";
+
 const STYLE_THEME_HINT = Object.freeze({
   blank: "minimal-white",
   "product-calm": "corporate-clean",
@@ -30,7 +32,7 @@ export async function runDesignStage(context) {
     ],
     allowedTools: context.tools.forStage("design", context),
     maxTurns: 1,
-    maxUpstreamCalls: 1,
+    maxUpstreamCalls: upstreamCallBudget(1),
     timeoutMs: 120_000,
     signal: context.signal,
     emit: context.emit,

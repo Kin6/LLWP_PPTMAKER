@@ -1,3 +1,5 @@
+import { upstreamCallBudget } from "../upstream-budget.mjs";
+
 export function partitionSlideBatches(slideIds) {
   if (!Array.isArray(slideIds)) throw new TypeError("Slide IDs must be an array");
   const batches = [];
@@ -151,7 +153,7 @@ async function runAgentBatch(context, request) {
         readOnlySlideIds: request.readOnlySlideIds,
       }),
       maxTurns: 1,
-      maxUpstreamCalls: 1,
+      maxUpstreamCalls: upstreamCallBudget(1),
       timeoutMs: context.buildTimeoutMs || 120_000,
       signal: context.signal,
       emit: context.emit,

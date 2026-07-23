@@ -1,3 +1,5 @@
+import { MAX_UPSTREAM_CALLS_PER_MODEL_TURN } from "./upstream-budget.mjs";
+
 const MAX_HISTORY_TEXT_CHARS = 1_000;
 const MAX_MODEL_CONTENT_CHARS = 120_000;
 const REDACTED = "[redacted]";
@@ -110,6 +112,9 @@ export function createAgentRunner({ modelClient }) {
         stageSignal.throwIfAborted();
         if (!Number.isSafeInteger(response.apiCalls) || response.apiCalls < 1) {
           throw new Error("Model response reported an invalid upstream-call count");
+        }
+        if (response.apiCalls > MAX_UPSTREAM_CALLS_PER_MODEL_TURN) {
+          throw budgetError("per-turn upstream-call", MAX_UPSTREAM_CALLS_PER_MODEL_TURN);
         }
         upstreamCalls += response.apiCalls;
         if (upstreamCalls > maxUpstreamCalls) {

@@ -12,6 +12,7 @@ import { deckEventSchema } from "./contracts.mjs";
 import { validateStoredSlideHtml } from "./html-policy.mjs";
 import { validateSlideCss, validateThemeCss } from "./css-policy.mjs";
 import { HttpError, JobCancelledError } from "../shared/errors.mjs";
+import { MAX_UPSTREAM_CALLS_PER_MODEL_TURN } from "./upstream-budget.mjs";
 
 const JOB_ID = /^job-[0-9a-f-]{36}$/;
 const STAGE_TITLES = Object.freeze({
@@ -38,7 +39,6 @@ const ASSET_FILENAME = /^asset-[a-z0-9-]+\.(?:png|jpe?g|webp)$/;
 const SLIDE_ID = /^slide-\d{2}$/;
 const SLOT_ID = /^[a-z0-9-]+$/;
 const IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
-const MAX_STRUCTURED_API_CALLS = 3;
 const VISUAL_REVIEW_SCHEMA = Object.freeze({
   type: "object",
   additionalProperties: false,
@@ -409,8 +409,8 @@ function candidatePrefix(revisionId) {
 async function oneStructuredCall(modelClient, options) {
   const response = await modelClient.completeStructured(options);
   if (!Number.isSafeInteger(response.apiCalls) || response.apiCalls < 1
-    || response.apiCalls > MAX_STRUCTURED_API_CALLS) {
-    throw new Error(`Revision model operation exceeded upstream-call budget ${MAX_STRUCTURED_API_CALLS}`);
+    || response.apiCalls > MAX_UPSTREAM_CALLS_PER_MODEL_TURN) {
+    throw new Error(`Revision model operation exceeded upstream-call budget ${MAX_UPSTREAM_CALLS_PER_MODEL_TURN}`);
   }
   return response.value;
 }

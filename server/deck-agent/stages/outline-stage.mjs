@@ -1,9 +1,11 @@
 import { NO_EXTERNAL_MATERIALS, parseOutline } from "../outline.mjs";
+import { upstreamCallBudget } from "../upstream-budget.mjs";
 
 const MAX_SOURCE_CONTEXT_CHARS = 120_000;
 const MAX_BLOCK_CONTENT_CHARS = 8_000;
 const MAX_REPAIR_DRAFT_CHARS = 120_000;
 const SAFE_SOURCE_ID = /^[A-Za-z0-9._-]+$/;
+const OUTLINE_MAX_TURNS = 2;
 
 function outlineMarkdownContract({ sourceBlocks, slideCount }) {
   const hasSourceBlocks = sourceBlocks.length > 0;
@@ -184,8 +186,8 @@ export async function runOutlineStage(context) {
         stage: "outline",
         messages: buildOutlineMessages(context, skill, attempt, lastError, previousMarkdown),
         allowedTools,
-        maxTurns: 2,
-        maxUpstreamCalls: 2,
+        maxTurns: OUTLINE_MAX_TURNS,
+        maxUpstreamCalls: upstreamCallBudget(OUTLINE_MAX_TURNS),
         timeoutMs: 120_000,
         signal: context.signal,
         emit: context.emit,

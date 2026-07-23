@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createAgentRunner } from "../../../server/deck-agent/agent-runner.mjs";
 import { createToolRegistry } from "../../../server/deck-agent/tool-registry.mjs";
 import { runOutlineStage } from "../../../server/deck-agent/stages/outline-stage.mjs";
 import { runDesignStage } from "../../../server/deck-agent/stages/design-stage.mjs";
@@ -114,6 +115,30 @@ describe("outline and design stages", () => {
     expect(context.store.files.get("working/manifest.json").slides[0].sourceRefs).toEqual([]);
   });
 
+  it("allows compatible-provider repair calls within one outline turn", async () => {
+    const context = baseContext({ sourceBlocks: [] });
+    context.runner = createAgentRunner({
+      modelClient: {
+        completeStructured: vi.fn(async () => ({
+          value: {
+            message: "outline written",
+            final: true,
+            toolCalls: [{
+              id: "outline-1",
+              name: "write_outline",
+              argumentsJson: JSON.stringify({ markdown: sourceFreeOutline }),
+            }],
+          },
+          apiCalls: 3,
+        })),
+      },
+    });
+
+    await runOutlineStage(context);
+
+    expect(context.store.files.get("working/manifest.json").slides[0].sourceRefs).toEqual([]);
+  });
+
   it("publishes slides-content.md and advances without user confirmation", async () => {
     const context = baseContext();
     context.runner.runStage.mockImplementationOnce(async ({ allowedTools, messages }) => {
@@ -132,7 +157,7 @@ describe("outline and design stages", () => {
     expect(context.store.files.get("working/manifest.json").slides[0].sourceRefs).toEqual(["block-a"]);
     expect(context.emit).toHaveBeenCalledWith(expect.objectContaining({ type: "artifact", artifactId: "slides-content", status: "done" }));
     expect(context.waitForUser).not.toHaveBeenCalled();
-    expect(context.runner.runStage).toHaveBeenCalledWith(expect.objectContaining({ stage: "outline", maxTurns: 2, maxUpstreamCalls: 2, timeoutMs: 120_000 }));
+    expect(context.runner.runStage).toHaveBeenCalledWith(expect.objectContaining({ stage: "outline", maxTurns: 2, maxUpstreamCalls: 6, timeoutMs: 120_000 }));
   });
 
   it("repairs invalid Markdown once and then fails in outline", async () => {
@@ -182,10 +207,38 @@ describe("outline and design stages", () => {
     await runDesignStage(context);
 
     expect(context.runner.runStage).toHaveBeenCalledTimes(1);
-    expect(context.runner.runStage).toHaveBeenCalledWith(expect.objectContaining({ stage: "design", maxTurns: 1, maxUpstreamCalls: 1 }));
+    expect(context.runner.runStage).toHaveBeenCalledWith(expect.objectContaining({ stage: "design", maxTurns: 1, maxUpstreamCalls: 3 }));
     expect(context.store.files.get("design-brief.md")).toMatch(/Typography scale/);
     expect(context.store.files.get("working/theme.css")).toContain("--deck-primary");
     expect(context.waitForUser).not.toHaveBeenCalled();
+  });
+
+  it("allows compatible-provider repair calls within the single design turn", async () => {
+    const context = baseContext();
+    context.runner = createAgentRunner({
+      modelClient: {
+        completeStructured: vi.fn(async () => ({
+          value: {
+            message: "design written",
+            final: true,
+            toolCalls: [{
+              id: "design-1",
+              name: "write_theme",
+              argumentsJson: JSON.stringify({
+                designBriefMarkdown: "# Direction\nTypography scale; palette; grid; spacing; image grammar; chart grammar; motion level; prohibited patterns.",
+                themeCss: validTheme,
+              }),
+            }],
+          },
+          apiCalls: 3,
+        })),
+      },
+    });
+
+    await runDesignStage(context);
+
+    expect(context.store.files.get("design-brief.md")).toContain("Typography scale");
+    expect(context.store.files.get("working/theme.css")).toContain("--deck-primary");
   });
 
   it("rejects a design direction that omits required design grammar", async () => {
