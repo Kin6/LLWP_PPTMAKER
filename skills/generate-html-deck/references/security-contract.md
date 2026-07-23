@@ -5,6 +5,7 @@ Produce inert, offline slide fragments and one scoped stylesheet.
 ## Fragment Rules
 
 - Do not emit `<script>` or `<style>` elements.
+- Do not emit `<form>`, `<frame>`, `<iframe>`, `<embed>`, or `<object>` elements, or any SVG or MathML element.
 - Do not emit event-handler, `srcdoc`, or inline `style` attributes, or `javascript:` values.
 - Do not emit `href`, `srcset`, `action`, `poster`, or `formaction` URLs. An `<img>` may use `src="asset://id"` only when the local media catalog entry has every required field and its file matches the recorded SHA-256; the empty initial catalog therefore permits no image URL.
 - Do not declare the service-owned slide root or its ID/source attributes.

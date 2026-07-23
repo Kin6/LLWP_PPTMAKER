@@ -11,19 +11,19 @@ Run stages in this order:
 
 1. `outline`: validate the Markdown outline, slide count, claims, notes, and source block IDs.
 2. `design`: commit to one design direction and one catalog theme.
-3. `calibrating`: build and inspect the cover plus the densest non-cover slide.
-4. `building`: build the remaining slides in bounded batches and resolve local asset slots.
+3. `calibrating`: build and inspect the cover plus the densest non-cover slide; record `calibrationCorrectionCount` as `0` or `1`, then set `designRulesLocked: true`.
+4. `building`: put only non-calibration IDs in ordered 2-3-slide `buildBatches`, record one valid `pageCheckpoints` entry per page, and resolve local asset slots.
 5. `verifying`: inspect the complete deck once as a contact sheet and run deterministic checks.
-6. `repairing`: make one targeted repair round, then re-run the failed checks.
+6. `repairing`: when review findings exist, make at most one targeted repair round against matching failed slides, then re-run only their failed checks.
 
 ## Stop Conditions
 
 - Stop `outline` when validation reports a missing claim, note, source, narrative, or continuous slide number. Do not design around invalid input.
 - Stop `design` unless exactly one direction is recorded and every dependency is local and reviewable.
 - Stop `calibrating` until both calibration slides pass the visual and security rubrics. Do not build the rest first.
-- Stop `building` on an unknown source ID, unresolved image, unsafe fragment, overflow, or out-of-budget batch.
+- Stop `building` on an unknown source ID, unsafe fragment, overflow, or out-of-budget batch. Resolve a missing or failed optional image to a no-image layout and continue.
 - Stop `verifying` after one complete contact-sheet review. Route only named failures to `repairing`.
-- Stop `repairing` after one targeted round. Re-verify repaired slides; if any required check still fails, report `needs-review` instead of broadening the repair.
+- Skip `repairing` when review records zero findings. Otherwise stop after one targeted round; re-verify repaired slides and report `needs-review` if any required check still fails.
 
 ## Stage Routing
 

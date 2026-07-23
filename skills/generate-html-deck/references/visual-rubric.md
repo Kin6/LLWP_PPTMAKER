@@ -4,11 +4,11 @@ Use one bounded calibration, build, review, and repair cycle.
 
 ## Calibration
 
-Select `slide-01` and the highest-density non-cover slide. Build both before the rest. Record their stable IDs in order in `calibrationSlideIds` and verify title fit, reading order, source clearance, body legibility, contrast, and asset-slot behavior. A one-slide outline has no non-cover candidate, so calibrate and record only `slide-01`.
+Select `slide-01` and the highest-density non-cover slide. Build both before the rest. Record their stable IDs in order in `calibrationSlideIds` and verify title fit, reading order, source clearance, body legibility, contrast, and asset-slot behavior. Apply zero or one correction, record that integer in `calibrationCorrectionCount`, then record `designRulesLocked: true`; do not correct calibration or change design rules after the lock. A one-slide outline has no non-cover candidate, so calibrate and record only `slide-01`.
 
 ## Bounded Build
 
-Partition all slides into ordered `buildBatches` of two or three IDs. Their flattened IDs must cover every slide exactly once in slide order. Set `maxConcurrency` to `2` or lower. Reuse the calibrated theme and component rules; a batch does not create a new direction.
+Remove the calibration IDs from slide order, then partition only the remaining IDs into ordered `buildBatches` of two or three. Their flattened IDs must equal the remaining IDs exactly once and in order. Set `maxConcurrency` to `2` or lower. After each page validates, append its own `{ "slideId": "slide-NN", "status": "valid" }` record to `pageCheckpoints` in slide order; never checkpoint a batch as one unit. Reuse the locked theme and component rules; a batch does not create a new direction.
 
 ## One Complete Review
 
@@ -21,11 +21,11 @@ Render or assemble one contact sheet containing every slide and review it once a
 - source markers and empty asset slots;
 - cross-slide rhythm and unintended repetition.
 
-Name the slide IDs and defects found. Do not claim a contact-sheet review that was not performed. The findings must include at least one concrete, visually observed defect for the targeted repair round.
+Name the slide IDs and concrete defects found. Do not claim a contact-sheet review that was not performed. A clean review records zero findings as `findings: []`; it does not invent a defect to force a repair.
 
-## One Targeted Repair
+## Zero Or One Targeted Repair
 
-Run one targeted repair round against only the named defects, then re-check those slides. Record `targetedRepairRounds: 1` plus a non-empty `targetedRepairs` array; each record uses a finding's `slideId` and a concrete `repair` string. Do not regenerate unaffected slides or start a second broad review.
+If `findings` is empty, record `targetedRepairRounds: 0` and `targetedRepairs: []`, then publish without a repair. If findings exist, run one targeted repair round against only matching failed slide IDs, re-check only those slides, and record `targetedRepairRounds: 1` plus concrete `targetedRepairs`. The allowed contract is zero or one targeted repair round. Do not repair unaffected slides or start a second broad review.
 
 Delete calibration previews, contact-sheet HTML/CSS/PNG, browser profiles, and other temporary QA files after the review. Leave exactly the `slide-NN.html` fragments, one shared CSS file, and `process.json` in the delivery directory.
 
@@ -35,15 +35,18 @@ At minimum, preserve this auditable shape in `process.json`:
 {
   "designDirection": "one named direction",
   "calibrationSlideIds": ["slide-01", "slide-06"],
-  "buildBatches": [["slide-01", "slide-02"], ["slide-03", "slide-04", "slide-05"], ["slide-06", "slide-07", "slide-08"]],
+  "calibrationCorrectionCount": 0,
+  "designRulesLocked": true,
+  "buildBatches": [["slide-02", "slide-03", "slide-04"], ["slide-05", "slide-07", "slide-08"]],
+  "pageCheckpoints": [{ "slideId": "slide-02", "status": "valid" }, { "slideId": "slide-03", "status": "valid" }, { "slideId": "slide-04", "status": "valid" }, { "slideId": "slide-05", "status": "valid" }, { "slideId": "slide-07", "status": "valid" }, { "slideId": "slide-08", "status": "valid" }],
   "maxConcurrency": 2,
   "contactSheetReviewCount": 1,
   "contactSheetReview": {
     "slideIds": ["slide-01", "slide-02", "slide-03", "slide-04", "slide-05", "slide-06", "slide-07", "slide-08"],
-    "findings": [{ "slideId": "slide-07", "defect": "timeline markers collide with labels" }]
+    "findings": []
   },
-  "targetedRepairRounds": 1,
-  "targetedRepairs": [{ "slideId": "slide-07", "repair": "separated markers from labels and rechecked slide-07" }]
+  "targetedRepairRounds": 0,
+  "targetedRepairs": []
 }
 ```
 

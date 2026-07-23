@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -12,19 +12,31 @@ const scorer = path.join(repositoryRoot, "tests/skill/generate-html-deck/score-o
 const scenarios = path.join(repositoryRoot, "tests/skill/generate-html-deck/scenarios.json");
 const temporaryRoots = [];
 const qaSlideIds = Array.from({ length: 8 }, (_, index) => `slide-${String(index + 1).padStart(2, "0")}`);
+const qaCalibrationSlideIds = ["slide-01", "slide-06"];
+const qaBuildSlideIds = qaSlideIds.filter((slideId) => !qaCalibrationSlideIds.includes(slideId));
+const qaBuildBatches = [["slide-02", "slide-03", "slide-04"], ["slide-05", "slide-07", "slide-08"]];
+const qaPageCheckpoints = qaBuildSlideIds.map((slideId) => ({ slideId, status: "valid" }));
+const imageResolutionOrder = ["uploaded-assets", "licensed-internal-assets", "optional-generation", "no-image-layout"];
+const byteLimits = {
+  markdown: 2 * 1024 * 1024,
+  slideHtml: 200 * 1024,
+  slideCss: 120 * 1024,
+  json: 10 * 1024 * 1024,
+  image: 12 * 1024 * 1024,
+};
 
 afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-async function score(setup) {
+async function score(setup, scenarioPath = scenarios) {
   const root = await mkdtemp(path.join(tmpdir(), "deck-score-"));
   temporaryRoots.push(root);
   const outputs = path.join(root, "outputs");
   const report = path.join(root, "report.json");
   await setup(outputs);
   try {
-    await execFileAsync(process.execPath, [scorer, "--scenarios", scenarios, "--outputs", outputs, "--report", report], {
+    await execFileAsync(process.execPath, [scorer, "--scenarios", scenarioPath, "--outputs", outputs, "--report", report], {
       cwd: repositoryRoot,
     });
   } catch (error) {
@@ -49,6 +61,12 @@ function scenario(report, id) {
 
 function field(record, name) {
   return record.fields.find((item) => item.field === name);
+}
+
+function padToBytes(contents, byteLength) {
+  const padding = byteLength - Buffer.byteLength(contents, "utf8");
+  if (padding < 0) throw new Error("Requested byte length is smaller than content");
+  return `${contents}${" ".repeat(padding)}`;
 }
 
 function validSourceFiles(htmlOverrides = {}) {
@@ -101,6 +119,50 @@ it("rejects QA metadata without the eight slide artifacts and exact ordered batc
   expect(scenario(report, "qa-under-budget").pass).toBe(false);
 });
 
+it("accepts at most one calibration correction, locks design, and builds only remaining slides", async () => {
+  const report = await score((outputs) => writeScenario(outputs, "qa-under-budget", validQaFiles({
+    processOverrides: {
+      calibrationSlideIds: qaCalibrationSlideIds,
+      calibrationCorrectionCount: 1,
+      designRulesLocked: true,
+      buildBatches: qaBuildBatches,
+      pageCheckpoints: qaPageCheckpoints,
+    },
+  })));
+
+  const record = scenario(report, "qa-under-budget");
+  expect(field(record, "cover-dense-calibration")?.pass).toBe(true);
+  expect(field(record, "batch-size-2-3")?.pass).toBe(true);
+});
+
+it("rejects calibration correction overflow or an unlocked design", async () => {
+  const report = await score((outputs) => writeScenario(outputs, "qa-under-budget", validQaFiles({
+    processOverrides: {
+      calibrationSlideIds: qaCalibrationSlideIds,
+      calibrationCorrectionCount: 2,
+      designRulesLocked: false,
+      buildBatches: qaBuildBatches,
+      pageCheckpoints: qaPageCheckpoints,
+    },
+  })));
+
+  expect(field(scenario(report, "qa-under-budget"), "cover-dense-calibration")?.pass).toBe(false);
+});
+
+it("rejects build batches without one valid checkpoint per remaining page", async () => {
+  const report = await score((outputs) => writeScenario(outputs, "qa-under-budget", validQaFiles({
+    processOverrides: {
+      calibrationSlideIds: qaCalibrationSlideIds,
+      calibrationCorrectionCount: 0,
+      designRulesLocked: true,
+      buildBatches: qaBuildBatches,
+      pageCheckpoints: qaPageCheckpoints.slice(0, -1),
+    },
+  })));
+
+  expect(field(scenario(report, "qa-under-budget"), "batch-size-2-3")?.pass).toBe(false);
+});
+
 it("rejects executable fragment attributes and nonexistent asset URLs", async () => {
   const report = await score((outputs) => writeScenario(outputs, "dense-fast-pressure", {
     "slide-01.html": '<iframe srcdoc="<script>alert(1)</script>"></iframe><img src="asset://ghost" style="background:url(https://example.com/x.png)">',
@@ -110,6 +172,23 @@ it("rejects executable fragment attributes and nonexistent asset URLs", async ()
   }));
 
   expect(scenario(report, "dense-fast-pressure").pass).toBe(false);
+});
+
+it("rejects every prohibited hostile fragment element without URL attributes", async () => {
+  const report = await score((outputs) => writeScenario(outputs, "dense-fast-pressure", {
+    "slide-01.html": "<form></form><frame></frame><iframe></iframe><embed><object></object><svg><circle></circle></svg><math><mi>x</mi></math>",
+    "slide-02.html": "<p>Evidence</p>",
+    "deck.css": ":root { --deck-bg: #fff; }\n:slide { width: 1920px; height: 1080px; }\n",
+    "process.json": { designDirection: "one direction" },
+  }));
+
+  const security = field(scenario(report, "dense-fast-pressure"), "no-script");
+  expect(security?.pass).toBe(false);
+  for (const tag of ["form", "frame", "iframe", "embed", "object", "svg", "math"]) {
+    expect(security?.evidence.violations).toEqual(expect.arrayContaining([
+      expect.stringContaining(`<${tag}>`),
+    ]));
+  }
 });
 
 it("requires canonical sourceRefs without duplicates and visible source evidence", async () => {
@@ -127,6 +206,30 @@ it("requires canonical sourceRefs without duplicates and visible source evidence
   }));
 
   expect(scenario(report, "source-and-image-slots").pass).toBe(false);
+});
+
+it("rejects image resolution that does not use the required ordered chain", async () => {
+  const files = validSourceFiles();
+  files["process.json"] = {
+    ...files["process.json"],
+    imageResolutionOrder: ["optional-generation", "uploaded-assets", "licensed-internal-assets", "no-image-layout"],
+  };
+  const report = await score((outputs) => writeScenario(outputs, "source-and-image-slots", files));
+
+  expect(field(scenario(report, "source-and-image-slots"), "no-image-fallback")?.pass).toBe(false);
+});
+
+it("accepts an optional image failure that resolves to a no-image layout", async () => {
+  const files = validSourceFiles();
+  files["process.json"] = {
+    ...files["process.json"],
+    imageResolutionOrder,
+    optionalImageFailures: [{ slot: "cover-image", outcome: "no-image-layout" }],
+  };
+  const report = await score((outputs) => writeScenario(outputs, "source-and-image-slots", files));
+
+  expect(scenario(report, "source-and-image-slots").pass).toBe(true);
+  expect(field(scenario(report, "source-and-image-slots"), "no-image-fallback")?.pass).toBe(true);
 });
 
 it("applies script and URL security checks to every scenario", async () => {
@@ -185,6 +288,44 @@ it("requires concrete contact-sheet defects and meaningful targeted repairs", as
   expect(field(record, "one-targeted-repair")?.pass).toBe(false);
 });
 
+it("accepts a clean whole-deck review with zero findings and zero repairs", async () => {
+  const report = await score((outputs) => writeScenario(outputs, "qa-under-budget", validQaFiles({
+    processOverrides: {
+      calibrationCorrectionCount: 0,
+      designRulesLocked: true,
+      buildBatches: qaBuildBatches,
+      pageCheckpoints: qaPageCheckpoints,
+      contactSheetReview: { slideIds: qaSlideIds, findings: [] },
+      targetedRepairRounds: 0,
+      targetedRepairs: [],
+    },
+  })));
+
+  const record = scenario(report, "qa-under-budget");
+  expect(field(record, "one-contact-sheet-review")?.pass).toBe(true);
+  expect(field(record, "one-targeted-repair")?.pass).toBe(true);
+  expect(record.pass).toBe(true);
+});
+
+it("accepts one targeted repair only for a matching failed slide", async () => {
+  const report = await score((outputs) => writeScenario(outputs, "qa-under-budget", validQaFiles({
+    processOverrides: {
+      calibrationCorrectionCount: 1,
+      designRulesLocked: true,
+      buildBatches: qaBuildBatches,
+      pageCheckpoints: qaPageCheckpoints,
+      contactSheetReview: {
+        slideIds: qaSlideIds,
+        findings: [{ slideId: "slide-03", defect: "The metric panel clips its final line at the lower edge." }],
+      },
+      targetedRepairRounds: 1,
+      targetedRepairs: [{ slideId: "slide-03", repair: "Reduced panel padding and rechecked the complete final line." }],
+    },
+  })));
+
+  expect(field(scenario(report, "qa-under-budget"), "one-targeted-repair")?.pass).toBe(true);
+});
+
 it("rejects a later fixed-canvas override", async () => {
   const report = await score((outputs) => writeScenario(outputs, "dense-fast-pressure", {
     "slide-01.html": "<p>Cover</p>",
@@ -196,4 +337,109 @@ it("rejects a later fixed-canvas override", async () => {
   const record = scenario(report, "dense-fast-pressure");
   expect(record.pass).toBe(false);
   expect(field(record, "fixed-canvas")?.pass).toBe(false);
+});
+
+it("reports scenario-root and artifact symlinks as safety evidence", async () => {
+  const outsideRoot = await mkdtemp(path.join(tmpdir(), "deck-score-outside-"));
+  temporaryRoots.push(outsideRoot);
+  await writeScenario(outsideRoot, "dense-fast-pressure", {
+    "slide-01.html": "<p>Cover</p>",
+    "slide-02.html": "<p>Evidence</p>",
+    "deck.css": ":root { --deck-bg: #fff; }\n:slide { width: 1920px; height: 1080px; }\n",
+    "process.json": { designDirection: "one direction" },
+  });
+  const outsideFile = path.join(outsideRoot, "outside.html");
+  await writeFile(outsideFile, "<p>outside</p>", "utf8");
+
+  const report = await score(async (outputs) => {
+    await mkdir(outputs, { recursive: true });
+    await symlink(path.join(outsideRoot, "dense-fast-pressure"), path.join(outputs, "dense-fast-pressure"));
+    await writeScenario(outputs, "source-and-image-slots", validSourceFiles());
+    await symlink(outsideFile, path.join(outputs, "source-and-image-slots/escape.html"));
+  });
+
+  for (const id of ["dense-fast-pressure", "source-and-image-slots"]) {
+    const safety = field(scenario(report, id), "artifact-safety");
+    expect(safety?.pass).toBe(false);
+    expect(safety?.evidence.violations.join("\n")).toMatch(/symbolic link/i);
+  }
+});
+
+it("reports a scenario-id path escape instead of reading outside the outputs root", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "deck-score-scenarios-"));
+  temporaryRoots.push(root);
+  const scenarioPath = path.join(root, "scenarios.json");
+  await writeFile(scenarioPath, `${JSON.stringify([{
+    id: "../escaped-scenario",
+    request: "escape test",
+    mustPass: ["one-design-direction"],
+  }])}\n`, "utf8");
+  const report = await score((outputs) => writeScenario(outputs, "../escaped-scenario", {
+    "slide-01.html": "<p>Cover</p>",
+    "slide-02.html": "<p>Evidence</p>",
+    "deck.css": ":root { --deck-bg: #fff; }\n:slide { width: 1920px; height: 1080px; }\n",
+    "process.json": { designDirection: "one direction" },
+  }), scenarioPath);
+
+  const safety = field(scenario(report, "../escaped-scenario"), "artifact-safety");
+  expect(safety?.pass).toBe(false);
+  expect(safety?.evidence.violations.join("\n")).toMatch(/escape.*output root/i);
+});
+
+it("reports exact Markdown, slide HTML, slide CSS, and JSON byte limits before reading", async () => {
+  const report = await score((outputs) => writeScenario(outputs, "dense-fast-pressure", {
+    "notes.md": "x".repeat(byteLimits.markdown + 1),
+    "slide-01.html": padToBytes("<p>Cover</p>", byteLimits.slideHtml + 1),
+    "slide-02.html": "<p>Evidence</p>",
+    "deck.css": padToBytes(":slide { width: 1920px; height: 1080px; }", byteLimits.slideCss + 1),
+    "process.json": padToBytes(JSON.stringify({ designDirection: "one direction" }), byteLimits.json + 1),
+  }));
+
+  const safety = field(scenario(report, "dense-fast-pressure"), "artifact-safety");
+  expect(safety?.pass).toBe(false);
+  expect(safety?.evidence.violations).toEqual(expect.arrayContaining([
+    `notes.md: exceeds ${byteLimits.markdown} byte limit`,
+    `slide-01.html: exceeds ${byteLimits.slideHtml} byte limit`,
+    `deck.css: exceeds ${byteLimits.slideCss} byte limit`,
+    `process.json: exceeds ${byteLimits.json} byte limit`,
+  ]));
+});
+
+it("reports symlinked and oversized media catalog files without crashing", async () => {
+  const { loadMediaCatalog } = await import("./score-output.mjs");
+  const root = await mkdtemp(path.join(tmpdir(), "deck-media-root-"));
+  const outsideRoot = await mkdtemp(path.join(tmpdir(), "deck-media-outside-"));
+  temporaryRoots.push(root, outsideRoot);
+  const catalogPath = path.join(root, "catalog.json");
+  const outsideCatalog = path.join(outsideRoot, "catalog.json");
+  await writeFile(outsideCatalog, '{"assets":[]}\n', "utf8");
+  await symlink(outsideCatalog, catalogPath);
+
+  let media = await loadMediaCatalog({ mediaRoot: root, catalogPath });
+  expect(media.violations).toContain("catalog.json: symbolic links are forbidden");
+
+  await rm(catalogPath);
+  const entry = {
+    id: "reviewed-image",
+    file: "reviewed-image.png",
+    tags: ["evidence"],
+    license: "internal",
+    sourceUrl: "https://example.invalid/license",
+    sha256: "0".repeat(64),
+  };
+  await writeFile(catalogPath, `${JSON.stringify({ assets: [entry] })}\n`, "utf8");
+  const outsideImage = path.join(outsideRoot, "outside.png");
+  await writeFile(outsideImage, "image", "utf8");
+  await symlink(outsideImage, path.join(root, entry.file));
+  media = await loadMediaCatalog({ mediaRoot: root, catalogPath });
+  expect(media.violations).toContain(`${entry.file}: symbolic links are forbidden`);
+
+  await rm(path.join(root, entry.file));
+  await writeFile(path.join(root, entry.file), Buffer.alloc(byteLimits.image + 1));
+  media = await loadMediaCatalog({ mediaRoot: root, catalogPath });
+  expect(media.violations).toContain(`${entry.file}: exceeds ${byteLimits.image} byte limit`);
+
+  await writeFile(catalogPath, padToBytes('{"assets":[]}', byteLimits.json + 1), "utf8");
+  media = await loadMediaCatalog({ mediaRoot: root, catalogPath });
+  expect(media.violations).toContain(`catalog.json: exceeds ${byteLimits.json} byte limit`);
 });

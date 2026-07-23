@@ -1,12 +1,14 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseFragment } from "parse5";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { createSkillLoader } from "../../../server/deck-agent/skill-loader.mjs";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const skillRoot = path.join(repositoryRoot, "skills/generate-html-deck");
+const temporaryRoots = [];
 const expectedThemes = ["minimal-white", "corporate-clean", "swiss-grid", "editorial-serif", "academic-paper", "magazine-bold", "tokyo-night", "pitch-deck-vc"];
 const expectedLayouts = ["cover", "section-divider", "two-column", "big-quote", "stat-highlight", "kpi-grid", "table", "timeline", "comparison", "process-steps", "image-hero", "thanks"];
 const expectedStageFiles = {
@@ -19,7 +21,7 @@ const expectedStageFiles = {
 };
 const expectedLayoutSlots = {
   cover: ["cover-image", "eyebrow", "source", "subtitle", "title"],
-  "section-divider": ["section-number", "summary", "title"],
+  "section-divider": ["section-number", "source", "summary", "title"],
   "two-column": ["left", "right", "source", "title"],
   "big-quote": ["attribution", "quote", "source"],
   "stat-highlight": ["context", "source", "stat-label", "stat-value", "title"],
@@ -29,8 +31,22 @@ const expectedLayoutSlots = {
   comparison: ["left-body", "left-heading", "right-body", "right-heading", "source", "title"],
   "process-steps": ["source", "step-1", "step-2", "step-3", "step-4", "title"],
   "image-hero": ["caption", "hero-image", "source", "title"],
-  thanks: ["contact", "takeaway", "title"],
+  thanks: ["contact", "source", "takeaway", "title"],
 };
+
+afterEach(async () => {
+  await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+async function createTemporaryOutlineSkill() {
+  const root = await mkdtemp(path.join(tmpdir(), "deck-skill-loader-"));
+  temporaryRoots.push(root);
+  await mkdir(path.join(root, "references"), { recursive: true });
+  await writeFile(path.join(root, "SKILL.md"), "skill", "utf8");
+  await writeFile(path.join(root, "references/content-density.md"), "density", "utf8");
+  await writeFile(path.join(root, "references/source-provenance.md"), "sources", "utf8");
+  return root;
+}
 
 function collectElements(node, elements = []) {
   if (node.tagName) elements.push(node);
@@ -71,6 +87,81 @@ describe("project Skill loader", () => {
   it("enforces the configured context budget", async () => {
     await expect(createSkillLoader({ skillRoot, maxChars: 10 }).load("outline"))
       .rejects.toThrow(/exceeds 10 characters/i);
+  });
+
+  it("routes the auditable calibration lock and remaining-page build contract", async () => {
+    const loader = createSkillLoader({ skillRoot });
+    const calibrating = await loader.load("calibrating");
+    const building = await loader.load("building");
+
+    expect(calibrating.instructions).toContain("calibrationCorrectionCount");
+    expect(calibrating.instructions).toContain("designRulesLocked");
+    expect(building.instructions).toContain("buildBatches");
+    expect(building.instructions).toContain("pageCheckpoints");
+    expect(building.instructions).toMatch(/non-calibration/i);
+  });
+
+  it("routes the ordered optional-image resolution contract to building", async () => {
+    const instructions = (await createSkillLoader({ skillRoot }).load("building")).instructions;
+    const terms = ["uploaded-assets", "licensed-internal-assets", "optional-generation", "no-image-layout"];
+    const positions = terms.map((term) => instructions.indexOf(term));
+
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((left, right) => left - right));
+    expect(instructions).toMatch(/optional image.*must not fail|failed optional image.*continue/i);
+    expect(instructions).not.toMatch(/Stop `building`.*unresolved image/i);
+  });
+
+  it("keeps every decided image position as an empty named slot after no-image resolution", async () => {
+    const instructions = (await createSkillLoader({ skillRoot }).load("building")).instructions;
+
+    expect(instructions).toContain("Keep every decided image position as an empty named `data-asset-slot`");
+    expect(instructions).toMatch(/no-image-layout[\s\S]{0,240}do not (?:add|emit) an `<img>` or (?:add|emit) a URL/i);
+  });
+
+  it("routes every prohibited hostile fragment element to generation stages", async () => {
+    const loader = createSkillLoader({ skillRoot });
+    const design = (await loader.load("design")).instructions.toLowerCase();
+    const building = (await loader.load("building")).instructions.toLowerCase();
+
+    for (const prohibited of ["<form>", "<frame>", "<iframe>", "<embed>", "<object>", "svg", "mathml"]) {
+      expect(design).toContain(prohibited);
+      expect(building).toContain(prohibited);
+    }
+  });
+
+  it("routes the clean zero-repair and matching one-repair QA contract", async () => {
+    const loader = createSkillLoader({ skillRoot });
+    const verifying = (await loader.load("verifying")).instructions;
+    const repairing = (await loader.load("repairing")).instructions;
+
+    expect(verifying).toMatch(/zero findings|findings.*empty/i);
+    expect(repairing).toMatch(/zero or one targeted repair|0 or 1 targeted repair/i);
+    expect(repairing).toMatch(/matching failed slide|only.*failed slide/i);
+    expect(repairing).toContain("targetedRepairRounds");
+  });
+
+  it("rejects symlinked stage files and Markdown larger than exactly 2 MiB", async () => {
+    const root = await createTemporaryOutlineSkill();
+    const sourcePath = path.join(root, "references/source-provenance.md");
+    const outsideRoot = await mkdtemp(path.join(tmpdir(), "deck-skill-outside-"));
+    temporaryRoots.push(outsideRoot);
+    const outsidePath = path.join(outsideRoot, "outside.md");
+    await writeFile(outsidePath, "outside", "utf8");
+    await rm(sourcePath);
+    await symlink(outsidePath, sourcePath);
+
+    await expect(createSkillLoader({ skillRoot: root, maxChars: 4 * 1024 * 1024 }).load("outline"))
+      .rejects.toThrow(/symbolic link|escape/i);
+
+    await rm(sourcePath);
+    await writeFile(sourcePath, "x".repeat(2 * 1024 * 1024), "utf8");
+    await expect(createSkillLoader({ skillRoot: root, maxChars: 4 * 1024 * 1024 }).load("outline"))
+      .resolves.toMatchObject({ files: expectedStageFiles.outline });
+
+    await writeFile(sourcePath, "x".repeat(2 * 1024 * 1024 + 1), "utf8");
+    await expect(createSkillLoader({ skillRoot: root, maxChars: 4 * 1024 * 1024 }).load("outline"))
+      .rejects.toThrow(/2097152|2 MiB|size|limit/i);
   });
 
   it("rejects inherited object property names as unknown stages", async () => {

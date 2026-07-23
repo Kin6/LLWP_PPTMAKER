@@ -1,5 +1,7 @@
-import { readFile } from "node:fs/promises";
+import { lstat, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
+
+const MAX_MARKDOWN_BYTES = 2 * 1024 * 1024;
 
 const STAGE_FILES = Object.freeze({
   outline: ["SKILL.md", "references/content-density.md", "references/source-provenance.md"],
@@ -17,7 +19,28 @@ async function readAllowedSkillFile(skillRoot, relativePath) {
   if (!relation || relation === ".." || relation.startsWith(`..${path.sep}`) || path.isAbsolute(relation)) {
     throw new Error(`Skill file escapes root: ${relativePath}`);
   }
-  return readFile(target, "utf8");
+
+  const rootStat = await lstat(root);
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) throw new Error("Skill root must be a real directory");
+  let cursor = target;
+  while (true) {
+    const fileStat = await lstat(cursor);
+    if (fileStat.isSymbolicLink()) throw new Error(`Symbolic links are forbidden for Skill file: ${relativePath}`);
+    if (cursor === root) break;
+    cursor = path.dirname(cursor);
+  }
+
+  const [realRoot, realTarget] = await Promise.all([realpath(root), realpath(target)]);
+  const realRelation = path.relative(realRoot, realTarget);
+  if (!realRelation || realRelation === ".." || realRelation.startsWith(`..${path.sep}`) || path.isAbsolute(realRelation)) {
+    throw new Error(`Skill file escapes root: ${relativePath}`);
+  }
+  const targetStat = await lstat(realTarget);
+  if (!targetStat.isFile()) throw new Error(`Skill file is not a regular file: ${relativePath}`);
+  if (targetStat.size > MAX_MARKDOWN_BYTES) {
+    throw new Error(`Skill file exceeds ${MAX_MARKDOWN_BYTES} byte limit: ${relativePath}`);
+  }
+  return readFile(realTarget, "utf8");
 }
 
 export function createSkillLoader({ skillRoot, maxChars = 24_000 }) {

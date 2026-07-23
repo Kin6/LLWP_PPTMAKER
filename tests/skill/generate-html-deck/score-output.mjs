@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile, readdir, writeFile } from "node:fs/promises";
+import { lstat, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import * as csstree from "css-tree";
 import { parseFragment } from "parse5";
@@ -12,8 +12,21 @@ const EXPECTED_SOURCE_REFS = new Map([
 ]);
 const QA_SLIDE_IDS = Array.from({ length: 8 }, (_, index) => `slide-${String(index + 1).padStart(2, "0")}`);
 const REQUIRED_MEDIA_FIELDS = ["id", "file", "tags", "license", "sourceUrl", "sha256"];
-const UNIVERSAL_SECURITY_FIELDS = ["no-script", "no-external-url"];
-const mediaRoot = fileURLToPath(new URL("../../../skills/generate-html-deck/assets/media/", import.meta.url));
+const IMAGE_RESOLUTION_ORDER = ["uploaded-assets", "licensed-internal-assets", "optional-generation", "no-image-layout"];
+const UNIVERSAL_SECURITY_FIELDS = ["artifact-safety", "no-script", "no-external-url"];
+const BYTE_LIMITS = Object.freeze({
+  markdown: 2 * 1024 * 1024,
+  slideHtml: 200 * 1024,
+  slideCss: 120 * 1024,
+  json: 10 * 1024 * 1024,
+  image: 12 * 1024 * 1024,
+});
+const PROHIBITED_FRAGMENT_TAGS = new Set(["script", "style", "form", "frame", "iframe", "embed", "object", "svg", "math"]);
+const PROHIBITED_FRAGMENT_NAMESPACES = new Set([
+  "http://www.w3.org/2000/svg",
+  "http://www.w3.org/1998/Math/MathML",
+]);
+const defaultMediaRoot = fileURLToPath(new URL("../../../skills/generate-html-deck/assets/media/", import.meta.url));
 
 function parseArguments(argv) {
   const values = {};
@@ -31,24 +44,102 @@ function parseArguments(argv) {
   return values;
 }
 
-async function listFiles(root) {
+function isContained(root, target) {
+  const relation = path.relative(root, target);
+  return Boolean(relation)
+    && relation !== ".."
+    && !relation.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(relation);
+}
+
+async function readContainedFile(root, target, { byteLimit, label, encoding = "utf8" }) {
+  const resolvedRoot = path.resolve(root);
+  const resolvedTarget = path.resolve(target);
+  if (!isContained(resolvedRoot, resolvedTarget)) throw new Error(`${label}: escapes root`);
+  try {
+    const rootStat = await lstat(resolvedRoot);
+    if (rootStat.isSymbolicLink()) throw new Error(`${label}: symbolic links are forbidden`);
+    if (!rootStat.isDirectory()) throw new Error(`${label}: root is not a directory`);
+    let cursor = resolvedTarget;
+    while (true) {
+      const entryStat = await lstat(cursor);
+      if (entryStat.isSymbolicLink()) throw new Error(`${label}: symbolic links are forbidden`);
+      if (cursor === resolvedRoot) break;
+      cursor = path.dirname(cursor);
+    }
+    const [realRoot, realTarget] = await Promise.all([realpath(resolvedRoot), realpath(resolvedTarget)]);
+    if (!isContained(realRoot, realTarget)) throw new Error(`${label}: escapes root`);
+    const targetStat = await lstat(realTarget);
+    if (!targetStat.isFile()) throw new Error(`${label}: is not a regular file`);
+    if (targetStat.size > byteLimit) throw new Error(`${label}: exceeds ${byteLimit} byte limit`);
+    return readFile(realTarget, encoding);
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith(`${label}:`)) throw error;
+    throw new Error(`${label}: unreadable file (${error instanceof Error ? error.message : String(error)})`);
+  }
+}
+
+function scenarioArtifactLimit(relativePath) {
+  const extension = path.extname(relativePath).toLowerCase();
+  if (extension === ".md") return BYTE_LIMITS.markdown;
+  if (extension === ".html") return BYTE_LIMITS.slideHtml;
+  if (extension === ".css") return BYTE_LIMITS.slideCss;
+  if (extension === ".json") return BYTE_LIMITS.json;
+  return undefined;
+}
+
+async function loadScenarioFiles(root) {
   const files = [];
+  const violations = [];
+  const resolvedRoot = path.resolve(root);
+  let rootStat;
+  try {
+    rootStat = await lstat(resolvedRoot);
+  } catch (error) {
+    if (error?.code === "ENOENT") return { files, violations };
+    return { files, violations: [`scenario root: unreadable (${error.message})`] };
+  }
+  if (rootStat.isSymbolicLink()) return { files, violations: ["scenario root: symbolic links are forbidden"] };
+  if (!rootStat.isDirectory()) return { files, violations: ["scenario root: is not a directory"] };
+
   async function visit(directory) {
     let entries;
     try {
       entries = await readdir(directory, { withFileTypes: true });
     } catch (error) {
-      if (error?.code === "ENOENT") return;
-      throw error;
+      violations.push(`${path.relative(resolvedRoot, directory) || "scenario root"}: unreadable directory (${error.message})`);
+      return;
     }
     for (const entry of entries) {
       const target = path.join(directory, entry.name);
-      if (entry.isDirectory()) await visit(target);
-      else if (entry.isFile()) files.push(target);
+      const relativePath = path.relative(resolvedRoot, target);
+      if (entry.isSymbolicLink()) {
+        violations.push(`${relativePath}: symbolic links are forbidden`);
+      } else if (entry.isDirectory()) {
+        await visit(target);
+      } else if (entry.isFile()) {
+        const byteLimit = scenarioArtifactLimit(relativePath);
+        if (!byteLimit) {
+          violations.push(`${relativePath}: unsupported artifact type`);
+          continue;
+        }
+        try {
+          files.push({
+            relativePath,
+            contents: await readContainedFile(resolvedRoot, target, { byteLimit, label: relativePath }),
+          });
+        } catch (error) {
+          violations.push(error.message);
+        }
+      } else {
+        violations.push(`${relativePath}: unsupported filesystem entry`);
+      }
     }
   }
-  await visit(root);
-  return files.sort();
+  await visit(resolvedRoot);
+  files.sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+  violations.sort();
+  return { files, violations };
 }
 
 function sourceIdsFromBlocks(blocks) {
@@ -58,8 +149,20 @@ function sourceIdsFromBlocks(blocks) {
   return new Set(ids);
 }
 
-async function loadMediaCatalog() {
-  const catalog = JSON.parse(await readFile(new URL("../../../skills/generate-html-deck/assets/media/catalog.json", import.meta.url), "utf8"));
+export async function loadMediaCatalog({
+  mediaRoot = defaultMediaRoot,
+  catalogPath = path.join(mediaRoot, "catalog.json"),
+} = {}) {
+  let catalog;
+  try {
+    const rawCatalog = await readContainedFile(mediaRoot, catalogPath, {
+      byteLimit: BYTE_LIMITS.json,
+      label: path.basename(catalogPath),
+    });
+    catalog = JSON.parse(rawCatalog);
+  } catch (error) {
+    return { ids: new Set(), violations: [error instanceof Error ? error.message : String(error)] };
+  }
   const entries = Array.isArray(catalog?.assets) ? catalog.assets : [];
   const ids = new Set();
   const violations = [];
@@ -69,14 +172,12 @@ async function loadMediaCatalog() {
       violations.push(`media catalog: invalid entry ${entry?.id || "unknown"}`);
       continue;
     }
-    const target = path.resolve(mediaRoot, entry.file);
-    const relation = path.relative(mediaRoot, target);
-    if (!relation || relation === ".." || relation.startsWith(`..${path.sep}`) || path.isAbsolute(relation)) {
-      violations.push(`media catalog: unsafe file for ${entry.id}`);
-      continue;
-    }
     try {
-      const contents = await readFile(target);
+      const contents = await readContainedFile(mediaRoot, path.resolve(mediaRoot, entry.file), {
+        byteLimit: BYTE_LIMITS.image,
+        label: entry.file,
+        encoding: null,
+      });
       const digest = createHash("sha256").update(contents).digest("hex");
       if (digest !== entry.sha256) {
         violations.push(`media catalog: hash mismatch for ${entry.id}`);
@@ -84,7 +185,7 @@ async function loadMediaCatalog() {
       }
       ids.add(entry.id);
     } catch (error) {
-      violations.push(`media catalog: unreadable file for ${entry.id}: ${error.message}`);
+      violations.push(error instanceof Error ? error.message : String(error));
     }
   }
   return { ids, violations };
@@ -235,6 +336,11 @@ function validContactFindings(process) {
 }
 
 const checks = {
+  "artifact-safety": ({ artifactViolations }) => result(
+    "artifact-safety",
+    artifactViolations.length === 0,
+    { violations: artifactViolations },
+  ),
   "one-design-direction": ({ process }) => {
     const directions = Array.isArray(process.designDirections)
       ? process.designDirections
@@ -243,10 +349,13 @@ const checks = {
         : [];
     return result("one-design-direction", directions.length === 1, { directions }, "text-judgment");
   },
-  "no-script": ({ elements }) => {
+  "no-script": ({ elements, htmlFiles }) => {
     const violations = elements.flatMap((element) => {
       const found = [];
-      if (["script", "style"].includes(element.tagName)) found.push(`${element.file}: <${element.tagName}>`);
+      if (PROHIBITED_FRAGMENT_TAGS.has(element.tagName)
+        || PROHIBITED_FRAGMENT_NAMESPACES.has(element.namespaceURI)) {
+        found.push(`${element.file}: <${element.tagName}>`);
+      }
       for (const attribute of element.attrs || []) {
         if (attribute.name === "srcdoc" || attribute.name.startsWith("on") || /^javascript:/i.test(attribute.value)) {
           found.push(`${element.file}: ${attribute.name}`);
@@ -254,6 +363,9 @@ const checks = {
       }
       return found;
     });
+    for (const file of htmlFiles) {
+      if (/<\s*frame\b/i.test(file.contents)) violations.push(`${file.relativePath}: <frame>`);
+    }
     return result("no-script", violations.length === 0, { violations });
   },
   "no-external-url": ({ elements, css, media }) => {
@@ -322,6 +434,10 @@ const checks = {
   },
   "no-image-fallback": ({ elements, css, process, media }) => {
     const violations = [...externalUrls(elements, css, media.ids, media.violations)];
+    const resolutionOrder = Array.isArray(process.imageResolutionOrder) ? process.imageResolutionOrder : [];
+    if (JSON.stringify(resolutionOrder) !== JSON.stringify(IMAGE_RESOLUTION_ORDER)) {
+      violations.push(`process.json: imageResolutionOrder must be ${IMAGE_RESOLUTION_ORDER.join(" -> ")}`);
+    }
     for (const element of elements) {
       if (element.tagName === "img") {
         const source = (element.attrs || []).find((attribute) => attribute.name === "src")?.value;
@@ -331,20 +447,57 @@ const checks = {
     if (Array.isArray(process.imageFallbacks) && process.imageFallbacks.length) {
       violations.push(`process.json: ${process.imageFallbacks.length} image fallback(s)`);
     }
-    return result("no-image-fallback", violations.length === 0, { violations });
+    const optionalImageFailures = process.optionalImageFailures;
+    if (optionalImageFailures !== undefined && !Array.isArray(optionalImageFailures)) {
+      violations.push("process.json: optionalImageFailures must be an array");
+    } else {
+      for (const failure of optionalImageFailures || []) {
+        if (typeof failure?.slot !== "string" || !failure.slot.trim() || failure.outcome !== "no-image-layout") {
+          violations.push("process.json: optional image failure must resolve to no-image-layout");
+        }
+      }
+    }
+    return result("no-image-fallback", violations.length === 0, {
+      violations,
+      imageResolutionOrder: resolutionOrder,
+      optionalImageFailures: optionalImageFailures || [],
+    });
   },
   "cover-dense-calibration": ({ process, qaArtifactViolations, qaCalibrationSlideIds }) => {
     const ids = Array.isArray(process.calibrationSlideIds) ? process.calibrationSlideIds : [];
-    const pass = qaArtifactViolations.length === 0 && JSON.stringify(ids) === JSON.stringify(qaCalibrationSlideIds);
-    return result("cover-dense-calibration", pass, { calibrationSlideIds: ids, expected: qaCalibrationSlideIds, artifactViolations: qaArtifactViolations }, "text-judgment");
+    const correctionCount = process.calibrationCorrectionCount;
+    const designRulesLocked = process.designRulesLocked;
+    const pass = qaArtifactViolations.length === 0
+      && JSON.stringify(ids) === JSON.stringify(qaCalibrationSlideIds)
+      && Number.isInteger(correctionCount)
+      && correctionCount >= 0
+      && correctionCount <= 1
+      && designRulesLocked === true;
+    return result("cover-dense-calibration", pass, {
+      calibrationSlideIds: ids,
+      expected: qaCalibrationSlideIds,
+      calibrationCorrectionCount: correctionCount,
+      designRulesLocked,
+      artifactViolations: qaArtifactViolations,
+    }, "text-judgment");
   },
-  "batch-size-2-3": ({ process, qaArtifactViolations }) => {
+  "batch-size-2-3": ({ process, qaArtifactViolations, qaCalibrationSlideIds }) => {
     const batches = Array.isArray(process.buildBatches) ? process.buildBatches : process.batches;
+    const expectedBuildSlideIds = QA_SLIDE_IDS.filter((slideId) => !qaCalibrationSlideIds.includes(slideId));
+    const checkpoints = Array.isArray(process.pageCheckpoints) ? process.pageCheckpoints : [];
+    const checkpointSlideIds = checkpoints.map((checkpoint) => checkpoint?.slideId);
     const pass = Array.isArray(batches) && batches.length > 0
       && batches.every((batch) => Array.isArray(batch) && batch.length >= 2 && batch.length <= 3)
-      && JSON.stringify(batches.flat()) === JSON.stringify(QA_SLIDE_IDS)
+      && JSON.stringify(batches.flat()) === JSON.stringify(expectedBuildSlideIds)
+      && JSON.stringify(checkpointSlideIds) === JSON.stringify(expectedBuildSlideIds)
+      && checkpoints.every((checkpoint) => checkpoint?.status === "valid")
       && qaArtifactViolations.length === 0;
-    return result("batch-size-2-3", pass, { batches: batches || [], expectedCoverage: QA_SLIDE_IDS, artifactViolations: qaArtifactViolations });
+    return result("batch-size-2-3", pass, {
+      batches: batches || [],
+      expectedCoverage: expectedBuildSlideIds,
+      pageCheckpoints: checkpoints,
+      artifactViolations: qaArtifactViolations,
+    });
   },
   "max-concurrency-2": ({ process, qaArtifactViolations }) => {
     const value = process.maxConcurrency;
@@ -360,7 +513,6 @@ const checks = {
     const concreteFindings = validContactFindings(process);
     const pass = count === 1
       && JSON.stringify(reviewedIds) === JSON.stringify(QA_SLIDE_IDS)
-      && findings.length > 0
       && concreteFindings.length === findings.length
       && qaArtifactViolations.length === 0;
     return result("one-contact-sheet-review", pass, {
@@ -372,19 +524,27 @@ const checks = {
     }, "text-judgment");
   },
   "one-targeted-repair": ({ process, qaArtifactViolations }) => {
-    const count = Number.isInteger(process.targetedRepairRounds)
-      ? process.targetedRepairRounds
-      : Array.isArray(process.targetedRepairs) ? process.targetedRepairs.length : 0;
+    const count = process.targetedRepairRounds;
     const repairs = Array.isArray(process.targetedRepairs) ? process.targetedRepairs : [];
     const findingIds = new Set(validContactFindings(process).map((finding) => finding.slideId));
     const invalidRepairs = repairs.filter((repair) => !QA_SLIDE_IDS.includes(repair?.slideId)
       || !findingIds.has(repair.slideId)
       || !isConcreteQaText(repair?.repair, 12));
-    const pass = count === 1
+    const cleanReview = findingIds.size === 0 && count === 0 && repairs.length === 0;
+    const repairedReview = findingIds.size > 0
+      && count === 1
       && repairs.length > 0
-      && invalidRepairs.length === 0
+      && invalidRepairs.length === 0;
+    const pass = Number.isInteger(count)
+      && (cleanReview || repairedReview)
       && qaArtifactViolations.length === 0;
-    return result("one-targeted-repair", pass, { count, repairs, invalidRepairs, artifactViolations: qaArtifactViolations }, "text-judgment");
+    return result("one-targeted-repair", pass, {
+      count,
+      repairs,
+      failedSlideIds: [...findingIds],
+      invalidRepairs,
+      artifactViolations: qaArtifactViolations,
+    }, "text-judgment");
   },
 };
 
@@ -403,12 +563,12 @@ function qaArtifactViolations(loaded, htmlFiles, cssFiles, css) {
 }
 
 async function loadScenarioOutput(outputsRoot, scenario, evaluation) {
-  const scenarioRoot = path.join(outputsRoot, scenario.id);
-  const files = await listFiles(scenarioRoot);
-  const loaded = await Promise.all(files.map(async (file) => ({
-    relativePath: path.relative(scenarioRoot, file),
-    contents: await readFile(file, "utf8"),
-  })));
+  const resolvedOutputsRoot = path.resolve(outputsRoot);
+  const scenarioRoot = path.resolve(resolvedOutputsRoot, scenario.id);
+  const scenarioFiles = isContained(resolvedOutputsRoot, scenarioRoot)
+    ? await loadScenarioFiles(scenarioRoot)
+    : { files: [], violations: ["scenario root: escape path outside output root"] };
+  const { files: loaded, violations: artifactViolations } = scenarioFiles;
   const htmlFiles = loaded.filter((file) => file.relativePath.endsWith(".html"));
   const cssFiles = loaded.filter((file) => file.relativePath.endsWith(".css"));
   const processFile = loaded.find((file) => file.relativePath === "process.json");
@@ -423,6 +583,7 @@ async function loadScenarioOutput(outputsRoot, scenario, evaluation) {
   const css = parseCssFiles(cssFiles);
   const context = {
     allowedSourceIds: evaluation.allowedSourceIds,
+    artifactViolations,
     css,
     elements,
     htmlFiles,
@@ -446,19 +607,25 @@ async function loadScenarioOutput(outputsRoot, scenario, evaluation) {
   };
 }
 
-const options = parseArguments(process.argv.slice(2));
-const scenarios = JSON.parse(await readFile(options.scenarios, "utf8"));
-const evaluation = await loadEvaluationContract();
-const records = [];
-for (const scenario of scenarios) records.push(await loadScenarioOutput(options.outputs, scenario, evaluation));
+export async function runScorer(argv = process.argv.slice(2)) {
+  const options = parseArguments(argv);
+  const scenarios = JSON.parse(await readFile(options.scenarios, "utf8"));
+  const evaluation = await loadEvaluationContract();
+  const records = [];
+  for (const scenario of scenarios) records.push(await loadScenarioOutput(options.outputs, scenario, evaluation));
 
-const report = {
-  pass: records.every((record) => record.pass),
-  scenarios: records,
-  manualReviewRequired: records.flatMap((record) => record.fields
-    .filter((field) => !field.pass || field.kind === "text-judgment")
-    .map((field) => ({ scenario: record.id, field: field.field, reason: field.kind === "text-judgment" ? "text judgment" : "failed" }))),
-};
-await writeFile(options.report, `${JSON.stringify(report, null, 2)}\n`, "utf8");
-console.log(JSON.stringify({ pass: report.pass, scenarios: records.map(({ id, pass }) => ({ id, pass })) }));
-if (!report.pass) process.exitCode = 1;
+  const report = {
+    pass: records.every((record) => record.pass),
+    scenarios: records,
+    manualReviewRequired: records.flatMap((record) => record.fields
+      .filter((field) => !field.pass || field.kind === "text-judgment")
+      .map((field) => ({ scenario: record.id, field: field.field, reason: field.kind === "text-judgment" ? "text judgment" : "failed" }))),
+  };
+  await writeFile(options.report, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+  console.log(JSON.stringify({ pass: report.pass, scenarios: records.map(({ id, pass }) => ({ id, pass })) }));
+  if (!report.pass) process.exitCode = 1;
+  return report;
+}
+
+const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : "";
+if (invokedPath === fileURLToPath(import.meta.url)) await runScorer();
