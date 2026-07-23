@@ -109,6 +109,64 @@ describe("deck job lifecycle race fences", () => {
     events = createEventStore({ store });
   });
 
+  it("does not expose stale terminal actions before a run worker is released", async () => {
+    const failWorker = deferred();
+    const terminalWritten = deferred();
+    const releaseWorker = deferred();
+    const executor = {
+      start: vi.fn(async (jobId) => {
+        await failWorker.promise;
+        await store.updateJob(jobId, {
+          status: "failed",
+          failedStage: "outline",
+          error: "outline validation failed",
+        });
+        terminalWritten.resolve();
+        await releaseWorker.promise;
+      }),
+      cancel: vi.fn(async () => {}),
+      shutdown: vi.fn(async () => {}),
+    };
+    const manager = createJobManager({
+      store,
+      events,
+      executor,
+      normalizeInput: normalizeDeckJobInput,
+    });
+    const created = await manager.create(validRequest);
+    failWorker.resolve();
+    await terminalWritten.promise;
+
+    const artifactsRead = deferred();
+    const sourceRead = deferred();
+    const releaseArtifacts = deferred();
+    const releaseSource = deferred();
+    const listArtifacts = store.listArtifacts.bind(store);
+    const readJson = store.readJson.bind(store);
+    store.listArtifacts = vi.fn(async (...args) => {
+      const artifacts = await listArtifacts(...args);
+      artifactsRead.resolve();
+      await releaseArtifacts.promise;
+      return artifacts;
+    });
+    store.readJson = vi.fn(async (...args) => {
+      const value = await readJson(...args);
+      sourceRead.resolve();
+      await releaseSource.promise;
+      return value;
+    });
+    const snapshotPromise = manager.get(created.id);
+    await Promise.all([artifactsRead.promise, sourceRead.promise]);
+    releaseArtifacts.resolve();
+    releaseSource.resolve();
+    queueMicrotask(() => releaseWorker.resolve());
+    const snapshot = await snapshotPromise;
+
+    expect(snapshot.status).toBe("failed");
+    expect(snapshot.actions.canRetry).toBe(true);
+    await manager.shutdown();
+  });
+
   it("reports the pointer revision when the job snapshot lags after publication", async () => {
     const jobId = await seedJob(store, { status: "ready", failedStage: undefined });
     await pointToRevision(store, jobId, 2);

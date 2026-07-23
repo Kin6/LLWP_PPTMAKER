@@ -3,14 +3,18 @@
   --deck-surface: #222735;
   --deck-text: #f3f5f7;
   --deck-muted: #bec5d0;
-  --deck-accent: #45b7aa;
-  --deck-accent-strong: #79d4c9;
-  --deck-support: #e0647b;
-  --deck-border: #434c5e;
-  --deck-success: #7bc59b;
-  --deck-warning: #e3b85b;
-  --deck-font-display: "Arial", "Hiragino Kaku Gothic ProN", sans-serif;
-  --deck-font-body: "Arial", "Hiragino Kaku Gothic ProN", sans-serif;
+  --deck-primary: #45b7aa;
+  --deck-secondary: #e0647b;
+  --deck-accent: #e3b85b;
+  --deck-positive: #7bc59b;
+  --deck-negative: #d94b63;
+  --deck-font-sans: "Noto Sans SC", Arial, sans-serif;
+  --deck-font-serif: "Noto Serif SC", Georgia, serif;
+  --deck-title-size: 72px;
+  --deck-heading-size: 48px;
+  --deck-body-size: 30px;
+  --deck-caption-size: 20px;
   --deck-radius: 5px;
-  --deck-shadow: 0 20px 56px rgba(0, 0, 0, 0.38);
+  --deck-space: 24px;
+  --deck-grid-gap: 32px;
 }

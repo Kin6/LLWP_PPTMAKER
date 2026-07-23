@@ -3,14 +3,18 @@
   --deck-surface: #f1f3f3;
   --deck-text: #111111;
   --deck-muted: #4d5355;
-  --deck-accent: #c9252d;
-  --deck-accent-strong: #92171d;
-  --deck-support: #126782;
-  --deck-border: #bfc5c7;
-  --deck-success: #277447;
-  --deck-warning: #9a6700;
-  --deck-font-display: "Helvetica Neue", "Arial", sans-serif;
-  --deck-font-body: "Helvetica Neue", "Arial", sans-serif;
+  --deck-primary: #c9252d;
+  --deck-secondary: #126782;
+  --deck-accent: #92171d;
+  --deck-positive: #277447;
+  --deck-negative: #b42318;
+  --deck-font-sans: "Noto Sans SC", Arial, sans-serif;
+  --deck-font-serif: "Noto Serif SC", Georgia, serif;
+  --deck-title-size: 72px;
+  --deck-heading-size: 48px;
+  --deck-body-size: 30px;
+  --deck-caption-size: 20px;
   --deck-radius: 0px;
-  --deck-shadow: 0 12px 0 rgba(17, 17, 17, 0.12);
+  --deck-space: 24px;
+  --deck-grid-gap: 32px;
 }

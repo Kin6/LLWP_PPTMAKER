@@ -255,11 +255,18 @@ export function createJobManager({
   }
 
   async function publicJob(job) {
-    const effective = await effectiveJob(job);
+    let effective = await effectiveJob(job);
     const [rawArtifacts, source] = await Promise.all([
       store.listArtifacts(effective.id),
       sourceSummary(effective),
     ]);
+    const activeRun = activeModes.get(effective.id) === "run"
+      ? active.get(effective.id)
+      : undefined;
+    if (activeRun && TERMINAL_JOB_STATUSES.includes(effective.status)) {
+      await Promise.allSettled([activeRun]);
+      effective = await effectiveJob(await store.readJob(effective.id));
+    }
     const artifacts = currentPreviewArtifact(effective, rawArtifacts);
     const completed = TERMINAL_JOB_STATUSES.includes(effective.status)
       && !["failed", "cancelled"].includes(effective.status)

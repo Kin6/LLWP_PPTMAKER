@@ -4,6 +4,16 @@ import { validateSlideCss, validateThemeCss } from "../../../server/deck-agent/c
 
 const attacks = JSON.parse(readFileSync(new URL("../../fixtures/security/css-attacks.json", import.meta.url), "utf8"));
 const completeThemeCss = ":root{--deck-bg:#ffffff;--deck-surface:#f4f5f7;--deck-text:#111111;--deck-muted:#555555;--deck-primary:#075ccb;--deck-secondary:#243447;--deck-accent:#d9363e;--deck-positive:#14804a;--deck-negative:#b42318;--deck-font-sans:Arial,sans-serif;--deck-font-serif:Georgia,serif;--deck-title-size:72px;--deck-heading-size:48px;--deck-body-size:30px;--deck-caption-size:20px;--deck-radius:8px;--deck-space:24px;--deck-grid-gap:32px;}";
+const bundledThemes = [
+  "minimal-white",
+  "corporate-clean",
+  "swiss-grid",
+  "editorial-serif",
+  "academic-paper",
+  "magazine-bold",
+  "tokyo-night",
+  "pitch-deck-vc",
+];
 
 describe("slide CSS policy", () => {
   it.each(attacks)("rejects $name", ({ css }) => {
@@ -39,6 +49,15 @@ describe("theme CSS policy", () => {
   it("accepts exactly the complete server-known theme token set", () => {
     const first = validateThemeCss(completeThemeCss);
     expect(validateThemeCss(first)).toBe(first);
+  });
+
+  it.each(bundledThemes)("accepts the bundled %s fallback theme", (theme) => {
+    const source = readFileSync(new URL(
+      `../../../skills/generate-html-deck/assets/themes/${theme}.css`,
+      import.meta.url,
+    ), "utf8");
+    const validated = validateThemeCss(source);
+    expect(validateThemeCss(validated)).toBe(validated);
   });
 
   it("rejects missing, unknown, duplicate, unsafe, and out-of-range theme tokens", () => {

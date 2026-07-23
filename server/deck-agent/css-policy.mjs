@@ -88,7 +88,8 @@ export function validateThemeCss(css) {
       if (node.important) throw new Error(`Unsafe theme token value: ${node.property}`);
       if (!REQUIRED_THEME_TOKENS.has(node.property)) throw new Error(`Unknown theme token: ${node.property}`);
       if (seen.has(node.property)) throw new Error(`Duplicate theme token: ${node.property}`);
-      const value = csstree.generate(node.value);
+      const value = csstree.generate(node.value).trim().replace(/\s*,\s*/g, ",");
+      if (node.value.type === "Raw") node.value.value = value;
       assertSafeThemeValue(node, value);
       assertThemeValue(node.property, value);
       seen.add(node.property);
