@@ -7,6 +7,7 @@ import { createArtifactStore } from "./deck-agent/artifact-store.mjs";
 import { createEventStore } from "./deck-agent/event-store.mjs";
 import { createJobManager, normalizeDeckJobInput } from "./deck-agent/job-manager.mjs";
 import { createRenderer } from "./deck-agent/renderer.mjs";
+import { createRevisionStore } from "./deck-agent/revision-store.mjs";
 import { createDeckJobRouter } from "./deck-agent/routes.mjs";
 import { createWorkerExecutor } from "./deck-agent/worker-entry.mjs";
 import { createImageClient } from "./images/client.mjs";
@@ -41,7 +42,7 @@ const deckRenderer = createRenderer({
   runtimeRoot: path.join(root, "skills/generate-html-deck/assets/runtime"),
   appOrigin: deckParentOrigin,
 });
-const deckRevisions = createDeferredRevisionAdapter({ store: deckStore, renderer: deckRenderer });
+const deckRevisions = createServerRevisionAdapter({ store: deckStore, renderer: deckRenderer });
 const deckExecutor = createWorkerExecutor({
   onEvent: (jobId, event) => deckEvents.append(jobId, event),
 });
@@ -1315,51 +1316,15 @@ function serverOrigin(serverHost, serverPort) {
   return `http://${formattedHost}:${serverPort}`;
 }
 
-function createDeferredRevisionAdapter({ store, renderer }) {
-  return {
-    async resolveRevisionArtifact(jobId, artifactId) {
-      const artifacts = await store.listArtifacts(jobId);
-      if (artifactId === "slides-content") {
-        return artifacts.some((artifact) => artifact.id === artifactId)
-          ? { id: artifactId, relativePath: "slides-content.md" }
-          : undefined;
-      }
-      if (artifactId === "design-brief") {
-        return artifacts.some((artifact) => artifact.id === artifactId)
-          ? { id: artifactId, relativePath: "design-brief.md" }
-          : undefined;
-      }
-      if (artifactId === "deck-preview") {
-        const pointer = await store.readJson(jobId, "current-revision.json", { optional: true });
-        const revision = Number(pointer?.revision ?? pointer?.number);
-        const revisionId = pointer?.revisionId;
-        const registered = artifacts.some((artifact) => (
-          artifact.kind === "html"
-          && artifact.filename === "index.html"
-          && artifact.revision === revision
-        ));
-        if (!registered || !/^revision-\d{6}$/.test(revisionId || "")) return undefined;
-        return {
-          id: artifactId,
-          relativePath: `revisions/${revisionId}/dist/index.html`,
-          revisionId,
-          preview: true,
-        };
-      }
-      const descriptor = artifacts.find((artifact) => artifact.id === artifactId);
-      if (descriptor?.kind === "image") {
-        const jobInput = await store.readJson(jobId, "job-input.json", { optional: true }) || {};
-        const asset = (jobInput.uploadedAssets || []).find((candidate) => candidate.id === artifactId);
-        if (asset?.filename && /^[a-z0-9-]+\.(?:png|jpe?g|webp)$/.test(asset.filename)) {
-          return { id: artifactId, relativePath: `assets/${asset.filename}` };
-        }
-      }
-      return undefined;
-    },
-    async renderPreview(jobId, resolved) {
-      return renderer.assemblePreview({ jobId, revisionId: resolved.revisionId });
-    },
-  };
+export function createServerRevisionAdapter({ store, renderer }) {
+  const revisions = createRevisionStore({ store });
+  return Object.freeze({
+    ...revisions,
+    renderPreview: (jobId, resolved) => renderer.assemblePreview({
+      jobId,
+      revisionId: resolved.revisionId,
+    }),
+  });
 }
 
 let frontendPromise;

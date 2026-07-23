@@ -6,7 +6,7 @@ import { chromium } from "playwright";
 import { PNG } from "pngjs";
 
 const JOB_ID = /^job-[0-9a-f-]{36}$/;
-const REVISION_ID = /^(?:working|revision-\d{6})$/;
+const REVISION_ID = /^(?:working|revision-\d{6}|\.candidate-[0-9a-f-]+)$/;
 const SLIDE_ID = /^slide-\d{2}$/;
 const ARTIFACT_ID = /^[a-z0-9-]+$/;
 const SOURCE_ID = /^[A-Za-z0-9._-]+$/;

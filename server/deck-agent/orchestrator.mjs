@@ -1,5 +1,6 @@
 import { assertJobTransition, JOB_STAGES, TERMINAL_JOB_STATUSES } from "./contracts.mjs";
 import { publishDeck as publishDeckArtifact } from "./stages/publish-stage.mjs";
+import { runRevisionStage } from "./stages/revision-stage.mjs";
 
 const PIPELINE = JOB_STAGES.filter((stage) => stage !== "queued" && stage !== "repairing");
 
@@ -48,6 +49,9 @@ export function createDeckJobOrchestrator(deps) {
   }
 
   return {
+    async applyMessage(jobId, request, { signal } = {}) {
+      return runRevisionStage({ ...deps, jobId, signal }, request);
+    },
     async run(jobId, { signal } = {}) {
       const handlers = deps.handlers || await loadDefaultHandlers();
       let job = await deps.store.readJob(jobId);

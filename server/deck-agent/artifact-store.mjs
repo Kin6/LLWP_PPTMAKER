@@ -4,6 +4,8 @@ import path from "node:path";
 import { deckArtifactSchema, deckJobSchema, TERMINAL_JOB_STATUSES } from "./contracts.mjs";
 
 const JOB_ID = /^job-[0-9a-f-]{36}$/;
+const REVISION_ID = /^revision-\d{6}$/;
+const CANDIDATE_ID = /^\.candidate-[0-9a-f-]+$/;
 const ENCODED_OR_WINDOWS_ESCAPE = /%|\\|\0/;
 export const DEFAULT_QUOTAS = Object.freeze({ job: 512 * 1024 * 1024, markdown: 2 * 1024 * 1024, slideHtml: 200 * 1024, slideCss: 120 * 1024, json: 10 * 1024 * 1024, image: 12 * 1024 * 1024, standaloneHtml: 256 * 1024 * 1024 });
 const ALLOWED_ARTIFACT_PATH = /^(job\.json|job-input\.json|events\.ndjson|source-blocks\.json|slides-content\.md|design-brief\.md|current-revision\.json|working\/(manifest\.json|theme\.css|slides\/slide-\d{2}\.(html|css)|qa\/[a-z0-9/_-]+\.(json|png|html)|dist\/index\.html)|assets\/[a-z0-9-]+\.(png|jpe?g|webp)|revisions\/(revision-\d{6}|\.candidate-[0-9a-f-]+)\/(meta\.json|manifest\.json|theme\.css|slides\/slide-\d{2}\.(html|css)|qa\/[a-z0-9/_-]+\.(json|png|html)|dist\/index\.html))$/;
@@ -143,6 +145,7 @@ function cleanProvenanceText(value, field, maxLength) {
 }
 
 function descriptorFor(relativePath, uploadedByFilename) {
+  if (relativePath.startsWith("revisions/.candidate-")) return undefined;
   if (["job.json", "job-input.json", "events.ndjson", "source-blocks.json", "current-revision.json"].includes(relativePath)) return undefined;
   if (/(^|\/)manifest\.json$/.test(relativePath) || /(^|\/)meta\.json$/.test(relativePath) || relativePath.endsWith(".css")) return undefined;
   const uploaded = relativePath.startsWith("assets/") ? uploadedByFilename.get(path.basename(relativePath)) : undefined;
@@ -255,6 +258,16 @@ export function createArtifactStore({ rootDir, quotas = DEFAULT_QUOTAS, fsHooks 
     } catch (error) {
       throw new Error(`Corrupt persisted JSON at ${relativePath}: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+
+  async function removeCurrentRevisionPointer(jobId, options = {}) {
+    const remove = async () => {
+      const { jobRoot, target } = resolveJobPath(resolvedRoot, jobId, "current-revision.json");
+      await assertJobWorkspace(jobRoot);
+      await assertNoSymlink(jobRoot, target);
+      await fs.rm(target, { force: true });
+    };
+    return options.alreadyLocked ? remove() : runExclusive(jobId, remove);
   }
 
   async function readJob(jobId, options = {}) {
@@ -408,6 +421,104 @@ export function createArtifactStore({ rootDir, quotas = DEFAULT_QUOTAS, fsHooks 
     return files;
   }
 
+  function revisionDirectory(jobId, revisionId, kind) {
+    const valid = kind === "candidate" ? CANDIDATE_ID.test(revisionId) : REVISION_ID.test(revisionId);
+    if (!valid) throw new Error(`Invalid ${kind} revision identity`);
+    const { jobRoot, target } = resolveJobPath(resolvedRoot, jobId, `revisions/${revisionId}/meta.json`);
+    return { jobRoot, directory: path.dirname(target) };
+  }
+
+  async function copyRevisionFiles(jobId, sourceRevisionId, candidateId, options = {}) {
+    const copy = async () => {
+      const source = revisionDirectory(jobId, sourceRevisionId, "published");
+      const target = revisionDirectory(jobId, candidateId, "candidate");
+      await assertJobWorkspace(source.jobRoot);
+      await assertNoSymlink(source.jobRoot, source.directory);
+      await assertNoSymlink(target.jobRoot, target.directory);
+      const sourceStat = await lstatOptional(source.directory);
+      if (!sourceStat?.isDirectory()) throw new Error("Published revision directory is missing");
+      if (await lstatOptional(target.directory)) throw new Error("Candidate revision already exists");
+
+      const files = (await listFiles(source.directory)).filter((relativePath) => (
+        relativePath !== "meta.json" && !relativePath.endsWith(".png")
+      ));
+      try {
+        for (const relativePath of files) {
+          options.signal?.throwIfAborted();
+          const sourcePath = `revisions/${sourceRevisionId}/${relativePath}`;
+          const targetPath = `revisions/${candidateId}/${relativePath}`;
+          const bytes = await readArtifact(jobId, sourcePath, { encoding: null });
+          await writeUnlocked(jobId, targetPath, bytes, options);
+        }
+      } catch (error) {
+        await assertNoSymlink(target.jobRoot, target.directory).catch(() => {});
+        await fs.rm(target.directory, { recursive: true, force: true }).catch(() => {});
+        throw error;
+      }
+      return files;
+    };
+    return options.alreadyLocked ? copy() : runExclusive(jobId, copy);
+  }
+
+  async function copyWorkingQaFiles(jobId, revisionId, options = {}) {
+    const copy = async () => {
+      const { jobRoot, target } = resolveJobPath(resolvedRoot, jobId, "working/qa/report.json");
+      const sourceDirectory = path.dirname(target);
+      const published = revisionDirectory(jobId, revisionId, "published");
+      await assertJobWorkspace(jobRoot);
+      await assertNoSymlink(jobRoot, sourceDirectory);
+      const sourceStat = await lstatOptional(sourceDirectory);
+      if (!sourceStat) return [];
+      if (!sourceStat.isDirectory()) throw new Error("Working QA workspace is invalid");
+      const files = await listFiles(sourceDirectory);
+      for (const relativePath of files) {
+        options.signal?.throwIfAborted();
+        const sourcePath = `working/qa/${relativePath}`;
+        const targetPath = `revisions/${revisionId}/qa/${relativePath}`;
+        const bytes = await readArtifact(jobId, sourcePath, { encoding: null });
+        await writeUnlocked(jobId, targetPath, bytes, options);
+      }
+      await assertNoSymlink(published.jobRoot, published.directory);
+      return files;
+    };
+    return options.alreadyLocked ? copy() : runExclusive(jobId, copy);
+  }
+
+  async function renameRevisionDirectory(jobId, candidateId, revisionId, options = {}) {
+    const rename = async () => {
+      const source = revisionDirectory(jobId, candidateId, "candidate");
+      const target = revisionDirectory(jobId, revisionId, "published");
+      await assertJobWorkspace(source.jobRoot);
+      await assertNoSymlink(source.jobRoot, source.directory);
+      await assertNoSymlink(target.jobRoot, target.directory);
+      const sourceStat = await lstatOptional(source.directory);
+      if (!sourceStat?.isDirectory()) throw new Error("Candidate revision directory is missing");
+      if (await lstatOptional(target.directory)) throw new Error("Published revision already exists");
+      options.signal?.throwIfAborted();
+      await fsHooks?.beforeRename?.(source.directory, target.directory);
+      options.signal?.throwIfAborted();
+      await fs.rename(source.directory, target.directory);
+    };
+    return options.alreadyLocked ? rename() : runExclusive(jobId, rename);
+  }
+
+  async function listRevisionIds(jobId) {
+    const { jobRoot, target } = resolveJobPath(resolvedRoot, jobId, "current-revision.json");
+    await assertJobWorkspace(jobRoot);
+    const revisionsDirectory = path.join(path.dirname(target), "revisions");
+    await assertNoSymlink(jobRoot, revisionsDirectory);
+    const stat = await lstatOptional(revisionsDirectory);
+    if (!stat) return [];
+    if (!stat.isDirectory()) throw new Error("Revision workspace is invalid");
+    const revisionIds = [];
+    for (const entry of await fs.readdir(revisionsDirectory, { withFileTypes: true })) {
+      if (entry.isSymbolicLink()) throw new Error("Symbolic link escapes are forbidden");
+      if (!entry.isDirectory()) continue;
+      if (REVISION_ID.test(entry.name) || CANDIDATE_ID.test(entry.name)) revisionIds.push(entry.name);
+    }
+    return revisionIds.sort();
+  }
+
   async function listArtifacts(jobId) {
     const { jobRoot } = resolveJobPath(resolvedRoot, jobId, "job.json");
     await assertJobWorkspace(jobRoot);
@@ -442,9 +553,14 @@ export function createArtifactStore({ rootDir, quotas = DEFAULT_QUOTAS, fsHooks 
     appendLine,
     writeJson,
     readJson,
+    removeCurrentRevisionPointer,
     persistUploadedAssets,
     listArtifacts,
     listRecoverableJobs,
+    copyRevisionFiles,
+    copyWorkingQaFiles,
+    renameRevisionDirectory,
+    listRevisionIds,
     runExclusive,
   };
 }

@@ -10,6 +10,7 @@ import {
 } from "node:worker_threads";
 import { deckEventSchema } from "./contracts.mjs";
 import { validateStoredSlideHtml } from "./html-policy.mjs";
+import { validateSlideCss, validateThemeCss } from "./css-policy.mjs";
 import { HttpError, JobCancelledError } from "../shared/errors.mjs";
 
 const JOB_ID = /^job-[0-9a-f-]{36}$/;
@@ -37,6 +38,7 @@ const ASSET_FILENAME = /^asset-[a-z0-9-]+\.(?:png|jpe?g|webp)$/;
 const SLIDE_ID = /^slide-\d{2}$/;
 const SLOT_ID = /^[a-z0-9-]+$/;
 const IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
+const MAX_STRUCTURED_API_CALLS = 3;
 const VISUAL_REVIEW_SCHEMA = Object.freeze({
   type: "object",
   additionalProperties: false,
@@ -57,6 +59,43 @@ const VISUAL_REVIEW_SCHEMA = Object.freeze({
     },
     designChanges: { type: "array", maxItems: 12, items: { type: "string" } },
   },
+});
+const REVISION_CLASSIFICATION_SCHEMA = Object.freeze({
+  type: "object",
+  additionalProperties: false,
+  required: ["scope", "slideIds"],
+  properties: {
+    scope: { type: "string", enum: ["slides", "theme", "new-job-required"] },
+    slideIds: { type: "array", maxItems: 50, items: { type: "string", pattern: "^slide-\\d{2}$" } },
+  },
+});
+const REVISION_SLIDES_PATCH_SCHEMA = Object.freeze({
+  type: "object",
+  additionalProperties: false,
+  required: ["slides"],
+  properties: {
+    slides: {
+      type: "array",
+      minItems: 1,
+      maxItems: 50,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["slideId", "html", "css"],
+        properties: {
+          slideId: { type: "string", pattern: "^slide-\\d{2}$" },
+          html: { type: "string", maxLength: 200_000 },
+          css: { type: "string", maxLength: 120_000 },
+        },
+      },
+    },
+  },
+});
+const REVISION_THEME_PATCH_SCHEMA = Object.freeze({
+  type: "object",
+  additionalProperties: false,
+  required: ["themeCss"],
+  properties: { themeCss: { type: "string", maxLength: 120_000 } },
 });
 
 function workerError(input) {
@@ -362,7 +401,210 @@ function qaArtifactPath(artifactId) {
   return slide ? `working/qa/slides/${slide[1]}.png` : undefined;
 }
 
-async function createProductionRuntime({ command, signal, emit }) {
+function candidatePrefix(revisionId) {
+  if (!/^\.candidate-[0-9a-f-]+$/.test(revisionId || "")) throw new Error("Invalid candidate revision");
+  return `revisions/${revisionId}`;
+}
+
+async function oneStructuredCall(modelClient, options) {
+  const response = await modelClient.completeStructured(options);
+  if (!Number.isSafeInteger(response.apiCalls) || response.apiCalls < 1
+    || response.apiCalls > MAX_STRUCTURED_API_CALLS) {
+    throw new Error(`Revision model operation exceeded upstream-call budget ${MAX_STRUCTURED_API_CALLS}`);
+  }
+  return response.value;
+}
+
+export function createProductionRevisionDependencies({
+  jobId,
+  store,
+  revisions,
+  renderer,
+  verifier,
+  modelClient,
+  skillLoader,
+  sourceBlocks,
+  signal,
+} = {}) {
+  if (!JOB_ID.test(jobId || "") || !store?.readJson || !store?.writeArtifact || !store?.runExclusive || !revisions?.readCurrent
+    || !renderer?.assembleStandalone || !verifier?.verify || !modelClient?.completeStructured
+    || !skillLoader?.load || !Array.isArray(sourceBlocks)) {
+    throw new TypeError("Production revision dependencies are incomplete");
+  }
+  const sourceBlockIds = new Set(sourceBlocks.map((block) => block?.id).filter(Boolean));
+
+  async function readRevisionManifest(number, suppliedCurrent) {
+    const current = suppliedCurrent || await revisions.readCurrent(jobId);
+    if (!current || current.number !== number || !/^revision-\d{6}$/.test(current.revisionId)) {
+      throw new Error("Published revision changed while loading its manifest");
+    }
+    return store.readJson(jobId, `revisions/${current.revisionId}/manifest.json`);
+  }
+
+  async function classifyInstruction(request, manifest, runtime = {}) {
+    return oneStructuredCall(modelClient, {
+      messages: [
+        {
+          role: "system",
+          content: "Classify a deck edit as slides, theme, or new-job-required. Narrative restructuring, slide insertion/removal, and source changes require a new job. Return only the schema.",
+        },
+        {
+          role: "user",
+          content: JSON.stringify({
+            instruction: request.instruction,
+            currentSlideId: request.currentSlideId || null,
+            explicitSlideIds: request.slideIds || [],
+            slides: manifest.slides.map((slide) => ({ slideId: slide.slideId, title: slide.title || "" })),
+          }),
+        },
+      ],
+      schema: REVISION_CLASSIFICATION_SCHEMA,
+      schemaName: "deck_revision_scope",
+      timeoutMs: 60_000,
+      signal: runtime.signal || signal,
+    });
+  }
+
+  async function patchCandidate(candidate, { request, slideIds, classification, signal: stageSignal }) {
+    const prefix = candidatePrefix(candidate.revisionId);
+    const manifest = await store.readJson(jobId, `${prefix}/manifest.json`);
+    if (classification.scope === "theme") {
+      const currentCss = await store.readArtifact(jobId, `${prefix}/theme.css`);
+      const patched = await oneStructuredCall(modelClient, {
+        messages: [
+          {
+            role: "system",
+            content: "Revise only the supplied :root deck theme tokens. Preserve every required token, return no URLs or at-rules, and do not modify slide content.",
+          },
+          { role: "user", content: JSON.stringify({ instruction: request.instruction, currentCss }) },
+        ],
+        schema: REVISION_THEME_PATCH_SCHEMA,
+        schemaName: "deck_revision_theme",
+        timeoutMs: 120_000,
+        signal: stageSignal || signal,
+      });
+      const css = validateThemeCss(patched.themeCss);
+      await store.writeArtifact(jobId, `${prefix}/theme.css`, css, { signal: stageSignal || signal });
+      return { changedFiles: ["theme.css"] };
+    }
+
+    const selected = new Set(slideIds);
+    const inputSlides = [];
+    for (const slideId of slideIds) {
+      const entry = manifest.slides.find((slide) => slide.slideId === slideId);
+      if (!entry) throw new Error(`Unknown candidate slide: ${slideId}`);
+      const [html, css] = await Promise.all([
+        store.readArtifact(jobId, `${prefix}/slides/${slideId}.html`),
+        store.readArtifact(jobId, `${prefix}/slides/${slideId}.css`),
+      ]);
+      inputSlides.push({
+        slideId,
+        title: entry.title || "",
+        sourceRefs: entry.sourceRefs || entry.sourceBlockIds || [],
+        html,
+        css,
+      });
+    }
+    const patched = await oneStructuredCall(modelClient, {
+      messages: [
+        {
+          role: "system",
+          content: "Apply the instruction only to the supplied rootless slide fragments. Return every supplied slide exactly once. Preserve source grounding, use only approved existing asset:// IDs, and return validated slide-scoped CSS without URLs, at-rules, scripts, inline styles, or service-owned attributes.",
+        },
+        { role: "user", content: JSON.stringify({ instruction: request.instruction, slides: inputSlides }) },
+      ],
+      schema: REVISION_SLIDES_PATCH_SCHEMA,
+      schemaName: "deck_revision_slides",
+      timeoutMs: 120_000,
+      signal: stageSignal || signal,
+    });
+    const returnedIds = patched.slides.map((slide) => slide.slideId);
+    if (returnedIds.length !== slideIds.length || new Set(returnedIds).size !== returnedIds.length
+      || returnedIds.some((slideId) => !selected.has(slideId))) {
+      throw new Error("Revision patch did not return exactly the requested slides");
+    }
+    const jobInput = await store.readJson(jobId, "job-input.json");
+    const assetIds = new Set([
+      ...(jobInput.uploadedAssets || []).map((asset) => asset?.id),
+      ...(manifest.assets || []).map((asset) => asset?.id),
+    ].filter(Boolean));
+    const validated = patched.slides.map((slide) => {
+      const entry = manifest.slides.find((candidateEntry) => candidateEntry.slideId === slide.slideId);
+      const sourceRefs = entry.sourceRefs || entry.sourceBlockIds || [];
+      return {
+        slideId: slide.slideId,
+        html: validateStoredSlideHtml({
+          html: slide.html,
+          slideId: slide.slideId,
+          sourceRefs,
+          sourceBlockIds,
+          assetIds,
+        }).html,
+        css: validateSlideCss({ css: slide.css, slideId: slide.slideId }).css,
+      };
+    });
+    await store.runExclusive(jobId, async () => {
+      for (const slide of validated) {
+        await store.writeArtifact(jobId, `${prefix}/slides/${slide.slideId}.html`, slide.html, {
+          alreadyLocked: true,
+          signal: stageSignal || signal,
+        });
+        await store.writeArtifact(jobId, `${prefix}/slides/${slide.slideId}.css`, slide.css, {
+          alreadyLocked: true,
+          signal: stageSignal || signal,
+        });
+      }
+    });
+    return {
+      changedFiles: validated.flatMap((slide) => [
+        `slides/${slide.slideId}.html`,
+        `slides/${slide.slideId}.css`,
+      ]),
+    };
+  }
+
+  async function reviewCandidate({ candidate, slideIds, signal: stageSignal }) {
+    const bytes = await store.readArtifact(
+      jobId,
+      `${candidatePrefix(candidate.revisionId)}/qa/contact-sheet.png`,
+      { encoding: null },
+    );
+    const skill = await skillLoader.load("verifying");
+    return oneStructuredCall(modelClient, {
+      messages: [
+        { role: "system", content: skill.instructions },
+        { role: "user", content: JSON.stringify({ task: "Review the candidate revision only", slideIds }) },
+      ],
+      schema: VISUAL_REVIEW_SCHEMA,
+      schemaName: "deck_revision_visual_review",
+      images: [{
+        name: "candidate-contact-sheet.png",
+        dataUrl: `data:image/png;base64,${bytes.toString("base64")}`,
+        summary: "Candidate revision contact sheet",
+      }],
+      timeoutMs: 120_000,
+      signal: stageSignal || signal,
+    });
+  }
+
+  async function renderCandidate(candidate, { signal: stageSignal } = {}) {
+    const standalone = await renderer.assembleStandalone({
+      jobId,
+      revisionId: candidate.revisionId,
+      signal: stageSignal || signal,
+    });
+    await store.writeArtifact(
+      jobId,
+      `${candidatePrefix(candidate.revisionId)}/dist/index.html`,
+      standalone,
+      { signal: stageSignal || signal },
+    );
+  }
+
+  return { readRevisionManifest, classifyInstruction, patchCandidate, reviewCandidate, renderCandidate };
+}
+
+export async function createProductionRuntime({ command, signal, emit }) {
   const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
   const [
     { loadServerConfig },
@@ -370,6 +612,7 @@ async function createProductionRuntime({ command, signal, emit }) {
     { createModelClient },
     { createImageClient },
     { createArtifactStore },
+    { createRevisionStore },
     { createAgentRunner },
     { createSkillLoader },
     { createToolRegistry },
@@ -385,6 +628,7 @@ async function createProductionRuntime({ command, signal, emit }) {
     import("../model/client.mjs"),
     import("../images/client.mjs"),
     import("./artifact-store.mjs"),
+    import("./revision-store.mjs"),
     import("./agent-runner.mjs"),
     import("./skill-loader.mjs"),
     import("./tool-registry.mjs"),
@@ -398,6 +642,7 @@ async function createProductionRuntime({ command, signal, emit }) {
 
   const config = loadServerConfig({ env: process.env, argv: process.argv.slice(2), rootDir });
   const store = createArtifactStore({ rootDir: config.deckJobRoot });
+  const revisions = createRevisionStore({ store });
   const http = createHttpClient({ proxyUrl: config.proxyUrl });
   const modelClient = createModelClient({ config, http });
   const imageClient = createImageClient({ config, http });
@@ -465,6 +710,7 @@ async function createProductionRuntime({ command, signal, emit }) {
 
   const base = {
     store,
+    revisions,
     input,
     sourceBlocks,
     runner,
@@ -482,6 +728,19 @@ async function createProductionRuntime({ command, signal, emit }) {
     publishAsset: assetPublication.publishAsset,
     publishGeneratedAsset: assetPublication.publishGeneratedAsset,
   };
+
+  const revisionDependencies = createProductionRevisionDependencies({
+    jobId: command.jobId,
+    store,
+    revisions,
+    renderer,
+    verifier,
+    modelClient,
+    skillLoader,
+    sourceBlocks,
+    signal,
+  });
+  Object.assign(base, revisionDependencies);
 
   base.generateSlides = async (slideIds) => runBuildStage({
     ...base,

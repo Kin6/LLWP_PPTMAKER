@@ -7,6 +7,7 @@ import { validateStoredSlideHtml } from "./html-policy.mjs";
 import { buildRuntimeDocument, escapeHtml } from "./runtime-template.mjs";
 
 const REVISION_ID = /^revision-\d{6}$/;
+const CANDIDATE_ID = /^\.candidate-[0-9a-f-]+$/;
 const QA_FILENAME = /^(?=.{1,160}$)[a-z0-9_-]+(?:\/[a-z0-9_-]+)*\.(?:json|png|html)$/;
 const ASSET_FILENAME = /^[a-z0-9-]+\.(?:png|jpe?g|webp)$/;
 const MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
@@ -115,7 +116,7 @@ const SERVICE_RUNTIME = `/* deck-runtime:start */
 
 function revisionPrefix(revisionId) {
   if (revisionId === "working") return "working";
-  if (!REVISION_ID.test(revisionId)) throw new Error("Invalid deck revision");
+  if (!REVISION_ID.test(revisionId) && !CANDIDATE_ID.test(revisionId)) throw new Error("Invalid deck revision");
   return `revisions/${revisionId}`;
 }
 
