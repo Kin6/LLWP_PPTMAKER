@@ -50,13 +50,19 @@ export function escapeJsonForHtml(value) {
     .replaceAll("\u2029", "\\u2029");
 }
 
-export function buildRuntimeDocument({ title, styles, script, slidesHtml, chartData, assetOrigin }) {
+function buildNoticeComment(notice) {
+  if (!notice) return "";
+  const safe = String(notice).replaceAll("--", "- -").replace(/-$/, "- ");
+  return `<!-- deck-third-party-notices:start\n${safe}\ndeck-third-party-notices:end -->\n`;
+}
+
+export function buildRuntimeDocument({ title, styles, script, slidesHtml, chartData, assetOrigin, notice }) {
   const safeScript = script.replace(/<\/script/gi, "<\\/script");
   const styleHash = cspHash(styles);
   const scriptHash = cspHash(safeScript);
   const csp = buildCsp({ scriptHash, styleHashes: [styleHash], assetOrigin });
   return `<!doctype html>
-<html lang="en">
+${buildNoticeComment(notice)}<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">

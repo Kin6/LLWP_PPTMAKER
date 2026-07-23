@@ -118,6 +118,13 @@ describe("fixed deck renderer", () => {
     expect(html).not.toMatch(/api[_-]?key|toolCalls|system prompt/i);
     expect(html).not.toContain(jobId);
     expect(html).not.toContain(revisionId);
+    expect(html).toContain("<!-- deck-third-party-notices:start");
+    expect(html).toContain("Reveal.js 6.0.1");
+    expect(html).toContain("MIT License");
+    expect(html).toContain("Apache ECharts 6.1.0");
+    expect(html).toContain("Apache License 2.0");
+    expect(html).toContain("Copyright 2017-2026 The Apache Software Foundation");
+    expect(html).toContain("deck-third-party-notices:end -->");
     expect(html).toContain(`data:image/png;base64,`);
     expect(html).not.toContain("asset://");
   });

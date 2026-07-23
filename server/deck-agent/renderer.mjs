@@ -19,6 +19,16 @@ const COLOR_TOKENS = Object.freeze({
   negative: "#b42318",
 });
 
+const STANDALONE_THIRD_PARTY_NOTICE = `Reveal.js 6.0.1
+Copyright (C) 2011-2026 Hakim El Hattab and reveal.js contributors
+MIT License
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files, to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, subject to inclusion of the copyright and permission notices. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+
+Apache ECharts 6.1.0
+Copyright 2017-2026 The Apache Software Foundation
+Apache License 2.0
+This product includes software developed at The Apache Software Foundation. The complete Apache License 2.0 and applicable subcomponent terms are retained with the project distribution in THIRD_PARTY_NOTICES.md and the package license files.`;
+
 const runtimeRecordSchema = z.object({
   package: z.string().min(1).max(100),
   version: z.string().min(1).max(40),
@@ -331,6 +341,7 @@ export function createRenderer({ store, runtimeRoot, appOrigin }) {
       slidesHtml: slideMarkup.join(""),
       chartData,
       assetOrigin: mode === "preview" ? origin : undefined,
+      notice: mode === "standalone" ? STANDALONE_THIRD_PARTY_NOTICE : undefined,
     });
   }
 
