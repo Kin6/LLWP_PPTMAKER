@@ -175,7 +175,7 @@ export function HomeScreen({
                 {presetMenuOpen && (
                   <div className="preset-menu" role="menu">
                     <button className={preset === "html-interactive" ? "selected" : ""} onClick={() => onPresetChange("html-interactive")}>
-                      <Code2 size={16} /><span><strong>交互网页</strong><small>可编辑 HTML + 图表动画 + 评论、微调与手绘</small></span>{preset === "html-interactive" && <Check size={15} />}
+                      <Code2 size={16} /><span><strong>交互网页</strong><small>生成 HTML/CSS 演示文稿，支持大纲预览、自动检查和自然语言修改</small></span>{preset === "html-interactive" && <Check size={15} />}
                     </button>
                     <button className={preset === "api-visual" ? "selected" : ""} onClick={() => onPresetChange("api-visual")}>
                       <ImageIcon size={16} /><span><strong>融合成片</strong><small>双轮叙事 + GPT Image 2 整页图文艺术构图</small></span>{preset === "api-visual" && <Check size={15} />}

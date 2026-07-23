@@ -6,16 +6,11 @@ import {
   ChevronLeft,
   ChevronRight,
   Cloud,
-  Code2,
   FileText,
   Image as ImageIcon,
   Layers3,
-  LibraryBig,
   Loader2,
-  MessageSquare,
   MonitorUp,
-  PanelLeftClose,
-  PanelLeftOpen,
   RotateCcw,
   Settings2,
   Sparkles,
@@ -29,8 +24,6 @@ import { exportNotebookDeck } from "./lib/exportDeck";
 import { buildLocalDeck } from "./lib/localPlanner";
 import {
   generateAiDeck,
-  generateAiHtmlDeck,
-  patchAiHtmlDeck,
   testApiConnection,
   type ApiConfig,
   type AiStreamUpdate,
@@ -41,16 +34,11 @@ import {
   type NotebookDeckSpec,
   type NotebookSlideSpec,
 } from "./types";
-import { HtmlDeckWorkspace } from "./html-deck/HtmlDeckWorkspace";
-import { notebookToHtmlDeck } from "./html-deck/fromNotebook";
-import { exportStandaloneHtmlDeck } from "./html-deck/exportHtmlDeck";
-import { exportHtmlDeckAsPptx } from "./html-deck/exportHtmlDeckPptx";
-import { listHtmlDecks, saveHtmlDeck } from "./html-deck/persistence";
-import { applyHtmlDeckPatches } from "./html-deck/patches";
-import { htmlDeckSchema } from "./html-deck/schema";
-import type { HtmlDeckSpec } from "./html-deck/types";
 import { HomeScreen, type GenerationPreset } from "./components/HomeScreen";
 import { ApiSettings, SlideCanvas, SlideEditor, WorkflowRow } from "./components/WorkspacePanels";
+import { AgentRunView } from "./deck-agent-ui/AgentRunView";
+import { createDeckJob } from "./deck-agent-ui/api";
+import { readDeckJobId, replaceDeckJobId } from "./deck-agent-ui/jobLocation";
 import {
   assetToApiImage,
   attachEditableTable,
@@ -69,7 +57,6 @@ import {
   type PipelineCheckpoint,
 } from "./app/pipeline";
 import {
-  htmlInitialSteps,
   initialSteps,
   shouldRunFrom,
   stepOrder,
@@ -83,7 +70,6 @@ import {
 type Mode = "local" | "ai" | "html";
 type Screen = "home" | "workspace";
 type SourceTab = "text" | "table" | "image";
-type HtmlSidebarTab = "chat" | "context";
 
 type LiveActivity = {
   phase: string;
@@ -92,17 +78,16 @@ type LiveActivity = {
 };
 
 function App() {
-  const [screen, setScreen] = useState<Screen>("home");
+  const [activeHtmlJobId, setActiveHtmlJobId] = useState<string | null>(readDeckJobId);
+  const [screen, setScreen] = useState<Screen>(() => activeHtmlJobId ? "workspace" : "home");
   const [prompt, setPrompt] = useState("");
   const [preset, setPreset] = useState<GenerationPreset>("api-visual");
   const [attachments, setAttachments] = useState<ParsedAttachment[]>([]);
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const [presetMenuOpen, setPresetMenuOpen] = useState(false);
   const [homeMessage, setHomeMessage] = useState("");
-  const [mode, setMode] = useState<Mode>("local");
+  const [mode, setMode] = useState<Mode>(() => activeHtmlJobId ? "html" : "local");
   const [sourceTab, setSourceTab] = useState<SourceTab>("text");
-  const [htmlSidebarTab, setHtmlSidebarTab] = useState<HtmlSidebarTab>("chat");
-  const [htmlSidebarCollapsed, setHtmlSidebarCollapsed] = useState(false);
   const [topic, setTopic] = useState("新建演示文稿");
   const [audience, setAudience] = useState("");
   const [slideCount, setSlideCount] = useState(7);
@@ -121,16 +106,12 @@ function App() {
     styleId: "blank",
     assets: [],
   }));
-  const [htmlDeck, setHtmlDeck] = useState<HtmlDeckSpec>(() => notebookToHtmlDeck(deck, []));
   const [steps, setSteps] = useState<WorkflowStep[]>(initialSteps);
   const [apiConfig, setApiConfig] = useState<ApiConfig>(loadApiConfig);
   const [apiSettingsOpen, setApiSettingsOpen] = useState(false);
   const [selectedSlide, setSelectedSlide] = useState(0);
   const [isRunning, setRunning] = useState(false);
   const [isExporting, setExporting] = useState(false);
-  const [isHtmlExporting, setHtmlExporting] = useState(false);
-  const [isHtmlAiEditing, setHtmlAiEditing] = useState(false);
-  const [htmlPreviewPending, setHtmlPreviewPending] = useState(false);
   const [connection, setConnection] = useState<"idle" | "testing" | "success" | "error">("idle");
   const [envKeyConfigured, setEnvKeyConfigured] = useState(false);
   const [apiCalls, setApiCalls] = useState(0);
@@ -140,11 +121,8 @@ function App() {
   const [activityEntries, setActivityEntries] = useState<WorkflowActivity[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pipelineCheckpointRef = useRef<PipelineCheckpoint | null>(null);
-  const htmlPipelineCheckpointRef = useRef<PipelineCheckpoint | null>(null);
-  const htmlPersistenceReadyRef = useRef(false);
   const streamUiRef = useRef({ lastAt: 0, message: "" });
   const activityIdRef = useRef(0);
-  const timelineEndRef = useRef<HTMLDivElement>(null);
 
   const currentSlide = deck.slides[selectedSlide] || deck.slides[0];
   const currentStyle = styleProfiles.find((style) => style.id === styleId)
@@ -173,27 +151,6 @@ function App() {
   useEffect(() => {
     setSelectedSlide((index) => Math.min(index, Math.max(deck.slides.length - 1, 0)));
   }, [deck.slides.length]);
-
-  useEffect(() => {
-    void listHtmlDecks().then((saved) => {
-      const latest = saved.sort((left, right) => String(right.savedAt || "").localeCompare(String(left.savedAt || "")))[0];
-      const parsed = htmlDeckSchema.safeParse(latest);
-      if (parsed.success) setHtmlDeck(parsed.data as HtmlDeckSpec);
-    }).catch(() => undefined).finally(() => { htmlPersistenceReadyRef.current = true; });
-  }, []);
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      if (!htmlPersistenceReadyRef.current) return;
-      void saveHtmlDeck(htmlDeck).catch(() => undefined);
-    }, 350);
-    return () => window.clearTimeout(timer);
-  }, [htmlDeck]);
-
-  useEffect(() => {
-    if (mode !== "html" || htmlSidebarTab !== "chat") return;
-    timelineEndRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
-  }, [activityEntries, htmlSidebarTab, mode, steps]);
 
   function recordActivity(stepId: StepId, activity: LiveActivity) {
     setActivityEntries((current) => {
@@ -480,186 +437,6 @@ function App() {
     }
   }
 
-  async function runHtmlPipeline(
-    source: GenerationSource = { topic, audience, slideCount, textInput, tableInput, imageBrief, styleId, assets },
-    config: ApiConfig = { ...apiConfig, imageEnabled: true, imageTextMode: "native", imageQuality: "high" },
-    resume = false,
-  ) {
-    if (isRunning) return;
-    const savedCheckpoint = resume ? htmlPipelineCheckpointRef.current : null;
-    source = savedCheckpoint?.source || source;
-    config = savedCheckpoint?.config || config;
-    if (!source.audience.trim()) {
-      const detail = "请先填写目标受众，例如：董事会、投资人、客户或内部团队。";
-      setHomeMessage(detail);
-      setStatus(detail);
-      return;
-    }
-    const sourceUploads = savedCheckpoint?.sourceUploads || source.assets.filter((asset) => asset.kind === "upload");
-    const sourceStyle = styleProfiles.find((style) => style.id === source.styleId)
-      || styleProfiles.find((style) => style.id === "product-calm")!;
-    let checkpoint: PipelineCheckpoint = savedCheckpoint || {
-      source,
-      config,
-      sourceImages: [],
-      sourceUploads,
-      assets: sourceUploads,
-      generatedBySlide: {},
-      requestedImageCount: 0,
-      resumeFrom: "logic",
-    };
-    const startFrom = checkpoint.resumeFrom;
-    let activeStep: StepId = startFrom;
-    let nextAssets = checkpoint.assets;
-    let nextDeck = checkpoint.deck;
-    let sourceImages = checkpoint.sourceImages;
-    let previewHtmlDeck = htmlDeck;
-
-    setMode("html");
-    setRunning(true);
-    setFailedStep(null);
-    if (!resume) {
-      setHtmlPreviewPending(true);
-      setApiCalls(0);
-      setLiveApiCalls(0);
-      resetSteps(htmlInitialSteps);
-      setAssets(sourceUploads);
-    } else {
-      updateStep(startFrom, "running", `正在从“${stepTitle(startFrom)}”继续，前序结果已保留`);
-      setStatus(`正在继续 HTML 生成，不会重复已完成的 API 调用…`);
-    }
-    try {
-      if (shouldRunFrom(startFrom, "logic")) {
-        activeStep = "logic";
-        updateStep("logic", "running", "正在建立适合交互表达的跨页论证结构");
-        setStatus("正在读取材料，并为 HTML 演示建立内容结构…");
-        sourceImages = await Promise.all(sourceUploads.slice(0, 3).map(assetToApiImage));
-        const response = await generateAiDeck(config, toDeckSource(source, sourceImages), createStreamReporter("logic", "正在建立交互演示叙事"));
-        nextDeck = attachEditableTable(remapUploadedImageIndexes(response.deck, sourceUploads), source.tableInput);
-        previewHtmlDeck = {
-          ...notebookToHtmlDeck(nextDeck, sourceUploads),
-          id: previewHtmlDeck.id,
-          revision: previewHtmlDeck.revision + 1,
-        };
-        checkpoint = { ...checkpoint, sourceImages, deck: nextDeck, assets: sourceUploads, generatedBySlide: {}, resumeFrom: "image" };
-        htmlPipelineCheckpointRef.current = checkpoint;
-        setDeck(nextDeck);
-        setHtmlDeck(previewHtmlDeck);
-        setHtmlPreviewPending(false);
-        completeApiCalls(response.meta.apiCalls);
-        updateStep("logic", "done", `完成 ${nextDeck.slides.length} 页叙事与交互内容基础`);
-      }
-      if (!nextDeck) throw new Error("没有可继续使用的演示结构，请从内容策划重新开始。");
-
-      if (shouldRunFrom(startFrom, "image")) {
-        activeStep = "image";
-        if (config.imageEnabled) {
-          const requestedImageCount = config.imageCount === 0 ? nextDeck.slides.length : Math.min(config.imageCount, nextDeck.slides.length);
-          checkpoint.requestedImageCount = requestedImageCount;
-          updateStep("image", "running", imageProgressDetail(checkpoint.generatedBySlide, requestedImageCount));
-          const imageResult = await runImageGenerationStage({
-            deck: nextDeck,
-            config,
-            requestConfig: { ...config, imageTextMode: "native" },
-            sourceUploads,
-            sourceImages,
-            styleId: source.styleId,
-            generatedBySlide: checkpoint.generatedBySlide,
-            requestedImageCount,
-            textMode: "native",
-            assetIdPrefix: "html-visual",
-            filenamePrefix: "html-slide",
-            summary: (slideIndex) => `HTML 演示第 ${slideIndex + 1} 页的独立主视觉`,
-            activityMessage: (slideIndex, total) => `正在生成第 ${slideIndex + 1}/${total} 张 HTML 主视觉`,
-            onJobStart: (slideIndex, total, completed) => {
-              setStatus(`正在用 ${sourceStyle.name} 生成第 ${slideIndex + 1}/${total} 张 HTML 主视觉；已保存 ${completed} 张…`);
-            },
-            runWithActivity: (message, task) => withElapsedActivity("image", message, task),
-            missingImageError: (slideIndex) => new Error(`第 ${slideIndex + 1} 页没有返回完整视觉素材`),
-            onJobComplete: (progress) => {
-              nextDeck = progress.deck;
-              nextAssets = progress.assets;
-              previewHtmlDeck = {
-                ...notebookToHtmlDeck(nextDeck, nextAssets),
-                id: previewHtmlDeck.id,
-                revision: previewHtmlDeck.revision + 1,
-              };
-              checkpoint = { ...checkpoint, deck: nextDeck, assets: nextAssets, resumeFrom: "image" };
-              htmlPipelineCheckpointRef.current = checkpoint;
-              setDeck(nextDeck);
-              setAssets(nextAssets);
-              setHtmlDeck(previewHtmlDeck);
-              setApiCalls((value) => value + progress.apiCalls);
-              updateStep("image", "running", imageProgressDetail(checkpoint.generatedBySlide, requestedImageCount));
-            },
-          });
-          nextDeck = imageResult.deck;
-          nextAssets = imageResult.assets;
-          updateStep("image", "done", `已生成 ${Object.keys(checkpoint.generatedBySlide).length} 张可独立编辑位置的主视觉`);
-        } else {
-          updateStep("image", "skipped", "图片生成关闭，使用原生图形和用户素材");
-        }
-        checkpoint = { ...checkpoint, deck: nextDeck, assets: nextAssets, resumeFrom: "decompose" };
-        htmlPipelineCheckpointRef.current = checkpoint;
-      }
-
-      if (shouldRunFrom(startFrom, "decompose")) {
-        activeStep = "decompose";
-        updateStep("decompose", "running", "正在建立 HTML 对象、图层、图表和交互关系");
-        setStatus("正在把演示内容编排为可编辑 HtmlDeckSpec…");
-        const htmlDraft = {
-          ...notebookToHtmlDeck(nextDeck, nextAssets),
-          id: previewHtmlDeck.id,
-          revision: previewHtmlDeck.revision + 1,
-        };
-        setHtmlDeck(htmlDraft);
-        const htmlResponse = await generateAiHtmlDeck(
-          config,
-          nextDeck,
-          htmlDraft,
-          source.styleId,
-          createStreamReporter("decompose", "正在优化 HTML 场景"),
-        );
-        const nextHtmlDeck = htmlResponse.deck;
-        completeApiCalls(htmlResponse.meta.apiCalls);
-        setHtmlDeck(nextHtmlDeck);
-        updateStep("decompose", "done", htmlResponse.meta.designApplied
-          ? `${nextHtmlDeck.slides.length} 页经 AI 设计为 ${nextHtmlDeck.slides.reduce((sum, slide) => sum + slide.nodes.length, 0)} 个可编辑对象`
-          : `${nextHtmlDeck.slides.length} 页使用安全编排器生成；AI 设计结果未通过 Schema 校验`);
-        checkpoint = { ...checkpoint, resumeFrom: "assemble" };
-        htmlPipelineCheckpointRef.current = checkpoint;
-      }
-
-      if (shouldRunFrom(startFrom, "assemble")) {
-        activeStep = "assemble";
-        updateStep("assemble", "running", "正在装载安全沙箱、翻页、图表和编辑桥接");
-        await sleep(220);
-        updateStep("assemble", "done", "交互编辑器已就绪：属性、评论、微调、手绘和撤销重做可用");
-      }
-
-      activeStep = "export";
-      updateStep("export", "done", "可导出离线 HTML；静态 PPTX 作为兼容交付");
-      setStatus("交互式 HTML 演示已生成。现在可以选择元素编辑、添加评论、微调参数或手绘标注。");
-      htmlPipelineCheckpointRef.current = null;
-      setFailedStep(null);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "HTML 演示生成失败";
-      checkpoint = { ...checkpoint, deck: nextDeck, assets: nextAssets, resumeFrom: activeStep };
-      htmlPipelineCheckpointRef.current = checkpoint;
-      setFailedStep(activeStep);
-      updateStep(activeStep, "error", `${message}；前序成功结果已保存`);
-      setStatus(`${message}。可以从“${stepTitle(activeStep)}”继续，不会重跑已完成的内容和图片。`);
-    } finally {
-      setRunning(false);
-    }
-  }
-
-  function resumeHtmlPipeline() {
-    const checkpoint = htmlPipelineCheckpointRef.current;
-    if (!checkpoint || isRunning) return;
-    void runHtmlPipeline(checkpoint.source, checkpoint.config, true);
-  }
-
   function resumeAiPipeline() {
     const checkpoint = pipelineCheckpointRef.current;
     if (!checkpoint || isRunning) return;
@@ -684,59 +461,6 @@ function App() {
       setStatus(error instanceof Error ? error.message : "导出失败。");
     } finally {
       setExporting(false);
-    }
-  }
-
-  async function exportCurrentHtmlDeck() {
-    if (isHtmlExporting) return;
-    setHtmlExporting(true);
-    try {
-      await exportStandaloneHtmlDeck(htmlDeck);
-      updateStep("export", "done", "离线交互 HTML 已保存到下载目录");
-      setStatus("交互 HTML 已导出，动画、图表和点击交互可离线运行。");
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "HTML 导出失败。");
-    } finally {
-      setHtmlExporting(false);
-    }
-  }
-
-  async function exportCurrentHtmlPptx() {
-    if (isHtmlExporting) return;
-    setHtmlExporting(true);
-    try {
-      await exportHtmlDeckAsPptx(htmlDeck);
-      setStatus("静态 PPTX 已导出。文字、图形和图表可编辑，Web 交互不会保留。");
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "静态 PPTX 导出失败。");
-    } finally {
-      setHtmlExporting(false);
-    }
-  }
-
-  async function requestHtmlAiEdit(instruction: string, slideId: string, nodeId?: string) {
-    if (isHtmlAiEditing) return;
-    setHtmlAiEditing(true);
-    setStatus("正在应用局部 AI 修改…");
-    try {
-      const response = await patchAiHtmlDeck(
-        apiConfig,
-        htmlDeck,
-        instruction,
-        slideId,
-        nodeId,
-        createStreamReporter("decompose", "正在生成局部修改"),
-      );
-      completeApiCalls(response.meta.apiCalls);
-      const result = applyHtmlDeckPatches(htmlDeck, response.patches);
-      if (!result.applied) throw new Error("模型没有返回可安全应用的修改。");
-      setHtmlDeck(result.deck);
-      setStatus(response.summary || `已应用 ${result.applied} 项局部修改。`);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "局部 AI 修改失败，原稿未改变。");
-      throw error;
-    } finally {
-      setHtmlAiEditing(false);
     }
   }
 
@@ -837,15 +561,20 @@ function App() {
     }
 
     if (preset === "html-interactive") {
-      const nextConfig: ApiConfig = {
-        ...apiConfig,
-        imageEnabled: true,
-        imageTextMode: "native",
-        imageQuality: "high",
-      };
+      const sourceImages = await Promise.all(source.assets.map(assetToApiImage));
+      const job = await createDeckJob({
+        source: toDeckSource(source, sourceImages),
+        options: {
+          imageEnabled: apiConfig.imageEnabled,
+          imageCount: apiConfig.imageCount,
+          imageQuality: apiConfig.imageQuality,
+          imageTimeoutMs: apiConfig.imageTimeoutSeconds * 1_000,
+          imageMaxRetries: Math.min(apiConfig.imageMaxRetries, 1),
+        },
+      });
+      setActiveHtmlJobId(job.id);
+      replaceDeckJobId(job.id);
       setMode("html");
-      setApiConfig(nextConfig);
-      await runHtmlPipeline(source, nextConfig);
       return;
     }
 
@@ -881,6 +610,23 @@ function App() {
       setConnection("error");
       setStatus(error instanceof Error ? error.message : "连接失败。");
     }
+  }
+
+  function returnHome() {
+    setActiveHtmlJobId(null);
+    replaceDeckJobId(null);
+    setMode("local");
+    setScreen("home");
+  }
+
+  if (mode === "html" && activeHtmlJobId) {
+    return (
+      <AgentRunView
+        jobId={activeHtmlJobId}
+        initialRequest={{ topic, audience, slideCount }}
+        onExit={returnHome}
+      />
+    );
   }
 
   if (screen === "home") {
@@ -921,36 +667,25 @@ function App() {
   return (
     <main className="app-shell">
       <header className="topbar">
-        <button className="brand-lockup brand-button" onClick={() => setScreen("home")} title="返回首页">
+        <button className="brand-lockup brand-button" onClick={returnHome} title="返回首页">
           <span className="brand-mark"><Layers3 size={16} /></span>
-          <div><strong>LLWP PPTMAKER</strong><span>{mode === "html" ? htmlPreviewPending ? topic : htmlDeck.title : deck.title}</span></div>
+          <div><strong>LLWP PPTMAKER</strong><span>{deck.title}</span></div>
         </button>
         <div className="topbar-actions">
           <div className="mode-switch" aria-label="生成模式">
             <button className={mode === "local" ? "active" : ""} onClick={() => { setMode("local"); resetSteps(initialSteps); }}><MonitorUp size={14} />本地</button>
             <button className={mode === "ai" ? "active" : ""} onClick={() => { setMode("ai"); resetSteps(initialSteps); }}><Cloud size={14} />API</button>
-            <button className={mode === "html" ? "active" : ""} onClick={() => { setMode("html"); resetSteps(htmlInitialSteps); }}><Code2 size={14} />交互网页</button>
           </div>
           <button className="icon-button" title="API 设置" aria-label="API 设置" onClick={() => setApiSettingsOpen((value) => !value)}><Settings2 size={17} /></button>
-          <button className="secondary-button export-button" onClick={mode === "html" ? exportCurrentHtmlDeck : exportCurrentDeck} disabled={mode === "html" ? isHtmlExporting || htmlPreviewPending : isExporting}>
-            {(mode === "html" ? isHtmlExporting : isExporting) ? <Loader2 className="spin" size={15} /> : <ArrowDownToLine size={15} />}{mode === "html" ? "导出 HTML" : "导出 PPTX"}
+          <button className="secondary-button export-button" onClick={exportCurrentDeck} disabled={isExporting}>
+            {isExporting ? <Loader2 className="spin" size={15} /> : <ArrowDownToLine size={15} />}导出 PPTX
           </button>
         </div>
       </header>
 
-      <div className={`workspace ${mode === "html" ? `html-design-workspace ${htmlSidebarCollapsed ? "sidebar-collapsed" : ""}` : ""}`}>
-        <div className={mode === "html" ? "html-sidebar-shell" : "workspace-columns"}>
-          {mode === "html" && (
-            <div className="html-sidebar-header">
-              <div className="html-sidebar-tabs" role="tablist" aria-label="交互演示侧栏">
-                <button className={htmlSidebarTab === "chat" ? "active" : ""} onClick={() => setHtmlSidebarTab("chat")}><MessageSquare size={14} />Chat</button>
-                <button className={htmlSidebarTab === "context" ? "active" : ""} onClick={() => setHtmlSidebarTab("context")}><LibraryBig size={14} />Context</button>
-              </div>
-              <button className="html-sidebar-collapse" onClick={() => setHtmlSidebarCollapsed(true)} title="收起侧栏" aria-label="收起侧栏"><PanelLeftClose size={16} /></button>
-            </div>
-          )}
-
-        <aside className="source-rail" hidden={mode === "html" && htmlSidebarTab !== "context"}>
+      <div className="workspace">
+        <div className="workspace-columns">
+        <aside className="source-rail">
           <div className="rail-heading">
             <div><span className="eyebrow">SOURCE</span><h1>准备素材</h1></div>
             <span className="source-count">{textInput.length + tableInput.length} 字</span>
@@ -1022,12 +757,12 @@ function App() {
           )}
         </aside>
 
-        <section className="agent-column" hidden={mode === "html" && htmlSidebarTab !== "chat"}>
+        <section className="agent-column">
           <div className="agent-header">
             <span className="agent-orbit"><Sparkles size={16} /></span>
-            <div><span className="eyebrow">TASK</span><h2>{mode === "html" ? "AI 正在构建交互演示" : mode === "ai" ? "AI 正在构建演示" : "本地规则工作流"}</h2></div>
+            <div><span className="eyebrow">TASK</span><h2>{mode === "ai" ? "AI 正在构建演示" : "本地规则工作流"}</h2></div>
           </div>
-          <p className="task-summary">{mode === "html" ? "把内容编排成可编辑、可交互并能离线交付的 HTML 演示。" : "把文字、表格和图像整理成一份能讲清楚、能继续修改的 PowerPoint。"}</p>
+          <p className="task-summary">把文字、表格和图像整理成一份能讲清楚、能继续修改的 PowerPoint。</p>
 
           <div className="chat-request">
             <span>你的任务</span>
@@ -1049,12 +784,11 @@ function App() {
                 step={step}
                 index={stepOrder.indexOf(step.id)}
                 activities={activityEntries.filter((activity) => activity.stepId === step.id)}
-                onRetry={step.status === "error" && failedStep === step.id ? mode === "html" ? resumeHtmlPipeline : resumeAiPipeline : undefined}
+                onRetry={step.status === "error" && failedStep === step.id ? resumeAiPipeline : undefined}
                 retrying={isRunning && failedStep === step.id}
               />
             ))}
           </div>
-          <div ref={timelineEndRef} />
 
           <div className="run-summary">
             <span><BrainCircuit size={14} />{apiCalls + liveApiCalls} 次 API 调用</span>
@@ -1065,41 +799,21 @@ function App() {
             <p>{status}</p>
             {mode !== "local" ? (
               <div className="run-actions">
-                <button className="primary-button" onClick={mode === "html" ? failedStep ? resumeHtmlPipeline : () => void runHtmlPipeline() : failedStep ? resumeAiPipeline : () => void runAiPipeline()} disabled={isRunning}>
+                <button className="primary-button" onClick={failedStep ? resumeAiPipeline : () => void runAiPipeline()} disabled={isRunning}>
                   {isRunning ? <Loader2 className="spin" size={16} /> : failedStep ? <RotateCcw size={16} /> : <WandSparkles size={16} />}
-                  {isRunning ? "正在执行五阶段…" : mode === "html" ? failedStep ? "重新生成交互演示" : "运行并生成 HTML 演示" : failedStep ? `从“${stepTitle(failedStep)}”继续` : "运行并生成 PPTX"}
+                  {isRunning ? "正在执行五阶段…" : failedStep ? `从“${stepTitle(failedStep)}”继续` : "运行并生成 PPTX"}
                 </button>
                 {failedStep && mode === "ai" && <button className="restart-button" onClick={restartAiPipeline} disabled={isRunning}>重新开始</button>}
               </div>
             ) : (
               <button className="primary-button" onClick={() => runLocal()}><Sparkles size={16} />生成本地方案</button>
             )}
-            <small>{mode === "html" ? "HTML Deck 自动保存到浏览器；模型生成代码不会获得主应用同源权限。" : mode === "ai" ? failedStep ? "检查点保存在当前页面中；继续时不会重复成功的环节和图片。" : "文字和图片会发送到你配置的模型服务。" : "不联网、不需要 Key，所有处理在浏览器完成。"}</small>
+            <small>{mode === "ai" ? failedStep ? "检查点保存在当前页面中；继续时不会重复成功的环节和图片。" : "文字和图片会发送到你配置的模型服务。" : "不联网、不需要 Key，所有处理在浏览器完成。"}</small>
           </div>
         </section>
         </div>
 
-        {mode === "html" && htmlSidebarCollapsed && (
-          <button className="html-sidebar-reopen" onClick={() => setHtmlSidebarCollapsed(false)} title="展开侧栏" aria-label="展开侧栏"><PanelLeftOpen size={17} /></button>
-        )}
-
-        <section className={`artifact-pane ${mode === "html" ? "html-artifact-pane" : ""}`}>
-          {mode === "html" ? (
-            htmlPreviewPending ? (
-              <div className="html-pending-preview" aria-label="HTML 演示预览生成中" />
-            ) : (
-              <HtmlDeckWorkspace
-                deck={htmlDeck}
-                onChange={setHtmlDeck}
-                onExportHtml={() => void exportCurrentHtmlDeck()}
-                onExportPptx={() => void exportCurrentHtmlPptx()}
-                exporting={isHtmlExporting}
-                onRequestAiEdit={requestHtmlAiEdit}
-                aiEditing={isHtmlAiEditing}
-              />
-            )
-          ) : (
-          <>
+        <section className="artifact-pane">
           <div className="artifact-toolbar">
             <div><span className="eyebrow">ARTIFACT</span><h2>{deck.title}</h2></div>
             <div className="artifact-meta"><span>{deck.slides.length} 页</span><span>{currentStyle.name}</span><span>{apiConfig.imageEnabled && apiConfig.imageTextMode === "integrated" ? "融合成片" : "可编辑 PPTX"}</span></div>
@@ -1125,8 +839,6 @@ function App() {
           </div>
 
           {currentSlide && <SlideEditor slide={currentSlide} onChange={updateSlide} />}
-          </>
-          )}
         </section>
       </div>
     </main>
