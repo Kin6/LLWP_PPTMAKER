@@ -39,6 +39,10 @@ const ASSET_FILENAME = /^asset-[a-z0-9-]+\.(?:png|jpe?g|webp)$/;
 const SLIDE_ID = /^slide-\d{2}$/;
 const SLOT_ID = /^[a-z0-9-]+$/;
 const IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
+const BUNDLED_THEME_IDS = new Set([
+  "minimal-white", "corporate-clean", "swiss-grid", "editorial-serif",
+  "academic-paper", "magazine-bold", "tokyo-night", "pitch-deck-vc",
+]);
 const VISUAL_REVIEW_SCHEMA = Object.freeze({
   type: "object",
   additionalProperties: false,
@@ -681,6 +685,15 @@ export async function createProductionRuntime({ command, signal, emit }) {
     signal,
   });
 
+  async function loadThemePreset(themeId) {
+    if (!BUNDLED_THEME_IDS.has(themeId)) throw new Error(`Unknown bundled theme: ${themeId}`);
+    const css = await fs.readFile(
+      path.join(rootDir, "skills/generate-html-deck/assets/themes", `${themeId}.css`),
+      "utf8",
+    );
+    return validateThemeCss(css);
+  }
+
   async function reviewVisual({ slideIds, artifactIds, label }) {
     const images = [];
     for (const artifactId of artifactIds.filter(Boolean)) {
@@ -722,6 +735,11 @@ export async function createProductionRuntime({ command, signal, emit }) {
     signal,
     emit,
     readOutline,
+    loadThemePreset,
+    readLockedDesignBriefSummary: async () => {
+      const brief = await store.readArtifact(command.jobId, "design-brief.md", { optional: true });
+      return typeof brief === "string" ? brief.slice(0, 12_000) : "";
+    },
     mergeQaEvidence,
     uploads: assetPublication.uploads,
     library: [],
@@ -756,7 +774,7 @@ export async function createProductionRuntime({ command, signal, emit }) {
   });
   base.reviseCalibration = ({ slideIds }) => base.generateSlides(slideIds);
   base.writeDefaultTheme = async () => {
-    const css = await fs.readFile(path.join(rootDir, "skills/generate-html-deck/assets/themes/minimal-white.css"), "utf8");
+    const css = await loadThemePreset("minimal-white");
     await store.writeArtifact(command.jobId, "working/theme.css", css, { signal });
   };
   base.lockDesignRules = async ({ slideIds, report }) => {

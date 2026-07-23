@@ -43,6 +43,22 @@ describe("slide CSS policy", () => {
     const second = validateSlideCss({ css: first.css, slideId: "slide-01" });
     expect(second).toEqual(first);
   });
+
+  it("allows only server-known deck theme token references", () => {
+    const result = validateSlideCss({
+      css: ":slide .title{color:var(--deck-primary);font-size:var(--deck-heading-size);gap:calc(var(--deck-space) * 2)}",
+      slideId: "slide-01",
+    });
+    expect(result.css).toContain("var(--deck-primary)");
+    expect(() => validateSlideCss({
+      css: ":slide .title{color:var(--host-secret)}",
+      slideId: "slide-01",
+    })).toThrow(/theme token reference/i);
+    expect(() => validateSlideCss({
+      css: ":slide .title{color:var(--deck-primary,#ffffff)}",
+      slideId: "slide-01",
+    })).toThrow(/theme token reference/i);
+  });
 });
 
 describe("theme CSS policy", () => {

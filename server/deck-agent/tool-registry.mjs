@@ -7,11 +7,7 @@ import { parseOutline } from "./outline.mjs";
 
 const emptyInputSchema = z.object({}).strict();
 const markdownSchema = z.object({ markdown: z.string().min(1).max(2_000_000) }).strict();
-const designBriefSchema = z.object({ designBriefMarkdown: z.string().min(1).max(2_000_000) }).strict();
-const themeSchema = z.object({
-  designBriefMarkdown: z.string().min(1).max(2_000_000),
-  themeCss: z.string().min(1).max(120_000),
-}).strict();
+const themeSchema = z.object({ designBriefMarkdown: z.string().min(1).max(12_000) }).strict();
 
 const assetSlotSchema = z.object({
   slotId: z.string().regex(/^[a-z0-9-]+$/),
@@ -45,7 +41,7 @@ export const writeSlideInputSchema = z.object({
 
 const STAGE_TOOLS = Object.freeze({
   outline: ["read_source_blocks", "write_outline"],
-  design: ["read_outline", "write_design_brief", "write_theme"],
+  design: ["write_theme"],
   calibrating: ["read_outline", "write_slide", "render_deck", "inspect_slide", "capture_slide", "patch_slide"],
   building: ["read_outline", "write_slide"],
   "generating-assets": ["generate_asset", "patch_slide"],
@@ -138,22 +134,15 @@ function builtInTool(name, context) {
       },
     };
   }
-  if (name === "write_design_brief") {
-    return {
-      schema: designBriefSchema,
-      execute: async ({ designBriefMarkdown }) => {
-        validateDesignBrief(designBriefMarkdown);
-        await context.store.writeArtifact(context.jobId, "design-brief.md", designBriefMarkdown, { signal: context.signal });
-        return { summary: "Design brief written" };
-      },
-    };
-  }
   if (name === "write_theme") {
     return {
       schema: themeSchema,
-      execute: async ({ designBriefMarkdown, themeCss }) => {
+      execute: async ({ designBriefMarkdown }) => {
         validateDesignBrief(designBriefMarkdown);
-        const css = validateThemeCss(canonicalThemeCss(themeCss));
+        if (typeof context.selectedThemeCss !== "string" || !context.selectedThemeCss.trim()) {
+          throw new Error("Design stage did not select a bundled theme");
+        }
+        const css = validateThemeCss(canonicalThemeCss(context.selectedThemeCss));
         await context.store.runExclusive(context.jobId, async () => {
           await context.store.writeArtifact(context.jobId, "design-brief.md", designBriefMarkdown, { alreadyLocked: true, signal: context.signal });
           await context.store.writeArtifact(context.jobId, "working/theme.css", css, { alreadyLocked: true, signal: context.signal });

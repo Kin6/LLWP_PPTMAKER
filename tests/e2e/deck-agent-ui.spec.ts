@@ -89,7 +89,12 @@ test("outline artifact opens read-only while generation continues and close rest
   await expect(dialog.getByRole("heading", { name: "智能制造转型方案" })).toBeVisible();
   await expect(dialog.locator("textarea, [contenteditable=true]")).toHaveCount(0);
   await expect(dialog.getByText("只读 · Markdown")).toBeVisible();
-  await expect(page.locator(".deck-agent-status")).toHaveText("生成中");
+  await expect(page.locator(".deck-agent-status")).toHaveText(/生成中|已完成/);
+  await expect.poll(async () => (await stack.readEvents(jobId)).some((item) => (
+    item.stage === "design"
+      && item.type === "progress"
+      && item.message === "正在写入设计方向与主题"
+  ))).toBe(true);
 
   await page.getByRole("button", { name: "关闭预览" }).click();
   await expect(artifact).toBeFocused();

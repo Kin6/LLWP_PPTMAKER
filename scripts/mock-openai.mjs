@@ -265,7 +265,7 @@ async function stageAgentTurn(details) {
   }
   if (/exactly one design direction|single design direction/i.test(task) || /exactly one design direction|single design direction/i.test(details.text)) {
     const designBriefMarkdown = "# Single direction\n\nTypography scale: 72/48/30/20. Palette: restrained neutral with distinct accents. Grid: 12 columns. Spacing: 24px rhythm. Image grammar: evidence-led crops. Chart grammar: direct labels and semantic colors. Motion level: low. Prohibited patterns: decorative gradients and nested cards.";
-    return { message: "Design published", final: true, toolCalls: [{ id: "stage-design-1", name: "write_theme", argumentsJson: JSON.stringify({ designBriefMarkdown, themeCss: stageThemeCss }) }] };
+    return { message: "Design published", final: true, toolCalls: [{ id: "stage-design-1", name: "write_theme", argumentsJson: JSON.stringify({ designBriefMarkdown }) }] };
   }
   if (Array.isArray(details.user.targetSlides)) {
     const activeScenario = activateScenario(details.text);

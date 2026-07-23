@@ -32,7 +32,7 @@ Read only the references routed to the active stage.
 | Stage | Required reference IDs |
 | --- | --- |
 | `outline` | `content-density`, `source-provenance` |
-| `design` | `design-direction`, `layout-catalog`, `security-contract` |
+| `design` | `design-direction`, `layout-catalog` |
 | `calibrating` | `design-direction`, `layout-catalog`, `visual-rubric`, `security-contract` |
 | `building` | `content-density`, `layout-catalog`, `source-provenance`, `security-contract` |
 | `verifying` | `visual-rubric`, `security-contract` |

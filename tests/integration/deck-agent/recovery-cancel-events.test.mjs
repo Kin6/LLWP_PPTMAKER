@@ -471,7 +471,7 @@ describe("HTML deck worker executor", () => {
     }]);
   });
 
-  it("filters incomplete model progress payloads before durable event persistence", async () => {
+  it("filters incomplete model progress payloads and accepts normalized milestones", async () => {
     class FakeWorker extends EventEmitter {
       postMessage(message) {
         if (message.type !== "run") return;
@@ -481,6 +481,19 @@ describe("HTML deck worker executor", () => {
             jobId: message.jobId,
             requestId: "raw-progress",
             event: { type: "progress", progress: { type: "delta", totalChars: 12 } },
+          });
+          this.emit("message", {
+            type: "event",
+            jobId: message.jobId,
+            requestId: "model-milestone",
+            event: {
+              stage: "design",
+              type: "progress",
+              status: "running",
+              title: "建立单一设计方向",
+              message: "模型服务正在进行兼容重试",
+              progress: { completed: 0, total: 1 },
+            },
           });
           this.emit("message", {
             type: "event",
@@ -510,7 +523,13 @@ describe("HTML deck worker executor", () => {
 
     await executor.start(jobId, { resumeFrom: "building" });
 
-    expect(onEvent).toHaveBeenCalledTimes(1);
+    expect(onEvent).toHaveBeenCalledTimes(2);
+    expect(onEvent).toHaveBeenCalledWith(jobId, expect.objectContaining({
+      stage: "design",
+      type: "progress",
+      message: "模型服务正在进行兼容重试",
+      progress: { completed: 0, total: 1 },
+    }));
     expect(onEvent).toHaveBeenCalledWith(jobId, expect.objectContaining({
       stage: "building",
       type: "stage",

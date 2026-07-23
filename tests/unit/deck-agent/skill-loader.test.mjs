@@ -13,7 +13,7 @@ const expectedThemes = ["minimal-white", "corporate-clean", "swiss-grid", "edito
 const expectedLayouts = ["cover", "section-divider", "two-column", "big-quote", "stat-highlight", "kpi-grid", "table", "timeline", "comparison", "process-steps", "image-hero", "thanks"];
 const expectedStageFiles = {
   outline: ["SKILL.md", "references/content-density.md", "references/source-provenance.md"],
-  design: ["SKILL.md", "references/design-direction.md", "references/layout-catalog.md", "references/security-contract.md"],
+  design: ["SKILL.md", "references/design-direction.md", "references/layout-catalog.md"],
   calibrating: ["SKILL.md", "references/design-direction.md", "references/layout-catalog.md", "references/visual-rubric.md", "references/security-contract.md"],
   building: ["SKILL.md", "references/content-density.md", "references/layout-catalog.md", "references/source-provenance.md", "references/security-contract.md"],
   verifying: ["SKILL.md", "references/visual-rubric.md", "references/security-contract.md"],
@@ -136,10 +136,10 @@ describe("project Skill loader", () => {
     const design = (await loader.load("design")).instructions;
     const building = (await loader.load("building")).instructions;
 
-    expect(design).toMatch(/one non-empty `designDirection`[\s\S]{0,180}(?:do not|never)[\s\S]{0,80}`designDirections`/i);
-    expect(design).toMatch(/doctype[\s\S]{0,120}`<html>`[\s\S]{0,120}`<head>`[\s\S]{0,120}`<body>`/i);
+    expect(design).toMatch(/call `write_theme` exactly once[\s\S]{0,160}only `designBriefMarkdown`/i);
+    expect(building).toMatch(/doctype[\s\S]{0,120}`<html>`[\s\S]{0,120}`<head>`[\s\S]{0,120}`<body>`/i);
     for (const attribute of ["cite", "ping", "data", "longdesc", "manifest", "usemap", "xlink:href", "background", "archive", "codebase", "classid", "profile", "attributionsrc", "dynsrc", "imagesrcset", "itemtype", "lowsrc"]) {
-      expect(design).toContain(`\`${attribute}\``);
+      expect(building).toContain(`\`${attribute}\``);
     }
     expect(building).toMatch(/each `optionalImageFailures`[\s\S]{0,240}matching empty named `data-asset-slot`/i);
     expect(building).toMatch(/duplicate[\s\S]{0,120}optional image failure/i);
@@ -150,11 +150,11 @@ describe("project Skill loader", () => {
 
   it("routes every prohibited hostile fragment element to generation stages", async () => {
     const loader = createSkillLoader({ skillRoot });
-    const design = (await loader.load("design")).instructions.toLowerCase();
+    const calibrating = (await loader.load("calibrating")).instructions.toLowerCase();
     const building = (await loader.load("building")).instructions.toLowerCase();
 
     for (const prohibited of ["<form>", "<frame>", "<iframe>", "<embed>", "<object>", "svg", "mathml"]) {
-      expect(design).toContain(prohibited);
+      expect(calibrating).toContain(prohibited);
       expect(building).toContain(prohibited);
     }
   });

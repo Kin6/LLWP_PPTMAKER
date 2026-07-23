@@ -129,6 +129,7 @@ export function buildBuildStageMessages(promptContext, skill = {}) {
       content: [
         instructions,
         "Write only the target slide IDs. Read-only slides provide continuity and must never be rewritten.",
+        "Use the locked design brief consistently. Theme values may be referenced only as var(--deck-*) tokens named by that brief; never invent custom properties.",
         String(promptContext.htmlCssContract || ""),
       ].filter(Boolean).join("\n\n"),
     },

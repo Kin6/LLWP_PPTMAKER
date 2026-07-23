@@ -141,6 +141,15 @@ describe("AgentRunView", () => {
       }));
       emitEvent?.(event({
         seq: 3,
+        stage: "design",
+        type: "progress",
+        status: "running",
+        title: "建立单一设计方向",
+        message: "正在请求模型生成设计方向",
+        progress: { completed: 0, total: 1 },
+      }));
+      emitEvent?.(event({
+        seq: 4,
         stage: "building",
         type: "stage",
         status: "running",
@@ -157,9 +166,10 @@ describe("AgentRunView", () => {
     await user.click(heading);
     expect(heading).toHaveAttribute("aria-expanded", "true");
 
+    expect(screen.getByText("正在请求模型生成设计方向")).toBeVisible();
     expect(Array.from(document.querySelectorAll("[data-event-seq]"), (node) => (
       node.getAttribute("data-event-seq")
-    ))).toEqual(["1", "2", "3"]);
+    ))).toEqual(["1", "2", "3", "4"]);
 
     await user.click(screen.getByRole("button", { name: "slides-content.md" }));
     expect(await screen.findByRole("heading", { name: "智能制造转型方案" })).toBeVisible();

@@ -5,7 +5,7 @@ const MAX_MARKDOWN_BYTES = 2 * 1024 * 1024;
 
 const STAGE_FILES = Object.freeze({
   outline: ["SKILL.md", "references/content-density.md", "references/source-provenance.md"],
-  design: ["SKILL.md", "references/design-direction.md", "references/layout-catalog.md", "references/security-contract.md"],
+  design: ["SKILL.md", "references/design-direction.md", "references/layout-catalog.md"],
   calibrating: ["SKILL.md", "references/design-direction.md", "references/layout-catalog.md", "references/visual-rubric.md", "references/security-contract.md"],
   building: ["SKILL.md", "references/content-density.md", "references/layout-catalog.md", "references/source-provenance.md", "references/security-contract.md"],
   verifying: ["SKILL.md", "references/visual-rubric.md", "references/security-contract.md"],

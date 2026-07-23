@@ -21,7 +21,7 @@ const SAFE_VALUE_FUNCTIONS = new Set([
   "repeat", "fit-content", "matrix", "matrix3d", "translate", "translatex",
   "translatey", "translatez", "translate3d", "scale", "scalex", "scaley",
   "scalez", "scale3d", "rotate", "rotatex", "rotatey", "rotatez", "rotate3d",
-  "skew", "skewx", "skewy", "perspective",
+  "skew", "skewx", "skewy", "perspective", "var",
 ]);
 const ALLOWED_SELECTOR_NODES = new Set([
   "PseudoClassSelector", "AttributeSelector", "Combinator", "ClassSelector", "TypeSelector",
@@ -114,6 +114,12 @@ function validateDeclaration(node) {
     if (valueNode.type === "Url") throw new Error("CSS url() is forbidden");
     if (valueNode.type === "Function" && !SAFE_VALUE_FUNCTIONS.has(valueNode.name.toLowerCase())) {
       throw new Error(`CSS function is forbidden: ${valueNode.name}`);
+    }
+    if (valueNode.type === "Function" && valueNode.name.toLowerCase() === "var") {
+      const reference = /^var\((--deck-[a-z-]+)\)$/.exec(csstree.generate(valueNode));
+      if (!reference || !REQUIRED_THEME_TOKENS.has(reference[1])) {
+        throw new Error(`CSS theme token reference is forbidden: ${csstree.generate(valueNode)}`);
+      }
     }
   });
   if (/expression|javascript:|data:|\d(?:vw|vh|vmin|vmax|cqw|cqh|cqi|cqb)\b/i.test(value)) {

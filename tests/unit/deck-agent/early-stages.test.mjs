@@ -88,6 +88,8 @@ function baseContext(overrides = {}) {
     emit: vi.fn(),
     waitForUser: vi.fn(),
     signal: new AbortController().signal,
+    selectedThemeCss: validTheme,
+    loadThemePreset: vi.fn(async () => validTheme),
     ...overrides,
   };
   context.tools = createToolRegistry({ tools: rawTools });
@@ -196,10 +198,15 @@ describe("outline and design stages", () => {
     const context = baseContext();
     context.store.files.set("slides-content.md", validOutline);
     context.runner.runStage.mockImplementationOnce(async ({ allowedTools, messages }) => {
-      expect(JSON.stringify(messages)).toContain("corporate-clean");
+      const prompt = JSON.stringify(messages);
+      expect(prompt).toContain("corporate-clean");
+      expect(prompt).toContain("# Test deck");
+      expect(prompt).toContain("outlineMarkdown");
+      expect(prompt).toContain("write_theme");
+      expect(prompt).toContain("designBriefMarkdown");
+      expect(Object.keys(allowedTools)).toEqual(["write_theme"]);
       await allowedTools.write_theme.execute({
         designBriefMarkdown: "# Direction\nTypography scale; palette; grid; spacing; image grammar; chart grammar; motion level; prohibited patterns.",
-        themeCss: validTheme,
       });
       return { upstreamCalls: 1 };
     });
@@ -207,7 +214,13 @@ describe("outline and design stages", () => {
     await runDesignStage(context);
 
     expect(context.runner.runStage).toHaveBeenCalledTimes(1);
-    expect(context.runner.runStage).toHaveBeenCalledWith(expect.objectContaining({ stage: "design", maxTurns: 1, maxUpstreamCalls: 3 }));
+    expect(context.runner.runStage).toHaveBeenCalledWith(expect.objectContaining({
+      stage: "design",
+      requiredToolName: "write_theme",
+      maxTurns: 1,
+      maxUpstreamCalls: 3,
+    }));
+    expect(context.loadThemePreset).toHaveBeenCalledWith("corporate-clean");
     expect(context.store.files.get("design-brief.md")).toMatch(/Typography scale/);
     expect(context.store.files.get("working/theme.css")).toContain("--deck-primary");
     expect(context.waitForUser).not.toHaveBeenCalled();
@@ -215,6 +228,7 @@ describe("outline and design stages", () => {
 
   it("allows compatible-provider repair calls within the single design turn", async () => {
     const context = baseContext();
+    context.store.files.set("slides-content.md", validOutline);
     context.runner = createAgentRunner({
       modelClient: {
         completeStructured: vi.fn(async () => ({
@@ -226,7 +240,6 @@ describe("outline and design stages", () => {
               name: "write_theme",
               argumentsJson: JSON.stringify({
                 designBriefMarkdown: "# Direction\nTypography scale; palette; grid; spacing; image grammar; chart grammar; motion level; prohibited patterns.",
-                themeCss: validTheme,
               }),
             }],
           },
@@ -250,11 +263,10 @@ describe("outline and design stages", () => {
   });
 
   it("canonicalizes normally formatted theme CSS before policy validation", async () => {
-    const context = baseContext();
+    const context = baseContext({ selectedThemeCss: formattedTheme });
     const tool = context.tools.forStage("design", context).write_theme;
     await tool.execute({
       designBriefMarkdown: "Typography scale; palette; grid; spacing; image grammar; chart grammar; motion level; prohibited patterns.",
-      themeCss: formattedTheme,
     });
     expect(context.store.files.get("working/theme.css")).toBe(validTheme.replace(/;}$/, "}"));
   });
@@ -264,7 +276,7 @@ describe("stage tool registry", () => {
   it("exposes only the exact tools for each stage", () => {
     const context = baseContext();
     expect(Object.keys(context.tools.forStage("outline", context))).toEqual(["read_source_blocks", "write_outline"]);
-    expect(Object.keys(context.tools.forStage("design", context))).toEqual(["read_outline", "write_design_brief", "write_theme"]);
+    expect(Object.keys(context.tools.forStage("design", context))).toEqual(["write_theme"]);
     expect(Object.keys(context.tools.forStage("calibrating", context))).toEqual([
       "read_outline", "write_slide", "render_deck", "inspect_slide", "capture_slide", "patch_slide",
     ]);

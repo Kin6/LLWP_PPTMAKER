@@ -123,6 +123,58 @@ describe("restricted Agent runner", () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
+  it("requires exactly one named tool and completes after it succeeds", async () => {
+    const execute = vi.fn().mockResolvedValue({ summary: "theme saved" });
+    const modelClient = {
+      completeStructured: vi.fn().mockResolvedValue({
+        value: agentTurn({
+          toolCalls: [{ id: "theme-1", name: "write_theme", argumentsJson: JSON.stringify({ brief: "one" }) }],
+        }),
+        apiCalls: 1,
+      }),
+    };
+    const runner = createAgentRunner({ modelClient });
+
+    await expect(runner.runStage(stageOptions({
+      stage: "design",
+      allowedTools: {
+        write_theme: { schema: z.object({ brief: z.string() }).strict(), execute },
+      },
+      requiredToolName: "write_theme",
+      maxTurns: 1,
+      maxUpstreamCalls: 3,
+    }))).resolves.toMatchObject({ upstreamCalls: 1 });
+
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(modelClient.completeStructured.mock.calls[0][0].schema.properties.toolCalls).toMatchObject({
+      minItems: 1,
+      maxItems: 1,
+      items: { properties: { name: { type: "string", enum: ["write_theme"] } } },
+    });
+  });
+
+  it("rejects a required-tool stage when the model only returns text", async () => {
+    const execute = vi.fn();
+    const modelClient = {
+      completeStructured: vi.fn().mockResolvedValue({
+        value: agentTurn({ message: "Here is a direction", final: true }),
+        apiCalls: 1,
+      }),
+    };
+    const runner = createAgentRunner({ modelClient });
+
+    await expect(runner.runStage(stageOptions({
+      stage: "design",
+      allowedTools: {
+        write_theme: { schema: z.object({ brief: z.string() }).strict(), execute },
+      },
+      requiredToolName: "write_theme",
+      maxTurns: 1,
+      maxUpstreamCalls: 3,
+    }))).rejects.toThrow(/requires exactly one write_theme/i);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it("validates parsed tool arguments with the stage tool schema", async () => {
     const execute = vi.fn();
     const modelClient = {
@@ -386,8 +438,22 @@ describe("restricted Agent runner", () => {
       },
     }));
 
-    expect(emit).toHaveBeenCalledWith({ type: "progress", progress: modelProgress });
-    expect(emit).toHaveBeenCalledWith({ type: "progress", progress: toolProgress });
+    expect(emit).not.toHaveBeenCalledWith({ type: "progress", progress: modelProgress });
+    expect(emit).toHaveBeenCalledWith({
+      stage: "outline",
+      type: "progress",
+      status: "running",
+      title: "整理幻灯片内容大纲并写入 Markdown",
+      message: "正在写入 Markdown 大纲",
+      progress: { completed: 0, total: 1 },
+    });
+    expect(emit).toHaveBeenCalledWith({
+      stage: "outline",
+      type: "progress",
+      status: "running",
+      title: "整理幻灯片内容大纲并写入 Markdown",
+      progress: toolProgress,
+    });
     expect(execute).toHaveBeenCalledWith(
       { markdown: "ok" },
       expect.objectContaining({
@@ -397,5 +463,38 @@ describe("restricted Agent runner", () => {
         onProgress: expect.any(Function),
       }),
     );
+  });
+
+  it("publishes durable request, compatibility, and JSON repair milestones", async () => {
+    const emit = vi.fn().mockResolvedValue(undefined);
+    const modelClient = {
+      completeStructured: vi.fn(async ({ onProgress }) => {
+        onProgress({ type: "request", message: "Model request sent" });
+        onProgress({ type: "request", message: "Compatibility retry sent" });
+        onProgress({ type: "request", message: "JSON repair request sent" });
+        return { value: agentTurn({ final: true }), apiCalls: 3 };
+      }),
+    };
+    const runner = createAgentRunner({ modelClient });
+
+    await runner.runStage(stageOptions({
+      stage: "design",
+      emit,
+      maxTurns: 1,
+      maxUpstreamCalls: 3,
+    }));
+
+    expect(emit.mock.calls.map(([event]) => event.message)).toEqual([
+      "正在请求模型生成设计方向",
+      "模型服务正在进行兼容重试",
+      "正在修复模型返回格式",
+    ]);
+    expect(emit.mock.calls.every(([event]) => (
+      event.stage === "design"
+      && event.type === "progress"
+      && event.status === "running"
+      && event.progress.completed === 0
+      && event.progress.total === 1
+    ))).toBe(true);
   });
 });

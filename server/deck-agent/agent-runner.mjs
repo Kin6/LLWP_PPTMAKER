@@ -3,29 +3,88 @@ import { MAX_UPSTREAM_CALLS_PER_MODEL_TURN } from "./upstream-budget.mjs";
 const MAX_HISTORY_TEXT_CHARS = 1_000;
 const MAX_MODEL_CONTENT_CHARS = 120_000;
 const REDACTED = "[redacted]";
+const STAGE_TITLES = Object.freeze({
+  outline: "整理幻灯片内容大纲并写入 Markdown",
+  design: "建立单一设计方向",
+  calibrating: "校准代表页面",
+  building: "生成 HTML 幻灯片页面",
+  "generating-assets": "处理页面素材",
+  verifying: "检查排版、内容溢出与视觉一致性",
+  repairing: "修复未通过检查的页面",
+});
+const STAGE_OUTPUTS = Object.freeze({
+  outline: "内容大纲",
+  design: "设计方向",
+  calibrating: "校准页面",
+  building: "幻灯片页面",
+  "generating-assets": "页面素材",
+  verifying: "检查结果",
+  repairing: "修复方案",
+});
+const TOOL_PROGRESS_MESSAGES = Object.freeze({
+  write_outline: "正在写入 Markdown 大纲",
+  write_theme: "正在写入设计方向与主题",
+  write_slide: "正在写入幻灯片页面",
+});
 
-const AGENT_TURN_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  required: ["message", "final", "toolCalls"],
-  properties: {
-    message: { type: "string" },
-    final: { type: "boolean" },
-    toolCalls: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["id", "name", "argumentsJson"],
-        properties: {
-          id: { type: "string" },
-          name: { type: "string" },
-          argumentsJson: { type: "string" },
+function agentTurnSchema(allowedTools, requiredToolName) {
+  const allowedToolNames = Object.keys(allowedTools || {});
+  const name = allowedToolNames.length
+    ? { type: "string", enum: requiredToolName ? [requiredToolName] : allowedToolNames }
+    : { type: "string" };
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["message", "final", "toolCalls"],
+    properties: {
+      message: { type: "string" },
+      final: { type: "boolean" },
+      toolCalls: {
+        type: "array",
+        ...(requiredToolName ? { minItems: 1, maxItems: 1 } : {}),
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["id", "name", "argumentsJson"],
+          properties: {
+            id: { type: "string" },
+            name,
+            argumentsJson: { type: "string" },
+          },
         },
       },
     },
-  },
-};
+  };
+}
+
+function stageProgressEvent(stage, progress) {
+  if (!progress || typeof progress !== "object") return undefined;
+  let message;
+  let completed = 0;
+  let total = 1;
+  if (progress.type === "request") {
+    if (progress.message === "Compatibility retry sent") message = "模型服务正在进行兼容重试";
+    else if (progress.message === "JSON repair request sent") message = "正在修复模型返回格式";
+    else message = `正在请求模型生成${STAGE_OUTPUTS[stage] || "结果"}`;
+  } else if (progress.type === "tool") {
+    message = TOOL_PROGRESS_MESSAGES[progress.name] || "正在写入生成结果";
+  } else if (Number.isSafeInteger(progress.completed) && Number.isSafeInteger(progress.total)
+    && progress.completed >= 0 && progress.total > 0) {
+    completed = progress.completed;
+    total = progress.total;
+    message = typeof progress.message === "string" ? progress.message : undefined;
+  } else {
+    return undefined;
+  }
+  return {
+    stage,
+    type: "progress",
+    status: "running",
+    title: STAGE_TITLES[stage] || "正在生成",
+    ...(message ? { message } : {}),
+    progress: { completed, total },
+  };
+}
 
 function bounded(text, maxChars = MAX_HISTORY_TEXT_CHARS) {
   if (text.length <= maxChars) return text;
@@ -83,6 +142,7 @@ export function createAgentRunner({ modelClient }) {
       stage,
       messages,
       allowedTools,
+      requiredToolName,
       maxTurns,
       maxUpstreamCalls,
       timeoutMs,
@@ -91,8 +151,27 @@ export function createAgentRunner({ modelClient }) {
     }) {
       const timeoutSignal = AbortSignal.timeout(timeoutMs);
       const stageSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+      if (requiredToolName !== undefined
+        && (typeof requiredToolName !== "string" || !Object.prototype.hasOwnProperty.call(allowedTools, requiredToolName))) {
+        throw new TypeError("Required tool must be allowed in this stage");
+      }
       const history = [...messages];
-      const onProgress = (progress) => emit?.({ type: "progress", progress });
+      const turnSchema = agentTurnSchema(allowedTools, requiredToolName);
+      const pendingProgress = new Set();
+      let progressError;
+      const onProgress = (progress) => {
+        const event = stageProgressEvent(stage, progress);
+        if (!event || typeof emit !== "function") return;
+        const delivery = Promise.resolve()
+          .then(() => emit(event))
+          .catch((error) => { progressError ||= error; });
+        pendingProgress.add(delivery);
+        delivery.then(() => pendingProgress.delete(delivery));
+      };
+      const flushProgress = async () => {
+        if (pendingProgress.size) await Promise.all([...pendingProgress]);
+        if (progressError) throw progressError;
+      };
       let upstreamCalls = 0;
 
       for (let turn = 0; turn < maxTurns; turn += 1) {
@@ -103,12 +182,13 @@ export function createAgentRunner({ modelClient }) {
 
         const response = await modelClient.completeStructured({
           messages: history,
-          schema: AGENT_TURN_SCHEMA,
+          schema: turnSchema,
           schemaName: "agent_turn",
           timeoutMs,
           signal: stageSignal,
           onProgress,
         });
+        await flushProgress();
         stageSignal.throwIfAborted();
         if (!Number.isSafeInteger(response.apiCalls) || response.apiCalls < 1) {
           throw new Error("Model response reported an invalid upstream-call count");
@@ -119,6 +199,11 @@ export function createAgentRunner({ modelClient }) {
         upstreamCalls += response.apiCalls;
         if (upstreamCalls > maxUpstreamCalls) {
           throw budgetError("upstream-call", maxUpstreamCalls);
+        }
+
+        if (requiredToolName && (response.value.toolCalls.length !== 1
+          || response.value.toolCalls[0]?.name !== requiredToolName)) {
+          throw new Error(`Stage ${stage} requires exactly one ${requiredToolName} tool call`);
         }
 
         const toolResults = [];
@@ -137,6 +222,8 @@ export function createAgentRunner({ modelClient }) {
             throw new Error(`Invalid arguments for ${call.name}: ${detail}`);
           }
 
+          onProgress({ type: "tool", name: call.name });
+          await flushProgress();
           const result = await tool.execute(input, {
             jobId,
             stage,
@@ -144,6 +231,7 @@ export function createAgentRunner({ modelClient }) {
             emit,
             onProgress,
           });
+          await flushProgress();
           stageSignal.throwIfAborted();
           const modelContent = toolModelContent(result);
           toolResults.push({
@@ -154,7 +242,7 @@ export function createAgentRunner({ modelClient }) {
           });
         }
 
-        if (response.value.final) {
+        if (requiredToolName || response.value.final) {
           return { message: response.value.message, toolResults, upstreamCalls };
         }
 

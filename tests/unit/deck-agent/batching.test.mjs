@@ -167,6 +167,25 @@ describe("build stage", () => {
     }));
   });
 
+  it("loads the persisted design brief when building page prompts", async () => {
+    const buildBatch = vi.fn(async () => []);
+    const readLockedDesignBriefSummary = vi.fn(async () => "Persisted palette, grid, and image grammar");
+
+    await runBuildStage({
+      outline: outlineFor(1),
+      remainingSlideIds: ["slide-01"],
+      readLockedDesignBriefSummary,
+      buildBatch,
+    });
+
+    expect(readLockedDesignBriefSummary).toHaveBeenCalledTimes(1);
+    expect(buildBatch).toHaveBeenCalledWith(expect.objectContaining({
+      promptContext: expect.objectContaining({
+        lockedDesignBriefSummary: "Persisted palette, grid, and image grammar",
+      }),
+    }));
+  });
+
   it("recovers the read-only neighbor from persisted page checkpoints", async () => {
     const buildBatch = vi.fn(async () => []);
     const manifest = {
