@@ -20,6 +20,7 @@ export interface AgentStepModel {
   artifacts: DeckArtifactSummary[];
   canRetry: boolean;
   defaultExpanded?: boolean;
+  eventSeq?: number;
 }
 
 export interface AgentStepProps {
@@ -51,7 +52,10 @@ export function AgentStep({ step, onArtifact, onRetry }: AgentStepProps) {
   }, [step.status]);
 
   return (
-    <section className={`deck-agent-step is-${step.status}`}>
+    <section
+      className={`deck-agent-step is-${step.status}`}
+      {...(step.eventSeq ? { "data-event-seq": step.eventSeq } : {})}
+    >
       <span className="deck-agent-step__status" aria-hidden="true">
         <StepStatusIcon status={step.status} />
       </span>

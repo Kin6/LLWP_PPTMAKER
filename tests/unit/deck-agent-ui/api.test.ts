@@ -43,6 +43,7 @@ function snapshot(overrides: Partial<DeckJobSnapshot> = {}): DeckJobSnapshot {
   return {
     id: jobId,
     title: "季度复盘",
+    source: { topic: "季度复盘", audience: "管理层", slideCount: 8 },
     status: "outline",
     lastSeq: 1,
     revision: 0,

@@ -12,6 +12,7 @@ function snapshot(overrides: Partial<DeckJobSnapshot> = {}): DeckJobSnapshot {
   return {
     id: jobId,
     title: "季度复盘",
+    source: { topic: "季度复盘", audience: "管理层", slideCount: 8 },
     status: "queued",
     lastSeq: 0,
     revision: 0,
@@ -69,6 +70,30 @@ describe("deck job reducer", () => {
     expect(refreshed.lastSeq).toBe(1);
     expect(refreshed.job?.lastSeq).toBe(6);
     expect(refreshed.events.map((item) => item.seq)).toEqual([1]);
+  });
+
+  it("keeps an in-flight command locked during a background server refresh", () => {
+    const pending = reduceDeckJob(createDeckJobState(snapshot()), { type: "command-start" });
+    const refreshed = reduceDeckJob(pending, {
+      type: "server-refreshed",
+      job: snapshot({
+        status: "ready",
+        revision: 1,
+        artifacts: [{
+          id: "deck-preview",
+          filename: "index.html",
+          kind: "html",
+          stage: "verifying",
+          revision: 1,
+          previewable: true,
+          downloadable: true,
+        }],
+      }),
+    });
+
+    expect(refreshed.commandPending).toBe(true);
+    expect(refreshed.revision).toBe(1);
+    expect(refreshed.artifacts).toEqual([expect.objectContaining({ id: "deck-preview" })]);
   });
 
   it("rejects wrong-job and duplicate events and keeps timeline sequence order", () => {

@@ -70,7 +70,7 @@ export function AgentMessage({ initialRequest, events, fallbackTitle }: AgentMes
         </div>
       </article>
       {messages.length ? messages.map((event) => (
-        <article className="deck-agent-message is-agent" key={event.seq}>
+        <article className="deck-agent-message is-agent" data-event-seq={event.seq} key={event.seq}>
           <span className="deck-agent-message__avatar" aria-hidden="true"><Bot size={15} /></span>
           <div>
             <span className="deck-agent-message__author">LLWP Agent</span>

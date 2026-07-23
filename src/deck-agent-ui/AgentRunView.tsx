@@ -97,7 +97,8 @@ export function AgentRunView({ jobId, initialRequest, onExit }: AgentRunViewProp
   const [instruction, setInstruction] = useState("");
   const [selectedSlideIds, setSelectedSlideIds] = useState<string[]>([]);
   const job = state.job && (!jobId || state.job.id === jobId) ? state.job : null;
-  const pageCount = requestPageCount(initialRequest);
+  const effectiveRequest = job?.source ?? initialRequest;
+  const pageCount = requestPageCount(effectiveRequest);
   const slideIds = useMemo(() => Array.from(
     { length: pageCount ?? 0 },
     (_, index) => `slide-${String(index + 1).padStart(2, "0")}`,
@@ -139,7 +140,10 @@ export function AgentRunView({ jobId, initialRequest, onExit }: AgentRunViewProp
         progress: last?.progress,
         artifacts,
         canRetry: status === "failed" && state.actions.canRetry,
-        defaultExpanded: state.status === "failed" && artifacts.length > 0 ? true : undefined,
+        defaultExpanded: stage === "outline" && artifacts.length > 0
+          ? true
+          : state.status === "failed" && artifacts.length > 0 ? true : undefined,
+        eventSeq: last?.type === "message" ? undefined : last?.seq,
       };
     });
   }, [state.actions.canRetry, state.job?.error, state.stageGroups, state.status, timelineArtifacts]);
@@ -255,7 +259,7 @@ export function AgentRunView({ jobId, initialRequest, onExit }: AgentRunViewProp
         <section className="deck-agent-timeline" ref={timelineRef} aria-label="Agent 任务时间线">
           <div className="deck-agent-timeline__inner">
             <AgentMessage
-              initialRequest={initialRequest}
+              initialRequest={effectiveRequest}
               events={state.events}
               fallbackTitle={job?.title}
             />

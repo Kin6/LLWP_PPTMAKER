@@ -54,6 +54,7 @@ const jobId = "job-00000000-0000-4000-8000-000000000001";
 const queuedJob: DeckJobSnapshot = {
   id: jobId,
   title: "可信 AI 决策",
+  source: { topic: "可信 AI 决策", audience: "管理层", slideCount: 11 },
   status: "queued",
   lastSeq: 1,
   revision: 0,

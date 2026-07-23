@@ -29,6 +29,7 @@ function snapshot(overrides: Partial<DeckJobSnapshot> = {}): DeckJobSnapshot {
   return {
     id: jobId,
     title: "季度复盘",
+    source: { topic: "季度复盘", audience: "管理层", slideCount: 8 },
     status: "building",
     lastSeq: 4,
     revision: 0,
@@ -362,23 +363,52 @@ describe("useDeckAgentJob", () => {
     unmount();
   });
 
-  it("stops reconnecting after a terminal event", async () => {
+  it("refreshes the published snapshot after a terminal event before stopping reconnects", async () => {
     vi.useFakeTimers();
     window.history.replaceState(null, "", `/?job=${jobId}`);
+    api.getDeckJob
+      .mockResolvedValueOnce(snapshot())
+      .mockResolvedValueOnce(snapshot({
+        status: "ready",
+        lastSeq: 5,
+        revision: 1,
+        artifacts: [{
+          id: "deck-preview",
+          filename: "index.html",
+          kind: "html",
+          stage: "verifying",
+          revision: 1,
+          previewable: true,
+          downloadable: true,
+        }],
+        actions: {
+          canCancel: false,
+          canRetry: false,
+          canMessage: true,
+          canUndo: false,
+          canDownload: true,
+        },
+      }));
     api.streamDeckJobEvents.mockImplementationOnce(async (
       _id: string,
       _after: number,
       _signal: AbortSignal,
       onEvent: (value: DeckJobEvent) => void,
     ) => {
-      onEvent(event({ seq: 5, stage: "ready", type: "job", status: "done" }));
+      onEvent(event({ seq: 5, stage: "ready", type: "job", status: "done", revision: 1 }));
     });
 
     const { result, unmount } = renderHook(() => useDeckAgentJob());
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
+    expect(api.getDeckJob).toHaveBeenCalledTimes(2);
     expect(result.current.state.status).toBe("ready");
+    expect(result.current.state.revision).toBe(1);
+    expect(result.current.state.artifacts).toEqual([
+      expect.objectContaining({ id: "deck-preview", revision: 1 }),
+    ]);
+    expect(result.current.state.actions.canDownload).toBe(true);
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(10_000);

@@ -34,6 +34,7 @@ export interface DeckJobState {
 export type DeckJobAction =
   | { type: "load-job"; jobId: string }
   | { type: "snapshot"; job: DeckJobSnapshot }
+  | { type: "server-refreshed"; job: DeckJobSnapshot }
   | { type: "artifacts-refreshed"; jobId: string; artifacts: DeckArtifactSummary[] }
   | { type: "event"; event: DeckJobEvent }
   | { type: "command-start" }
@@ -224,6 +225,14 @@ export function reduceDeckJob(
       return createDeckJobState(null, action.jobId);
     case "snapshot":
       return withSnapshot(state, action.job);
+    case "server-refreshed": {
+      const refreshed = withSnapshot(state, action.job);
+      return {
+        ...refreshed,
+        commandPending: state.commandPending,
+        commandError: state.commandError,
+      };
+    }
     case "artifacts-refreshed":
       return withRefreshedArtifacts(state, action.jobId, action.artifacts);
     case "event":

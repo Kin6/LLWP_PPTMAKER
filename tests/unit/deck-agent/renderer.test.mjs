@@ -156,7 +156,8 @@ describe("fixed deck renderer", () => {
     expect(html).toContain("img-src data: blob: https://deck.example.test");
     expect(html).toContain('event.origin !== "https://deck.example.test"');
     expect(html).toContain(`jobId: "${jobId}"`);
-    expect(html).toContain(`revision: "${revisionId}"`);
+    expect(html).toContain("revision: 1");
+    expect(html).not.toContain(`revision: "${revisionId}"`);
     expect(html).toContain('message.type !== "deck-command"');
     expect(html).toContain("event.source !== parent");
   });

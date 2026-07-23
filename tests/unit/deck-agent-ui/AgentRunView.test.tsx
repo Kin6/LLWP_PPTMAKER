@@ -52,6 +52,7 @@ function snapshot(overrides: Partial<DeckJobSnapshot> = {}): DeckJobSnapshot {
   return {
     id: jobId,
     title: request.topic,
+    source: request,
     status: "building",
     lastSeq: 0,
     revision: 0,
@@ -150,9 +151,15 @@ describe("AgentRunView", () => {
     });
 
     const heading = await screen.findByRole("button", { name: "整理幻灯片内容大纲并写入 Markdown" });
+    expect(heading).toHaveAttribute("aria-expanded", "true");
+    await user.click(heading);
     expect(heading).toHaveAttribute("aria-expanded", "false");
     await user.click(heading);
     expect(heading).toHaveAttribute("aria-expanded", "true");
+
+    expect(Array.from(document.querySelectorAll("[data-event-seq]"), (node) => (
+      node.getAttribute("data-event-seq")
+    ))).toEqual(["1", "2", "3"]);
 
     await user.click(screen.getByRole("button", { name: "slides-content.md" }));
     expect(await screen.findByRole("heading", { name: "智能制造转型方案" })).toBeVisible();
@@ -222,6 +229,38 @@ describe("AgentRunView", () => {
       3,
       expect.any(AbortSignal),
     ));
+  });
+
+  it("uses the persisted source summary when restoring a job URL", async () => {
+    const user = userEvent.setup();
+    const ready = snapshot({
+      source: { topic: "恢复后的演示", audience: "董事会", slideCount: 11 },
+      status: "ready",
+      lastSeq: 8,
+      revision: 2,
+      progress: { completed: 8, total: 8 },
+      artifacts: [outlineArtifact, previewArtifact],
+      actions: {
+        canCancel: false,
+        canRetry: false,
+        canMessage: true,
+        canUndo: true,
+        canDownload: true,
+      },
+    });
+    api.getDeckJob.mockResolvedValue(ready);
+
+    render(
+      <AgentRunView
+        jobId={jobId}
+        initialRequest={{ topic: "页面默认值", audience: "", slideCount: 7 }}
+        onExit={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText("1 / 11")).toBeVisible();
+    await user.click(screen.getByText("选择明确页面"));
+    expect(screen.getByRole("checkbox", { name: "第 11 页" })).toBeVisible();
   });
 
   it("keeps preview and retry available for needs-review, but withholds preview after failure", async () => {

@@ -178,9 +178,11 @@ function sanitizeRuntimeUrls(source) {
 }
 
 function resolveBridge(source, { jobId, revisionId, appOrigin }) {
+  if (!REVISION_ID.test(revisionId)) throw new Error("Preview bridge requires a published revision");
+  const revision = Number(revisionId.slice("revision-".length));
   return source
     .replaceAll('"__JOB_ID__"', JSON.stringify(jobId))
-    .replaceAll("__REVISION__", JSON.stringify(revisionId))
+    .replaceAll("__REVISION__", JSON.stringify(revision))
     .replaceAll('"__PARENT_ORIGIN__"', JSON.stringify(appOrigin));
 }
 

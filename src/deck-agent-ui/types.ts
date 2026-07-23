@@ -60,6 +60,11 @@ export const deckArtifactSchema = z.object({
 export const deckJobSnapshotSchema = z.object({
   id: deckJobIdSchema,
   title: z.string(),
+  source: z.object({
+    topic: z.string(),
+    audience: z.string(),
+    slideCount: z.number().int().min(1).max(50),
+  }).strict(),
   status: deckJobStatusSchema,
   failedStage: deckJobStatusSchema.optional(),
   error: z.string().optional(),

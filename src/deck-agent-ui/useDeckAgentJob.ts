@@ -102,14 +102,14 @@ export function useDeckAgentJob(): UseDeckAgentJobResult {
     let stopped = false;
     transportControllerRef.current = controller;
 
-    const refreshArtifacts = () => {
+    const refreshSnapshot = () => {
       artifactRefreshControllerRef.current?.abort();
       const refreshController = new AbortController();
       artifactRefreshControllerRef.current = refreshController;
       void getDeckJob(jobId, refreshController.signal)
         .then((job) => {
           if (refreshController.signal.aborted || cursorJobIdRef.current !== jobId) return;
-          dispatch({ type: "artifacts-refreshed", jobId, artifacts: job.artifacts });
+          dispatch({ type: "server-refreshed", job });
         })
         .catch((error: unknown) => {
           if (!refreshController.signal.aborted && cursorJobIdRef.current === jobId) {
@@ -137,7 +137,9 @@ export function useDeckAgentJob(): UseDeckAgentJobResult {
               lastSeqRef.current = event.seq;
               reachedTerminal ||= isTerminalDeckJobStatus(event.stage);
               dispatch({ type: "event", event });
-              if (event.type === "artifact") refreshArtifacts();
+              if (event.type === "artifact"
+                || event.type === "revision"
+                || isTerminalDeckJobStatus(event.stage)) refreshSnapshot();
             },
           );
           if (reachedTerminal || stopped || controller.signal.aborted) break;
