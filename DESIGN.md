@@ -23,13 +23,13 @@ Use the native system sans stack with Microsoft YaHei for Chinese. UI headings s
 
 ## Layout
 
-Desktop PPTX mode uses a compact top bar and a Manus-like three-column workspace: a source rail, a five-step agent timeline, and a flexible artifact canvas. HTML mode uses a Claude Design-like single sidebar with Chat/Context tabs beside an unframed artifact canvas; page navigation and the object inspector stay inside the HTML editor. Mobile collapses to one column with actions kept reachable.
+Desktop PPTX mode uses a compact top bar and a Manus-like three-column workspace: a source rail, a five-step agent timeline, and a flexible artifact canvas. HTML mode uses a Manus-like Agent run with a collapsible task timeline beside an unframed, fixed-ratio presentation preview. Markdown opens as a read-only artifact while generation continues; revision controls remain outside the sandboxed preview. Mobile stacks the timeline, preview, and revision composer into one column with actions kept reachable.
 
 ## Components
 
 - Controls use 6px radii, 40px minimum height, visible hover, focus, disabled, and loading states.
 - Segmented controls are used for local versus AI mode.
-- API configuration is an inline disclosure panel, not a modal, and separates text/vision service credentials from Image 2 credentials.
+- API settings use an inline disclosure panel for non-sensitive generation options and environment-detected availability. Credentials, providers, model names, and service URLs remain server-side environment configuration.
 - Cards are reserved for repeated slide thumbnails and evidence items.
 - Status uses text plus an icon; color is supportive, never the only signal.
 

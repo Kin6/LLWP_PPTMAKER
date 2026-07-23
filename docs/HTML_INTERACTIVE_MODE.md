@@ -2,81 +2,93 @@
 
 ## 产品边界
 
-该模式参考 Claude Design 的代码驱动设计工作流，但不是任意代码生成器。应用内版本是可编辑、可评论、可 AI 精修的结构化设计文档；导出的单文件 HTML 是可离线运行的交互快照；静态 PPTX 是兼容性交付物。三者不承诺无损双向转换。
+HTML 模式是一个可恢复的演示文稿制作 Agent，不是自由代码编辑器。用户提交材料后，系统先自动生成可查看的 `slides-content.md`，随后直接完成设计、页面生成、素材处理和质量检查。用户不需要确认中间大纲，但可以在生成期间打开只读 Markdown。
 
-已实现的核心能力：
+第一版提供：
 
-- 1600 x 900、16:9 的结构化 `HtmlDeckSpec`。
-- Reveal.js 翻页和 ECharts 原生图表。
-- 文本、形状、图片、图表、视频和固定 Widget 节点。
-- `click`、`hover`、`enter`、`key` 触发器。
-- `next`、`previous`、`toggle`、`highlight`、`set-variable`、`animate` 动作。
-- 选择、拖拽、缩放、属性编辑、撤销重做、评论、Tweaks 和 Draw。
-- 目标页/目标对象级 AI Patch。
-- IndexedDB 自动保存、逐页生图检查点、离线 HTML 和静态可编辑 PPTX。
+- 固定 1920 x 1080、16:9 的 Reveal.js 演示和 ECharts 图表。
+- Manus 风格任务时间线、可折叠步骤和只读产物预览。
+- 单一设计方向和代表页校准，不生成三套候选方案。
+- 按批生成 HTML/CSS，失败后从持久化检查点重试。
+- 对当前页或明确选中页面发起自然语言修改，验证通过后原子发布新 revision。
+- 撤销到上一已发布 revision，以及下载可离线运行的单文件 HTML。
 
-当前不包含 Claude Design 的组织级多人实时协作、设计系统管理员锁定、Canva/Figma/Gamma 连接器、Claude Code handoff bundle，以及任意用户代码执行。
+第一版不提供元素拖拽、缩放、属性面板、图层编辑、浏览器端对象持久化或 HTML 转 PPTX。需要可编辑 PowerPoint 时，应使用本地、标准或融合成片 PPTX 模式。
 
-## 数据流
+## 生成流程
 
 ```text
-用户材料
-  -> NotebookDeckSpec（内容、页序、讲稿）
-  -> GPT Image 2（独立无文字主视觉，1536 x 864）
-  -> 安全 HtmlDeckSpec 初稿
-  -> AI 设计规划（严格 JSON Schema）
-  -> Zod 校验与素材 URL 回填
-  -> sandbox iframe 运行时
-  -> 编辑 / 评论 / Tweaks / Draw / AI Patch
-  -> IndexedDB / standalone HTML / static PPTX
+attachmentParser
+  -> 结构化 sourceBlocks 与上传素材
+  -> slides-content.md
+  -> 单一 design brief / theme
+  -> 代表页 calibration
+  -> 分批 HTML/CSS 页面
+  -> 素材匹配或生成
+  -> DOM、截图和视觉 QA
+  -> revisioned standalone HTML
 ```
 
-`HtmlDeckSpec` 是唯一源数据。DOM 只是渲染结果，拖拽和交互变量必须通过 `postMessage` 回写结构数据，不能把 iframe DOM 当作持久化状态。
+`slides-content.md` 只包含叙事结构、页标题、核心结论、要点、讲稿提示和材料来源。模型不能在这个阶段加入布局坐标、配色、动效或实现代码。大纲写入后任务自动进入设计阶段。
+
+每页以稳定的 `slide-XX` 标识保存为受限 HTML 片段和作用域 CSS。服务端负责套入固定运行时、来源引用、讲稿备注和素材；模型不能提交脚本、事件处理器、外链、iframe、表单或任意运行时代码。
+
+## Agent 交互
+
+- 步骤标题可点击展开或折叠；已生成的大纲默认展开。
+- 点击 `slides-content.md` 会打开只读 Markdown，关闭后恢复时间线滚动位置和焦点。
+- 刷新页面后，`?job=<jobId>` 会恢复任务快照，并从最后接收的事件序号继续播放，不重复时间线记录。
+- `ready` 表示 QA 已通过并发布；`needs-review` 表示已生成可预览版本，但自动修复预算用尽，仍需人工复核。
+- 非终态任务可以取消。取消会先停止 worker 并封住后续写入，再标记任务为 `cancelled`。
+- `failed`、`cancelled` 和 `needs-review` 可以重试；已经完成的安全产物不会被删除。
+- revision 修改在候选目录中完成，只有目标页检查通过后才更新公开指针。失败候选不会替换当前版本。
 
 ## 安全边界
 
-- iframe 使用 `sandbox="allow-scripts"`，不启用 `allow-same-origin`、表单、弹窗或顶层导航。
-- CSP 默认拒绝所有能力，只允许内联/本机运行时脚本、内联样式和 `data:`/`blob:` 媒体；`connect-src`、`frame-src`、`object-src`、`form-action` 均为 `none`。
-- Reveal 的窄屏滚动视图被禁用，避免 opaque origin 访问 `sessionStorage`；iframe 无法读取主应用的 API 配置和存储。
-- AI Patch 只接受白名单字段。图片/视频的 `src` 不可由 Patch 修改，新增节点禁止 image/video，`__proto__`、`constructor` 和 `prototype` 被拒绝。
-- 完整 Deck 和每个 Patch 都要再次通过 Zod 校验；失败时保留原稿。
-- 服务默认只监听 `127.0.0.1`。环境变量中的 API Key 只能发送到环境里明确配置的 Base URL；其他地址必须提供独立会话 Key。
+- 预览 iframe 只使用 `sandbox="allow-scripts"`，没有同源、表单、弹窗、下载或顶层导航权限。
+- CSP 默认拒绝所有能力；脚本和样式以哈希授权，`connect-src`、`worker-src`、`frame-src`、`object-src`、`form-action` 和 `navigate-to` 均为 `none`。
+- 预览消息同时校验来源窗口、opaque origin、随机 channel token、Job ID、数字 revision 和页面 ID。伪造消息不会翻页。
+- Reveal.js 6.0.1、ECharts 6.1.0 和本地 bridge 由运行时清单固定版本与 SHA-256；启动时哈希不符会拒绝生成。
+- API Key、Base URL、Provider 和模型只能来自服务端环境变量。Job 请求、事件、Markdown、预览和下载文件都不保存这些字段。
+- standalone HTML 内联运行时和素材，不包含 Job 路径、聊天记录、系统提示词或网络 URL。
 
-## 导出规则
+## 持久化与限额
 
-单文件 HTML 内联 Reveal、ECharts 和所有 `blob:` 素材，保留放映、图表、动画和交互。它不包含主应用、聊天上下文或 API Key，因此不能继续接受自然语言修改。
+Job 默认保存在仓库根目录下被忽略的 `.deck-jobs/`；生产环境必须通过 `DECK_JOB_ROOT` 指向独立持久卷。每个目录包含状态、事件、来源、大纲、页面、QA 证据和已发布 revisions。
 
-静态 PPTX 保留：
+默认硬限额：
 
-- 文字框和基础样式。
-- 形状和图片。
-- 原生 PowerPoint 图表及数据。
-- 讲稿备注。
+| 项目 | 限额 |
+| --- | ---: |
+| 单个 Job 工作区 | 512 MiB |
+| Markdown 文件 | 2 MiB |
+| 单页 HTML | 200 KiB |
+| 单页 CSS | 120 KiB |
+| JSON 文件 | 10 MiB |
+| 单张图片 | 12 MiB |
+| standalone HTML | 256 MiB |
+| 页面数 / 上传图片数 | 50 |
 
-静态 PPTX 降级：
+服务不会自动删除终态 Job。运维侧应按业务保留期备份或清理终态目录，并在删除前确认 Job 没有 active worker；不得删除 active Job。临时 Chromium profile 会在每次 QA 的 `finally` 阶段清除。
 
-- Web 动画和交互动作不保留。
-- 视频输出为占位对象。
-- Widget 输出为可编辑文字/基础形状。
-- HTML 与 PowerPoint 字体排版可能有轻微差异。
+## 部署要求
 
-## 高级组件路线
+安装依赖和 Chromium：
 
-下一阶段应采用受控插件，而不是扩大模型可写 HTML 的权限：
+```bash
+npm ci
+npx playwright install chromium
+```
 
-1. 为 Three.js、Matter.js 和地图组件定义独立、版本化的 Widget Schema。
-2. 运行时按节点类型懒加载固定适配器，导出时内联对应依赖。
-3. Mapbox 等需要令牌或网络的组件必须提供静态地图降级，并在离线导出前显式提示。
-4. 用户自定义代码必须进入第二层 sandbox iframe，通过窄消息协议接收只读数据，不能与 Deck iframe 或主应用同源。
-5. 每种插件都要提供静态 PPTX 降级、资源大小上限、性能预算和浏览器兼容测试。
+Node worker 使用 512 MiB old generation、64 MiB young generation 和 8 MiB stack 限制，但这些限制不覆盖 Chromium 子进程。生产部署必须把应用 worker 和 Chromium 进程树放入容器或操作系统 sandbox，并显式设置 CPU、RSS、进程数、磁盘和网络限制；具体额度应按最大页数和并发量压测后确定。未设置外部限制时，不应将 HTML 生成接口直接暴露为多租户服务。
 
 ## 验收
 
 ```bash
-npm run build
 npm run test:html-deck
+npm run build
 node --check server/index.mjs
 git diff --check
 ```
 
-浏览器验收至少覆盖桌面和移动端：iframe 非空、ECharts SVG 可见、对象选择/拖拽/缩放回写、评论和 AI Patch、Tweaks、Draw、放映交互、离线 HTML、PPTX ZIP 完整性、控制台错误和横向溢出。
+HTML 套件覆盖桌面 1440 x 900 和移动端 390 x 844、只读大纲、刷新恢复、重试/取消、revision/undo、sandbox 能力隔离、离线下载，以及内部 1920 x 1080 页面非空、无溢出、无断图、无重复 ID、字体与图表加载成功。

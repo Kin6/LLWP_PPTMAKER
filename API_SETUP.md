@@ -1,6 +1,6 @@
 # API 配置与生成实现
 
-本地模式不需要 API。标准模式只调用文本模型；融合成片模式调用文本模型与 GPT Image 2；交互网页模式在同一内容与图片流程后，再调用一次文本模型生成受约束的 `HtmlDeckSpec`。
+本地模式不需要 API。标准模式只调用文本模型；融合成片模式调用文本模型与 GPT Image 2；交互网页模式使用独立的 HTML Job 流水线，按内容、设计、校准、页面批次、可选素材和视觉 QA 阶段调用模型。
 
 ## 请求流程
 
@@ -46,9 +46,21 @@ stream = true
 
 ### 3. HTML 交互演示
 
-HTML 模式使用独立无文字主视觉，再将 `NotebookDeckSpec` 与安全初稿提交给布局模型。模型只能返回满足 JSON Schema 的 `HtmlDeckSpec`；Schema 不合格、模型超时或兼容接口异常时，系统保留本地安全编排器生成的草稿，第三阶段不会因为单次设计请求失败而丢失前两步结果。
+HTML 模式从附件解析器产出的结构化 `sourceBlocks` 开始，使用以下独立流程：
 
-局部 AI 修改只返回白名单 Patch，不能修改图片/视频 URL、注入脚本或写入原型链字段。
+```text
+attachmentParser -> sourceBlocks -> slides-content.md
+  -> 单一 design / calibration
+  -> 分批 HTML/CSS/assets
+  -> DOM、截图和视觉 QA
+  -> revisioned standalone HTML
+```
+
+`slides-content.md` 只包含叙事结构、页标题、核心结论、要点、讲稿提示和材料来源。大纲通过结构与来源校验后自动继续，不设置人工确认关卡。系统只生成一个设计方向，以最多两张代表页校准，再把其余页面按每批 2-3 页、最高并发 2 批生成。页面片段和 CSS 通过服务端策略校验；素材优先复用上传内容，图片生成受用户设置的数量预算约束。
+
+QA 先对所有页面执行 DOM 检查和 Playwright 截图，再做一次整套视觉复核。只有失败页会进入至多一轮定向修复与复核；仍有问题时发布为 `needs-review`，全部通过时发布为 `ready`。自然语言 revision 在隔离的候选目录中修改当前页或明确选中的页面，只有候选版本通过 DOM、截图和视觉 QA 后才原子发布；失败候选不会覆盖当前 revision。
+
+当前前端只使用 `/api/html-deck/jobs` Job API：创建 Job；读取快照；按事件序号续接 NDJSON 事件；读取或下载产物；以及 `cancel`、`retry`、`messages` 和 `undo` 操作。刷新后，URL 中的 `?job=<jobId>` 用于恢复同一 Job。
 
 ## 只允许系统环境变量配置
 
@@ -106,6 +118,20 @@ IMAGE_API_FALLBACK_BASE_URL=
 
 主地址为 `api.chatanywhere.org` 时，未显式设置备用地址也会尝试 `api.chatanywhere.tech`。
 
+## HTML Job 运维配置
+
+`DECK_JOB_ROOT` 未设置时默认为仓库根目录下的 `.deck-jobs/`。生产环境必须把它指向独立持久卷，以便任务快照、事件、QA 证据和 revisions 在进程或容器重建后仍可恢复。服务不会自动清理终态 Job；运维应按业务保留期备份或删除终态目录，并在删除前确认 Job 没有 active worker。不得删除 active Job。
+
+默认硬限额为：单个 Job 512 MiB、Markdown 2 MiB、单页 HTML 200 KiB、单页 CSS 120 KiB、JSON 10 MiB、单张图片 12 MiB、standalone HTML 256 MiB，以及最多 50 页和 50 张上传图片。
+
+HTML 的 DOM、截图和视觉 QA 需要 Chromium：
+
+```bash
+npx playwright install chromium
+```
+
+Node worker 配置了 512 MiB old generation、64 MiB young generation 和 8 MiB stack 限制，但这些数值不约束 Chromium 子进程。生产部署必须对 worker 与 Chromium 的整个进程树显式设置 CPU、RSS、进程数、磁盘和网络限制；额度应根据最大页数、图片大小和并发 Job 数压测后确定。
+
 ## 附件输入
 
 - 图片：PNG、JPG、WebP；最多取前 3 张压缩后送入文本模型，图片接口最多接收 4 张参考图。
@@ -128,7 +154,7 @@ IMAGE_API_FALLBACK_BASE_URL=
 
 ## 调用量与成本
 
-以 N 页融合成片为例，正常路径通常为：
+以 N 页 PPTX 融合成片为例，正常路径通常为：
 
 ```text
 2 次文本请求（大纲 + 完整 DeckSpec）
@@ -136,7 +162,9 @@ IMAGE_API_FALLBACK_BASE_URL=
 = N + 2 次 API 调用
 ```
 
-HTML 模式通常再增加 1 次布局请求，即 `N + 3` 次。页数纠错、兼容接口回退、JSON 修复和图片重试都会增加调用数。标准模式关闭图片后通常只需要 2 次文本请求。
+标准 PPTX 模式关闭图片后通常只需要 2 次文本请求。页数纠错、兼容接口回退、JSON 修复和图片重试都会增加 PPTX 路径的实际调用数。
+
+HTML Job 没有固定的 `N + 常数` 调用公式。调用量取决于页面批次数、校准结果、可选图片数量和 QA 是否发现问题。当前预算会限制每个阶段的上游调用：大纲最多进行一次修复；设计只有一个方向；代表页校准是有界流程；其余页面每批 2-3 页且失败批次只集中重试一次；整套视觉复核只有一次，若发现问题，至多增加一轮定向修复与复核。图片调用还受 `imageCount` 上限及每张图片的重试配置约束。达到阶段预算后任务会失败或以 `needs-review` 发布，不会无限调用。
 
 ## 本地模拟服务
 
@@ -144,4 +172,4 @@ HTML 模式通常再增加 1 次布局请求，即 `N + 3` 次。页数纠错、
 node scripts/mock-openai.mjs
 ```
 
-默认地址为 `http://127.0.0.1:4010/v1`。模拟服务覆盖流式输出、严格页数、逐页图片、一次性失败重试和 HTML 布局，不代表正式模型的视觉质量。
+默认地址为 `http://127.0.0.1:4010/v1`。模拟服务覆盖流式输出、严格页数、逐页图片，以及 HTML Job 的阶段、批次、失败重试、取消和 revision，不代表正式模型的视觉质量。
