@@ -183,6 +183,15 @@ test("one failed build batch, calibration fallback, and an image 524 recover wit
   });
   const completed = await stack.waitForJob(created.id, ["ready"], { timeoutMs: 170_000 });
   expect(completed.revision).toBe(1);
+  const events = await stack.readEvents(created.id);
+  const buildingStart = events.findIndex((event) => (
+    event.stage === "building" && event.type === "stage" && event.status === "running"
+  ));
+  expect(buildingStart).toBeGreaterThan(0);
+  expect(events.slice(0, buildingStart).some((event) => event.stage === "building")).toBe(false);
+  expect(events.slice(0, buildingStart).some((event) => (
+    event.stage === "calibrating" && event.type === "progress"
+  ))).toBe(true);
   expect(await stack.getMockDiagnostics()).toEqual({
     ok: true,
     scenario: {

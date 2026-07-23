@@ -1,4 +1,14 @@
+import { z } from "zod";
+import { writeSlideInputSchema } from "../tool-registry.mjs";
 import { upstreamCallBudget } from "../upstream-budget.mjs";
+
+const BUILD_PROGRESS_STAGES = new Set(["calibrating", "building", "repairing"]);
+const BUILD_STAGE_TITLES = Object.freeze({
+  calibrating: "校准代表页面",
+  building: "生成 HTML 幻灯片页面",
+  repairing: "修复未通过检查的页面",
+});
+const { $schema: _writeSlideSchemaVersion, ...WRITE_SLIDE_JSON_SCHEMA } = z.toJSONSchema(writeSlideInputSchema);
 
 export function partitionSlideBatches(slideIds) {
   if (!Array.isArray(slideIds)) throw new TypeError("Slide IDs must be an array");
@@ -84,7 +94,7 @@ export async function runBuildStage(context) {
     ? context.buildBatch
     : (request) => runAgentBatch(context, request);
 
-  const makeRequest = (slideIds, retry = false) => {
+  const makeRequest = (slideIds, retry = false, retryErrors = []) => {
     const readOnlySlideIds = slideIds.length === 1
       ? nearestCalibratedNeighbor(outline, slideIds[0], continuitySlideIds)
       : [];
@@ -96,6 +106,7 @@ export async function runBuildStage(context) {
       targetSlideIds: [...slideIds],
       readOnlySlideIds,
       retry,
+      retryErrors,
       outline,
       promptContext: {
         ...sharedPromptContext,
@@ -116,57 +127,183 @@ export async function runBuildStage(context) {
   const retriedSlideIds = collectFailedSlideIds(firstPass, batches);
   let retryResult;
   if (retriedSlideIds.length > 0) {
-    retryResult = await buildBatch(makeRequest(retriedSlideIds, true));
+    retryResult = await buildBatch(makeRequest(
+      retriedSlideIds,
+      true,
+      collectBatchRetryErrors(firstPass, batches),
+    ));
   }
   return { batches, firstPass, retriedSlideIds, retryResult };
 }
 
-export function buildBuildStageMessages(promptContext, skill = {}) {
+export function createSlideBatchSchema(slideIds) {
+  const targetSlideIds = normalizeSlideIds(slideIds, "Slide batch target IDs");
+  if (targetSlideIds.length === 0) throw new Error("Slide batch target IDs must not be empty");
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["slides"],
+    properties: {
+      slides: {
+        type: "array",
+        minItems: targetSlideIds.length,
+        maxItems: targetSlideIds.length,
+        items: {
+          ...WRITE_SLIDE_JSON_SCHEMA,
+          properties: {
+            ...WRITE_SLIDE_JSON_SCHEMA.properties,
+            slideId: { type: "string", enum: targetSlideIds },
+          },
+        },
+      },
+    },
+  };
+}
+
+export function buildBuildStageMessages(promptContext, skill = {}, options = {}) {
   const instructions = typeof skill?.instructions === "string" ? skill.instructions.trim() : "";
+  const targetSlideIds = options.targetSlideIds
+    || promptContext.targetSlides?.map((slide) => slide.slideId)
+    || [];
+  const schema = options.schema || createSlideBatchSchema(targetSlideIds);
   return [
     {
       role: "system",
       content: [
         instructions,
-        "Write only the target slide IDs. Read-only slides provide continuity and must never be rewritten.",
+        "Return one JSON object matching the supplied outputSchema. Do not return an agent or tool-call envelope, Markdown fences, or explanatory text.",
+        "The slides array must contain every requiredSlideId exactly once and in the listed order. Generate complete html, css, assetSlots, and charts fields for every slide; assetSlots and charts must be [] when unused.",
+        "Generate only the required slide IDs. Read-only slides provide continuity and must never be returned or rewritten.",
         "Use the locked design brief consistently. Theme values may be referenced only as var(--deck-*) tokens named by that brief; never invent custom properties.",
         String(promptContext.htmlCssContract || ""),
       ].filter(Boolean).join("\n\n"),
     },
-    { role: "user", content: JSON.stringify(promptContext) },
+    {
+      role: "user",
+      content: JSON.stringify({
+        task: "Generate a complete HTML/CSS slide batch",
+        ...promptContext,
+        requiredSlideIds: targetSlideIds,
+        ...(options.retry ? {
+          retryInstruction: "The previous batch failed protocol or page validation. Regenerate the complete current target batch and obey outputSchema exactly.",
+          validationErrors: Array.isArray(options.retryErrors) ? options.retryErrors : [],
+        } : {}),
+        outputTemplate: {
+          slides: targetSlideIds.map((slideId) => ({
+            slideId,
+            html: "<section class=\"slide-content\"><!-- complete rootless slide markup --></section>",
+            css: ":slide .slide-content{display:grid}",
+            assetSlots: [],
+            charts: [],
+          })),
+        },
+        outputSchema: schema,
+      }),
+    },
   ];
 }
 
 async function runAgentBatch(context, request) {
-  if (typeof context.runner?.runStage !== "function" || typeof context.tools?.forStage !== "function") {
+  if (typeof context.runner?.completeStructuredStage !== "function" || typeof context.tools?.forStage !== "function") {
     throw new TypeError("Build stage requires buildBatch or runner/tool dependencies");
   }
+  const progressStage = resolveProgressStage(context.progressStage);
   const skill = await context.skillLoader?.load?.("building") || {};
   try {
-    const result = await context.runner.runStage({
-      jobId: context.jobId,
-      stage: "building",
-      messages: buildBuildStageMessages(request.promptContext, skill),
-      allowedTools: context.tools.forStage("building", {
-        ...context,
-        outline: request.outline,
+    const schema = createSlideBatchSchema(request.targetSlideIds);
+    const stageTools = context.tools.forStage("building", {
+      ...context,
+      outline: request.outline,
+      targetSlideIds: request.targetSlideIds,
+      readOnlySlideIds: request.readOnlySlideIds,
+    });
+    if (!stageTools.write_slide?.schema?.parse || typeof stageTools.write_slide.execute !== "function") {
+      throw new TypeError("Build stage requires the write_slide tool");
+    }
+    const result = await context.runner.completeStructuredStage({
+      stage: progressStage,
+      messages: buildBuildStageMessages(request.promptContext, skill, {
         targetSlideIds: request.targetSlideIds,
-        readOnlySlideIds: request.readOnlySlideIds,
+        retry: request.retry,
+        retryErrors: request.retryErrors,
+        schema,
       }),
-      maxTurns: 1,
+      schema,
+      schemaName: "deck_slide_batch",
       maxUpstreamCalls: upstreamCallBudget(1),
       timeoutMs: context.buildTimeoutMs || 120_000,
       signal: context.signal,
       emit: context.emit,
     });
+    const slides = validateSlideBatch(result.value, request.targetSlideIds, stageTools.write_slide.schema);
+    for (let index = 0; index < slides.length; index += 1) {
+      const slide = slides[index];
+      context.signal?.throwIfAborted();
+      await stageTools.write_slide.execute(slide, {
+        jobId: context.jobId,
+        stage: progressStage,
+        signal: context.signal,
+        emit: context.emit,
+      });
+      await emitSlideWriteProgress(context.emit, progressStage, slide.slideId, index + 1, slides.length);
+    }
     const incomplete = await incompleteSlideIds(context, request.slideIds);
     if (incomplete.length) throw new BatchError(incomplete, "Slide batch left incomplete page checkpoints");
-    return result;
+    return { ...result, slideIds: slides.map((slide) => slide.slideId) };
   } catch (error) {
     if (error instanceof BatchError) throw error;
     const incomplete = await incompleteSlideIds(context, request.slideIds).catch(() => request.slideIds);
     throw new BatchError(incomplete.length ? incomplete : request.slideIds, error?.message || "Slide batch failed", { cause: error });
   }
+}
+
+function collectBatchRetryErrors(results, batches) {
+  return results.flatMap((result, index) => {
+    if (result?.status !== "rejected") return [];
+    const message = String(result.reason?.message || result.reason || "Slide batch failed")
+      .replace(/\s+/g, " ")
+      .slice(0, 1_000);
+    const reported = Array.isArray(result.reason?.slideIds)
+      ? result.reason.slideIds.filter((slideId) => batches[index].includes(slideId))
+      : [];
+    return [{ slideIds: reported.length ? reported : [...batches[index]], message }];
+  });
+}
+
+function validateSlideBatch(value, targetSlideIds, writeSlideSchema) {
+  if (!value || !Array.isArray(value.slides)) throw new Error("Slide batch response must contain a slides array");
+  let slides;
+  try {
+    slides = value.slides.map((slide) => writeSlideSchema.parse(slide));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Slide batch contains invalid page data: ${detail}`);
+  }
+  const received = slides.map((slide) => slide.slideId);
+  const ordered = received.length === targetSlideIds.length
+    && received.every((slideId, index) => slideId === targetSlideIds[index]);
+  if (!ordered) {
+    throw new Error(`Slide batch IDs must match requested order; expected ${targetSlideIds.join(", ")}; received ${received.join(", ") || "none"}`);
+  }
+  return slides;
+}
+
+function resolveProgressStage(value) {
+  const stage = value || "building";
+  if (!BUILD_PROGRESS_STAGES.has(stage)) throw new Error(`Unsupported slide generation progress stage: ${stage}`);
+  return stage;
+}
+
+async function emitSlideWriteProgress(emit, stage, slideId, completed, total) {
+  if (typeof emit !== "function") return;
+  await emit({
+    stage,
+    type: "progress",
+    status: "running",
+    title: BUILD_STAGE_TITLES[stage],
+    message: `已写入 ${slideId}`,
+    progress: { completed, total },
+  });
 }
 
 async function resolveRemainingSlideIds(context, outline) {

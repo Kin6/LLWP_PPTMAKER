@@ -1,6 +1,10 @@
 import { spawn } from "node:child_process";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadServerConfig } from "../../../server/config.mjs";
+import {
+  buildBuildStageMessages,
+  createSlideBatchSchema,
+} from "../../../server/deck-agent/stages/build-stage.mjs";
 import { createHttpClient } from "../../../server/shared/http.mjs";
 import { createModelClient } from "../../../server/model/client.mjs";
 
@@ -52,6 +56,43 @@ describe("model provider client", () => {
     });
     expect(result.value).toEqual({ ok: true });
     expect(result.apiCalls).toBe(3);
+  });
+
+  it("compatible Chat returns the direct slides array required by the build protocol", async () => {
+    const client = makeClient({ TEXT_API_PROVIDER: "compatible" });
+    const targetSlideIds = ["slide-01", "slide-02"];
+    const schema = createSlideBatchSchema(targetSlideIds);
+    const messages = buildBuildStageMessages({
+      title: "Protocol test",
+      narrative: "Evidence to action",
+      lockedDesignBriefSummary: "Use the locked grid and type scale",
+      allowedAssets: [],
+      htmlCssContract: "Rootless HTML and :slide-scoped CSS",
+      targetSlides: targetSlideIds.map((slideId, index) => ({
+        slideId,
+        title: `Page ${index + 1}`,
+        claim: `Claim ${index + 1}`,
+        rawMarkdown: `## Page ${index + 1}`,
+      })),
+      neighboringSlides: [],
+      readOnlySlides: [],
+    }, {}, { targetSlideIds, schema });
+
+    const result = await client.completeStructured({
+      messages,
+      schema,
+      schemaName: "deck_slide_batch",
+      timeoutMs: 2_000,
+    });
+
+    expect(result.apiCalls).toBe(1);
+    expect(result.value.slides.map((slide) => slide.slideId)).toEqual(targetSlideIds);
+    expect(result.value.slides.every((slide) => (
+      typeof slide.html === "string"
+      && typeof slide.css === "string"
+      && Array.isArray(slide.assetSlots)
+      && Array.isArray(slide.charts)
+    ))).toBe(true);
   });
 
   it("an external AbortSignal cancels an in-flight model request", async () => {

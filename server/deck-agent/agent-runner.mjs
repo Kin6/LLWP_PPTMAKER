@@ -131,12 +131,77 @@ function budgetError(kind, limit) {
   return new Error(`Stage exceeded ${kind} budget ${limit}`);
 }
 
+function createStageProgress(stage, emit) {
+  const pending = new Set();
+  let deliveryError;
+  const onProgress = (progress) => {
+    const event = stageProgressEvent(stage, progress);
+    if (!event || typeof emit !== "function") return;
+    const delivery = Promise.resolve()
+      .then(() => emit(event))
+      .catch((error) => { deliveryError ||= error; });
+    pending.add(delivery);
+    delivery.then(() => pending.delete(delivery));
+  };
+  const flush = async () => {
+    if (pending.size) await Promise.all([...pending]);
+    if (deliveryError) throw deliveryError;
+  };
+  return { onProgress, flush };
+}
+
+function validateUpstreamCalls(response, maxUpstreamCalls) {
+  if (!Number.isSafeInteger(response?.apiCalls) || response.apiCalls < 1) {
+    throw new Error("Model response reported an invalid upstream-call count");
+  }
+  if (response.apiCalls > MAX_UPSTREAM_CALLS_PER_MODEL_TURN) {
+    throw budgetError("per-turn upstream-call", MAX_UPSTREAM_CALLS_PER_MODEL_TURN);
+  }
+  if (response.apiCalls > maxUpstreamCalls) {
+    throw budgetError("upstream-call", maxUpstreamCalls);
+  }
+  return response.apiCalls;
+}
+
 export function createAgentRunner({ modelClient }) {
   if (!modelClient || typeof modelClient.completeStructured !== "function") {
     throw new TypeError("Agent runner requires a model client");
   }
 
   return {
+    async completeStructuredStage({
+      stage,
+      messages,
+      schema,
+      schemaName,
+      maxUpstreamCalls,
+      timeoutMs,
+      signal,
+      emit,
+    }) {
+      const timeoutSignal = AbortSignal.timeout(timeoutMs);
+      const stageSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+      const progress = createStageProgress(stage, emit);
+      stageSignal.throwIfAborted();
+      const response = await modelClient.completeStructured({
+        messages,
+        schema,
+        schemaName,
+        timeoutMs,
+        signal: stageSignal,
+        onProgress: progress.onProgress,
+      });
+      await progress.flush();
+      stageSignal.throwIfAborted();
+      const upstreamCalls = validateUpstreamCalls(response, maxUpstreamCalls);
+      return {
+        value: response.value,
+        upstreamCalls,
+        ...(response.provider === undefined ? {} : { provider: response.provider }),
+        ...(response.model === undefined ? {} : { model: response.model }),
+      };
+    },
+
     async runStage({
       jobId,
       stage,
@@ -157,21 +222,7 @@ export function createAgentRunner({ modelClient }) {
       }
       const history = [...messages];
       const turnSchema = agentTurnSchema(allowedTools, requiredToolName);
-      const pendingProgress = new Set();
-      let progressError;
-      const onProgress = (progress) => {
-        const event = stageProgressEvent(stage, progress);
-        if (!event || typeof emit !== "function") return;
-        const delivery = Promise.resolve()
-          .then(() => emit(event))
-          .catch((error) => { progressError ||= error; });
-        pendingProgress.add(delivery);
-        delivery.then(() => pendingProgress.delete(delivery));
-      };
-      const flushProgress = async () => {
-        if (pendingProgress.size) await Promise.all([...pendingProgress]);
-        if (progressError) throw progressError;
-      };
+      const progress = createStageProgress(stage, emit);
       let upstreamCalls = 0;
 
       for (let turn = 0; turn < maxTurns; turn += 1) {
@@ -186,17 +237,11 @@ export function createAgentRunner({ modelClient }) {
           schemaName: "agent_turn",
           timeoutMs,
           signal: stageSignal,
-          onProgress,
+          onProgress: progress.onProgress,
         });
-        await flushProgress();
+        await progress.flush();
         stageSignal.throwIfAborted();
-        if (!Number.isSafeInteger(response.apiCalls) || response.apiCalls < 1) {
-          throw new Error("Model response reported an invalid upstream-call count");
-        }
-        if (response.apiCalls > MAX_UPSTREAM_CALLS_PER_MODEL_TURN) {
-          throw budgetError("per-turn upstream-call", MAX_UPSTREAM_CALLS_PER_MODEL_TURN);
-        }
-        upstreamCalls += response.apiCalls;
+        upstreamCalls += validateUpstreamCalls(response, maxUpstreamCalls);
         if (upstreamCalls > maxUpstreamCalls) {
           throw budgetError("upstream-call", maxUpstreamCalls);
         }
@@ -222,16 +267,16 @@ export function createAgentRunner({ modelClient }) {
             throw new Error(`Invalid arguments for ${call.name}: ${detail}`);
           }
 
-          onProgress({ type: "tool", name: call.name });
-          await flushProgress();
+          progress.onProgress({ type: "tool", name: call.name });
+          await progress.flush();
           const result = await tool.execute(input, {
             jobId,
             stage,
             signal: stageSignal,
             emit,
-            onProgress,
+            onProgress: progress.onProgress,
           });
-          await flushProgress();
+          await progress.flush();
           stageSignal.throwIfAborted();
           const modelContent = toolModelContent(result);
           toolResults.push({

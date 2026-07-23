@@ -15,7 +15,7 @@ import {
 import { createDeckJobRouter } from "../../../server/deck-agent/routes.mjs";
 import * as workerEntry from "../../../server/deck-agent/worker-entry.mjs";
 
-const { createWorkerExecutor, runWorkerCommand } = workerEntry;
+const { attachSlideGenerationAdapters, createWorkerExecutor, runWorkerCommand } = workerEntry;
 
 const validRequest = {
   source: {
@@ -419,6 +419,30 @@ describe("HTML deck recovery, cancellation, and event replay", () => {
 });
 
 describe("HTML deck worker executor", () => {
+  it("passes the owning stage through each slide-generation adapter", async () => {
+    const runBuildStage = vi.fn(async () => ({}));
+    const base = { signal: new AbortController().signal };
+    attachSlideGenerationAdapters(base, {
+      jobId: "job-00000000-0000-4000-8000-000000000020",
+      runBuildStage,
+    });
+
+    await base.generateSlides(["slide-01"]);
+    await base.generateSlides(["slide-02"], { stage: "calibrating" });
+    await base.reviseCalibration({ slideIds: ["slide-03"] });
+    await base.repairSlides(["slide-04"]);
+
+    expect(runBuildStage.mock.calls.map(([context]) => ({
+      slideIds: context.remainingSlideIds,
+      progressStage: context.progressStage,
+    }))).toEqual([
+      { slideIds: ["slide-01"], progressStage: "building" },
+      { slideIds: ["slide-02"], progressStage: "calibrating" },
+      { slideIds: ["slide-03"], progressStage: "calibrating" },
+      { slideIds: ["slide-04"], progressStage: "repairing" },
+    ]);
+  });
+
   it("uses bounded worker resources and sends no configuration through workerData", async () => {
     const instances = [];
     class FakeWorker extends EventEmitter {

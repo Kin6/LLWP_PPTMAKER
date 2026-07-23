@@ -58,10 +58,12 @@ it("rejects visual-review slide IDs outside the calibration pair", async () => {
   await expect(runCalibrationStage(context)).rejects.toThrow(/outside calibration targets/i);
 });
 
-it("defines deterministic outline, design, and calibration responses in the mock gateway", async () => {
+it("defines deterministic outline, design, slide-batch, and calibration responses in the mock gateway", async () => {
   const source = await readFile(new URL("../../../scripts/mock-openai.mjs", import.meta.url), "utf8");
+  expect(source).toContain('name === "deck_slide_batch"');
   expect(source).toContain('name === "agent_turn"');
   expect(source).toContain('name: "write_outline"');
   expect(source).toContain('name: "write_theme"');
+  expect(source).toContain("return { slides: invalidSlideIdBatch(slides) }");
   expect(source).toContain('name === "calibration_review"');
 });

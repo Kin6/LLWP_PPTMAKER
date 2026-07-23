@@ -223,7 +223,7 @@ function stageOutlineMarkdown(details) {
   return `# ${title}\n\n> 叙事主线：从核心判断推进到可执行行动${markers ? ` ${markers}` : ""}\n\n${slides.join("\n\n")}`;
 }
 
-function writeSlideCall(slide, { calibrationOverflow = false, state = scenarioState } = {}) {
+function slidePayload(slide, { calibrationOverflow = false, state = scenarioState } = {}) {
   const slideId = String(slide?.slideId || "slide-01");
   const title = String(slide?.title || `模拟页面 ${slideId}`);
   const claim = String(slide?.claim || "这一页给出一个可验证结论。");
@@ -247,10 +247,65 @@ function writeSlideCall(slide, { calibrationOverflow = false, state = scenarioSt
     safeArea: { x: 0.08, y: 0.08, w: 0.84, h: 0.84 },
     sourceBlockIds,
   }] : [];
+  return { slideId, html, css, assetSlots, charts: [] };
+}
+
+function writeSlideCall(slide, options) {
+  const payload = slidePayload(slide, options);
   return {
-    id: `write-${slideId}-${state.calibrationGenerationCount}`,
+    id: `write-${payload.slideId}-${options?.state?.calibrationGenerationCount || 0}`,
     name: "write_slide",
-    argumentsJson: JSON.stringify({ slideId, html, css, assetSlots, charts: [] }),
+    argumentsJson: JSON.stringify(payload),
+  };
+}
+
+function invalidSlideIdBatch(slides) {
+  if (slides.length === 0) return slides;
+  if (slides.length === 1) return [{ ...slides[0], slideId: "slide-99" }];
+  return slides.map((slide, index) => (index === slides.length - 1 ? { ...slides[0] } : slide));
+}
+
+async function stageSlideBatch(details, { agentTurn = false } = {}) {
+  const activeScenario = activateScenario(details.text);
+  const targets = details.user.targetSlides;
+  const targetIds = targets.map((slide) => String(slide.slideId));
+  if (!activeScenario.calibrationSlideIds.length) activeScenario.calibrationSlideIds = [...targetIds];
+  const calibrationRequest = targetIds.length === activeScenario.calibrationSlideIds.length
+    && targetIds.every((slideId, index) => slideId === activeScenario.calibrationSlideIds[index]);
+  const visualRepairRequest = activeScenario.visualRepairSlideId
+    && targetIds.length === 1
+    && targetIds[0] === activeScenario.visualRepairSlideId;
+  let calibrationOverflow = false;
+  if (calibrationRequest && !visualRepairRequest) {
+    activeScenario.calibrationGenerationCount += 1;
+    calibrationOverflow = hasScenario("MOCK_CALIBRATION_FALLBACK", activeScenario)
+      && activeScenario.calibrationReviewFailed
+      && activeScenario.calibrationGenerationCount === 2;
+    if (calibrationOverflow) activeScenario.calibrationOverflowResponses += 1;
+  }
+  const postCalibration = !calibrationRequest && !visualRepairRequest;
+  if (postCalibration) activeScenario.buildBatchRequests += 1;
+  if (postCalibration && hasScenario("MOCK_FAIL_BUILD_BATCH_ONCE", activeScenario) && !activeScenario.buildFailureUsed) {
+    activeScenario.buildFailureUsed = true;
+    activeScenario.buildFailures += 1;
+    if (agentTurn) return { message: "Simulated incomplete build batch", final: true, toolCalls: [] };
+    const slides = targets.map((slide) => slidePayload(slide, { calibrationOverflow, state: activeScenario }));
+    return { slides: invalidSlideIdBatch(slides) };
+  }
+  if (postCalibration && hasScenario("MOCK_DELAY_BUILD_CANCEL", activeScenario) && !activeScenario.buildDelayUsed) {
+    activeScenario.buildDelayUsed = true;
+    await new Promise((resolve) => setTimeout(resolve, 5_000));
+  }
+  if (postCalibration) activeScenario.buildSuccesses += 1;
+  if (agentTurn) {
+    return {
+      message: visualRepairRequest ? "Targeted repair written" : "Slide batch written",
+      final: true,
+      toolCalls: targets.map((slide) => writeSlideCall(slide, { calibrationOverflow, state: activeScenario })),
+    };
+  }
+  return {
+    slides: targets.map((slide) => slidePayload(slide, { calibrationOverflow, state: activeScenario })),
   };
 }
 
@@ -268,41 +323,7 @@ async function stageAgentTurn(details) {
     return { message: "Design published", final: true, toolCalls: [{ id: "stage-design-1", name: "write_theme", argumentsJson: JSON.stringify({ designBriefMarkdown }) }] };
   }
   if (Array.isArray(details.user.targetSlides)) {
-    const activeScenario = activateScenario(details.text);
-    const targets = details.user.targetSlides;
-    const targetIds = targets.map((slide) => String(slide.slideId));
-    if (!activeScenario.calibrationSlideIds.length) activeScenario.calibrationSlideIds = [...targetIds];
-    const calibrationRequest = targetIds.length === activeScenario.calibrationSlideIds.length
-      && targetIds.every((slideId, index) => slideId === activeScenario.calibrationSlideIds[index]);
-    const visualRepairRequest = activeScenario.visualRepairSlideId
-      && targetIds.length === 1
-      && targetIds[0] === activeScenario.visualRepairSlideId;
-    let calibrationOverflow = false;
-    if (calibrationRequest && !visualRepairRequest) {
-      activeScenario.calibrationGenerationCount += 1;
-      calibrationOverflow = hasScenario("MOCK_CALIBRATION_FALLBACK", activeScenario)
-        && activeScenario.calibrationReviewFailed
-        && activeScenario.calibrationGenerationCount === 2;
-      if (calibrationOverflow) activeScenario.calibrationOverflowResponses += 1;
-    }
-    const postCalibration = !calibrationRequest && !visualRepairRequest;
-    if (postCalibration) activeScenario.buildBatchRequests += 1;
-    if (postCalibration && hasScenario("MOCK_FAIL_BUILD_BATCH_ONCE", activeScenario) && !activeScenario.buildFailureUsed) {
-      activeScenario.buildFailureUsed = true;
-      activeScenario.buildFailures += 1;
-      return { message: "Simulated incomplete build batch", final: true, toolCalls: [] };
-    }
-    const response = {
-      message: visualRepairRequest ? "Targeted repair written" : "Slide batch written",
-      final: true,
-      toolCalls: targets.map((slide) => writeSlideCall(slide, { calibrationOverflow, state: activeScenario })),
-    };
-    if (postCalibration && hasScenario("MOCK_DELAY_BUILD_CANCEL", activeScenario) && !activeScenario.buildDelayUsed) {
-      activeScenario.buildDelayUsed = true;
-      await new Promise((resolve) => setTimeout(resolve, 5_000));
-    }
-    if (postCalibration) activeScenario.buildSuccesses += 1;
-    return response;
+    return stageSlideBatch(details, { agentTurn: true });
   }
   return { message: "No stage action", final: true, toolCalls: [] };
 }
@@ -401,6 +422,7 @@ function revisionThemeForRequest(details) {
 
 async function structuredPayload(name, messages) {
   const details = requestDetails(messages);
+  if (name === "deck_slide_batch") return stageSlideBatch(details);
   if (name === "agent_turn") return stageAgentTurn(details);
   if (name === "calibration_review") return legacyCalibrationReview(details);
   if (name === "deck_visual_review" || name === "deck_revision_visual_review") {
@@ -411,8 +433,10 @@ async function structuredPayload(name, messages) {
   if (name === "deck_revision_theme") return revisionThemeForRequest(details);
 
   const task = String(details.user.task || "");
-  if (/Write slides-content\.md|Repair slides-content\.md|exactly one design direction/i.test(task)
-    || Array.isArray(details.user.targetSlides)) return stageAgentTurn(details);
+  if (Array.isArray(details.user.targetSlides)) return stageSlideBatch(details);
+  if (/Write slides-content\.md|Repair slides-content\.md|exactly one design direction/i.test(task)) {
+    return stageAgentTurn(details);
+  }
   if (/Classify a deck edit as slides, theme, or new-job-required/i.test(details.text)) {
     return revisionScopeForRequest(details);
   }

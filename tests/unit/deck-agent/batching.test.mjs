@@ -10,6 +10,7 @@ import {
   resolveAssetSlots,
 } from "../../../server/deck-agent/stages/asset-stage.mjs";
 import { validateStoredSlideHtml } from "../../../server/deck-agent/html-policy.mjs";
+import { writeSlideInputSchema } from "../../../server/deck-agent/tool-registry.mjs";
 
 describe("bounded slide batching", () => {
   it("partitions normal work into stable batches of two or three slides", () => {
@@ -67,30 +68,180 @@ function outlineFor(count) {
   };
 }
 
-describe("build stage", () => {
-  it("budgets one build turn for compatible-provider repair calls", async () => {
-    const runner = { runStage: vi.fn(async () => ({ upstreamCalls: 3 })) };
-    const store = {
-      readArtifact: vi.fn(async () => "<section>built</section>"),
-      readJson: vi.fn(async () => ({ slides: [] })),
-    };
+function generatedSlide(slideId) {
+  return {
+    slideId,
+    html: `<section><h1>${slideId}</h1></section>`,
+    css: ":slide section { display: grid; }",
+    assetSlots: [],
+    charts: [],
+  };
+}
 
-    await runBuildStage({
+function structuredBuildHarness(slides, options = {}) {
+  const completeStructuredStage = vi.fn(async () => ({
+    value: { slides },
+    upstreamCalls: 1,
+  }));
+  const writeSlide = {
+    schema: writeSlideInputSchema,
+    execute: vi.fn(async ({ slideId }) => ({ summary: `Slide ${slideId} written` })),
+  };
+  const forStage = vi.fn(() => ({ write_slide: writeSlide }));
+  return {
+    context: {
       jobId: "job-test",
       signal: new AbortController().signal,
-      outline: outlineFor(1),
-      remainingSlideIds: ["slide-01"],
-      runner,
-      store,
-      skillLoader: { load: vi.fn(async () => ({ instructions: "build" })) },
-      tools: { forStage: vi.fn(() => ({})) },
+      outline: outlineFor(options.outlineCount || slides.length || 2),
+      remainingSlideIds: options.targetSlideIds || slides.map((slide) => slide.slideId),
+      progressStage: options.progressStage,
+      lockedDesignBriefSummary: "Locked palette, grid, and typography",
+      allowedAssets: [{ id: "asset-safe", summary: "Approved local evidence" }],
+      htmlCssContract: "Rootless HTML; slide-scoped CSS",
+      runner: { completeStructuredStage },
+      skillLoader: { load: vi.fn(async () => ({ instructions: "Build every requested page." })) },
+      tools: { forStage },
+      getIncompleteSlideIds: vi.fn(async () => []),
+    },
+    completeStructuredStage,
+    forStage,
+    writeSlide,
+  };
+}
+
+describe("build stage", () => {
+  it("requests a complete structured slide batch and writes every validated slide", async () => {
+    const targetSlideIds = ["slide-01", "slide-02"];
+    const slides = targetSlideIds.map(generatedSlide);
+    const harness = structuredBuildHarness(slides, { targetSlideIds });
+
+    await runBuildStage({
+      ...harness.context,
     });
 
-    expect(runner.runStage).toHaveBeenCalledWith(expect.objectContaining({
+    expect(harness.completeStructuredStage).toHaveBeenCalledTimes(1);
+    const request = harness.completeStructuredStage.mock.calls[0][0];
+    expect(request).toEqual(expect.objectContaining({
       stage: "building",
-      maxTurns: 1,
       maxUpstreamCalls: 3,
+      schemaName: expect.stringMatching(/slide.*batch/i),
+      messages: expect.any(Array),
     }));
+    expect(request.schema).toMatchObject({
+      type: "object",
+      additionalProperties: false,
+      required: ["slides"],
+      properties: {
+        slides: {
+          type: "array",
+          minItems: 2,
+          maxItems: 2,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["slideId", "html", "css", "assetSlots", "charts"],
+            properties: {
+              slideId: { type: "string", enum: targetSlideIds },
+              html: { type: "string" },
+              css: { type: "string" },
+              assetSlots: { type: "array" },
+              charts: { type: "array" },
+            },
+          },
+        },
+      },
+    });
+
+    const prompt = request.messages.map((message) => String(message.content)).join("\n");
+    expect(prompt).toContain("slide-01");
+    expect(prompt).toContain("slide-02");
+    expect(prompt).toContain("Full markdown 1");
+    expect(prompt).toContain("Full markdown 2");
+    expect(prompt).toContain("Locked palette, grid, and typography");
+    expect(prompt).toContain("Rootless HTML; slide-scoped CSS");
+    expect(prompt).not.toContain("argumentsJson");
+
+    expect(harness.forStage).toHaveBeenCalledWith("building", expect.objectContaining({
+      targetSlideIds,
+    }));
+    expect(harness.writeSlide.execute).toHaveBeenCalledTimes(2);
+    expect(harness.writeSlide.execute.mock.calls.map(([input]) => input.slideId)).toEqual(targetSlideIds);
+  });
+
+  it.each([
+    ["duplicate IDs", [generatedSlide("slide-01"), generatedSlide("slide-01")]],
+    ["out-of-order IDs", [generatedSlide("slide-02"), generatedSlide("slide-01")]],
+    ["a missing ID", [generatedSlide("slide-01")]],
+    ["invalid page fields", [{ ...generatedSlide("slide-01"), css: 42 }, generatedSlide("slide-02")]],
+  ])("rejects %s before writing and retries the batch exactly once", async (_label, slides) => {
+    const targetSlideIds = ["slide-01", "slide-02"];
+    const harness = structuredBuildHarness(slides, {
+      targetSlideIds,
+      outlineCount: 2,
+    });
+
+    await expect(runBuildStage(harness.context)).rejects.toBeInstanceOf(BatchError);
+
+    expect(harness.completeStructuredStage).toHaveBeenCalledTimes(2);
+    expect(harness.writeSlide.execute).not.toHaveBeenCalled();
+    const retryPrompt = harness.completeStructuredStage.mock.calls[1][0].messages
+      .map((message) => String(message.content))
+      .join("\n");
+    expect(retryPrompt).not.toContain("argumentsJson");
+    expect(retryPrompt).toMatch(/validationErrors.*Slide batch/i);
+  });
+
+  it("retries only pages left incomplete after a write failure", async () => {
+    const targetSlideIds = ["slide-01", "slide-02"];
+    const harness = structuredBuildHarness(targetSlideIds.map(generatedSlide), { targetSlideIds });
+    const completed = new Set();
+    let slideTwoAttempts = 0;
+    harness.completeStructuredStage
+      .mockResolvedValueOnce({
+        value: { slides: targetSlideIds.map(generatedSlide) },
+        upstreamCalls: 1,
+      })
+      .mockResolvedValueOnce({
+        value: { slides: [generatedSlide("slide-02")] },
+        upstreamCalls: 1,
+      });
+    harness.writeSlide.execute.mockImplementation(async ({ slideId }) => {
+      if (slideId === "slide-02" && slideTwoAttempts++ === 0) throw new Error("CSS policy rejected slide-02");
+      completed.add(slideId);
+      return { summary: `Slide ${slideId} written` };
+    });
+    harness.context.getIncompleteSlideIds.mockImplementation(async (slideIds) => (
+      slideIds.filter((slideId) => !completed.has(slideId))
+    ));
+
+    const result = await runBuildStage(harness.context);
+
+    expect(result.retriedSlideIds).toEqual(["slide-02"]);
+    expect(harness.completeStructuredStage).toHaveBeenCalledTimes(2);
+    expect(harness.writeSlide.execute.mock.calls.map(([slide]) => slide.slideId)).toEqual([
+      "slide-01", "slide-02", "slide-02",
+    ]);
+    const retryRequest = JSON.parse(harness.completeStructuredStage.mock.calls[1][0].messages.at(-1).content);
+    expect(retryRequest.requiredSlideIds).toEqual(["slide-02"]);
+    expect(retryRequest.validationErrors).toEqual([
+      { slideIds: ["slide-02"], message: "CSS policy rejected slide-02" },
+    ]);
+  });
+
+  it("uses the calibration progress stage while retaining the building tool policy", async () => {
+    const slide = generatedSlide("slide-01");
+    const harness = structuredBuildHarness([slide], {
+      targetSlideIds: ["slide-01"],
+      outlineCount: 1,
+      progressStage: "calibrating",
+    });
+
+    await runBuildStage(harness.context);
+
+    expect(harness.completeStructuredStage).toHaveBeenCalledWith(expect.objectContaining({
+      stage: "calibrating",
+    }));
+    expect(harness.forStage).toHaveBeenCalledWith("building", expect.any(Object));
   });
 
   it("retries only failed targets once without rewriting successful batches", async () => {

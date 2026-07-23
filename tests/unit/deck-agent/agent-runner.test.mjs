@@ -24,6 +24,25 @@ function stageOptions(overrides = {}) {
   };
 }
 
+function structuredStageOptions(overrides = {}) {
+  return {
+    stage: "building",
+    messages: [{ role: "user", content: "Generate slide-01" }],
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["slides"],
+      properties: {
+        slides: { type: "array", minItems: 1, maxItems: 1, items: { type: "object" } },
+      },
+    },
+    schemaName: "deck_slide_batch",
+    maxUpstreamCalls: 3,
+    timeoutMs: 1_000,
+    ...overrides,
+  };
+}
+
 function abortablePending(signal, onSignal) {
   onSignal(signal);
   return new Promise((resolve, reject) => {
@@ -36,6 +55,103 @@ function abortablePending(signal, onSignal) {
 }
 
 describe("restricted Agent runner", () => {
+  it("completes a direct structured stage with the requested schema and model metadata", async () => {
+    const value = { slides: [{ slideId: "slide-01" }] };
+    const modelClient = {
+      completeStructured: vi.fn().mockResolvedValue({
+        value,
+        apiCalls: 1,
+        provider: "compatible",
+        model: "mock-model",
+      }),
+    };
+    const runner = createAgentRunner({ modelClient });
+    const options = structuredStageOptions();
+
+    await expect(runner.completeStructuredStage(options)).resolves.toEqual({
+      value,
+      upstreamCalls: 1,
+      provider: "compatible",
+      model: "mock-model",
+    });
+    expect(modelClient.completeStructured).toHaveBeenCalledWith(expect.objectContaining({
+      messages: options.messages,
+      schema: options.schema,
+      schemaName: "deck_slide_batch",
+      timeoutMs: 1_000,
+      signal: expect.any(AbortSignal),
+      onProgress: expect.any(Function),
+    }));
+  });
+
+  it("allows three compatibility calls but rejects them above the stage budget", async () => {
+    const modelClient = {
+      completeStructured: vi.fn().mockResolvedValue({
+        value: { slides: [{ slideId: "slide-01" }] },
+        apiCalls: 3,
+      }),
+    };
+    const runner = createAgentRunner({ modelClient });
+
+    await expect(runner.completeStructuredStage(structuredStageOptions({
+      maxUpstreamCalls: 3,
+    }))).resolves.toMatchObject({ upstreamCalls: 3 });
+    await expect(runner.completeStructuredStage(structuredStageOptions({
+      maxUpstreamCalls: 2,
+    }))).rejects.toThrow(/upstream-call budget.*2/i);
+  });
+
+  it("publishes direct structured progress under the requested stage", async () => {
+    const emit = vi.fn().mockResolvedValue(undefined);
+    const modelClient = {
+      completeStructured: vi.fn(async ({ onProgress }) => {
+        onProgress({ type: "request", message: "Model request sent" });
+        onProgress({ type: "request", message: "Compatibility retry sent" });
+        onProgress({ type: "request", message: "JSON repair request sent" });
+        return { value: { slides: [{ slideId: "slide-01" }] }, apiCalls: 3 };
+      }),
+    };
+    const runner = createAgentRunner({ modelClient });
+
+    await runner.completeStructuredStage(structuredStageOptions({
+      stage: "calibrating",
+      emit,
+    }));
+
+    expect(emit.mock.calls.map(([event]) => event.message)).toEqual([
+      "正在请求模型生成校准页面",
+      "模型服务正在进行兼容重试",
+      "正在修复模型返回格式",
+    ]);
+    expect(emit.mock.calls.every(([event]) => (
+      event.stage === "calibrating"
+      && event.type === "progress"
+      && event.status === "running"
+    ))).toBe(true);
+  });
+
+  it("propagates external cancellation into a direct structured model call", async () => {
+    const controller = new AbortController();
+    let signalModelStarted;
+    const modelStarted = new Promise((resolve) => { signalModelStarted = resolve; });
+    let modelSignal;
+    const modelClient = {
+      completeStructured: vi.fn(({ signal }) => abortablePending(signal, (received) => {
+        modelSignal = received;
+        signalModelStarted();
+      })),
+    };
+    const runner = createAgentRunner({ modelClient });
+    const pending = runner.completeStructuredStage(structuredStageOptions({
+      signal: controller.signal,
+    }));
+    await modelStarted;
+    controller.abort(new Error("user cancelled direct generation"));
+
+    await expect(pending).rejects.toThrow(/user cancelled direct generation/i);
+    expect(modelSignal.aborted).toBe(true);
+  });
+
   it("uses a provider-portable structured turn envelope", async () => {
     const modelClient = {
       completeStructured: vi.fn().mockResolvedValue({

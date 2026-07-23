@@ -131,6 +131,20 @@ function validateStart(jobId, options) {
   return { type: "run", jobId, resumeFrom: options.resumeFrom };
 }
 
+export function attachSlideGenerationAdapters(base, { jobId, runBuildStage }) {
+  base.generateSlides = async (slideIds, options = {}) => runBuildStage({
+    ...base,
+    jobId,
+    revisionId: "working",
+    remainingSlideIds: slideIds,
+    calibrationSlideIds: [],
+    progressStage: options.stage || "building",
+  });
+  base.reviseCalibration = ({ slideIds }) => base.generateSlides(slideIds, { stage: "calibrating" });
+  base.repairSlides = (slideIds) => base.generateSlides(slideIds, { stage: "repairing" });
+  return base;
+}
+
 export function createWorkerExecutor({
   WorkerClass = Worker,
   workerUrl = new URL(import.meta.url),
@@ -760,19 +774,12 @@ export async function createProductionRuntime({ command, signal, emit }) {
   });
   Object.assign(base, revisionDependencies);
 
-  base.generateSlides = async (slideIds) => runBuildStage({
-    ...base,
-    jobId: command.jobId,
-    revisionId: "working",
-    remainingSlideIds: slideIds,
-    calibrationSlideIds: [],
-  });
+  attachSlideGenerationAdapters(base, { jobId: command.jobId, runBuildStage });
   base.reviewCalibration = ({ slideIds, contactSheetArtifactId }) => reviewVisual({
     slideIds,
     artifactIds: [contactSheetArtifactId],
     label: "Review calibration slides for hierarchy, density, balance, and consistency",
   });
-  base.reviseCalibration = ({ slideIds }) => base.generateSlides(slideIds);
   base.writeDefaultTheme = async () => {
     const css = await loadThemePreset("minimal-white");
     await store.writeArtifact(command.jobId, "working/theme.css", css, { signal });
@@ -796,7 +803,6 @@ export async function createProductionRuntime({ command, signal, emit }) {
     artifactIds: screenshotArtifactIds,
     label: "Recheck only the repaired slides",
   });
-  base.repairSlides = (slideIds) => base.generateSlides(slideIds);
   base.emitAssetFallback = (slideId, slotId, error) => emit({
     stage: "generating-assets",
     type: "message",
