@@ -93,9 +93,11 @@ export function useDeckAgentJob(): UseDeckAgentJobResult {
 
   const jobId = state.job?.id ?? null;
   const terminal = isTerminalDeckJobStatus(state.status);
+  const terminalHistoryComplete = terminal
+    && state.lastSeq >= (state.job?.lastSeq ?? 0);
 
   useEffect(() => {
-    if (!jobId || terminal) return;
+    if (!jobId || terminalHistoryComplete) return;
     const controller = new AbortController();
     let stopped = false;
     transportControllerRef.current = controller;
@@ -161,7 +163,7 @@ export function useDeckAgentJob(): UseDeckAgentJobResult {
         transportControllerRef.current = null;
       }
     };
-  }, [jobId, terminal, reconnectVersion]);
+  }, [jobId, terminalHistoryComplete, reconnectVersion]);
 
   useEffect(() => () => {
     artifactRefreshControllerRef.current?.abort();

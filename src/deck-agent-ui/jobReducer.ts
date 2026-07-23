@@ -87,7 +87,9 @@ export function createDeckJobState(
     stageGroups: [],
     artifacts: copied?.artifacts ?? [],
     selectedArtifact: null,
-    lastSeq: copied?.lastSeq ?? 0,
+    // A snapshot carries the server log watermark. The client cursor starts at
+    // zero so a fresh or restored view can replay its durable timeline.
+    lastSeq: 0,
     revision: copied?.revision ?? 0,
     progress: copied?.progress ?? { completed: 0, total: 0 },
     actions: copied?.actions ?? { ...EMPTY_ACTIONS },
@@ -137,8 +139,7 @@ function withSnapshot(state: DeckJobState, input: DeckJobSnapshot): DeckJobState
   const job = copyJob(input);
   if (state.jobId !== job.id) return createDeckJobState(job);
 
-  const lastSeq = Math.max(job.lastSeq, state.lastSeq);
-  job.lastSeq = lastSeq;
+  job.lastSeq = Math.max(job.lastSeq, state.job?.lastSeq ?? 0, state.lastSeq);
   const selectedArtifact = state.selectedArtifact
     ? job.artifacts.find((artifact) => artifact.id === state.selectedArtifact?.id) ?? null
     : null;
@@ -149,7 +150,7 @@ function withSnapshot(state: DeckJobState, input: DeckJobSnapshot): DeckJobState
     status: job.status,
     artifacts: job.artifacts,
     selectedArtifact,
-    lastSeq,
+    lastSeq: state.lastSeq,
     revision: job.revision,
     progress: job.progress,
     actions: job.actions,
@@ -170,7 +171,7 @@ function withEvent(state: DeckJobState, event: DeckJobEvent): DeckJobState {
   const job: DeckJobSnapshot = {
     ...state.job,
     status: event.stage,
-    lastSeq: event.seq,
+    lastSeq: Math.max(state.job.lastSeq, event.seq),
     revision,
     progress,
     actions,

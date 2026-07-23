@@ -51,6 +51,26 @@ function event(overrides: Partial<DeckJobEvent> = {}): DeckJobEvent {
 }
 
 describe("deck job reducer", () => {
+  it("keeps the accepted cursor separate from the snapshot server watermark", () => {
+    const initial = createDeckJobState(snapshot({ lastSeq: 4 }));
+
+    expect(initial.lastSeq).toBe(0);
+    expect(initial.job?.lastSeq).toBe(4);
+
+    const replayed = reduceDeckJob(initial, {
+      type: "event",
+      event: event({ seq: 1 }),
+    });
+    const refreshed = reduceDeckJob(replayed, {
+      type: "snapshot",
+      job: snapshot({ lastSeq: 6 }),
+    });
+
+    expect(refreshed.lastSeq).toBe(1);
+    expect(refreshed.job?.lastSeq).toBe(6);
+    expect(refreshed.events.map((item) => item.seq)).toEqual([1]);
+  });
+
   it("rejects wrong-job and duplicate events and keeps timeline sequence order", () => {
     const initial = createDeckJobState(snapshot());
     const afterFirst = reduceDeckJob(initial, { type: "event", event: event({ seq: 2 }) });

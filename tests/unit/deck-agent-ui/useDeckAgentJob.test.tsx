@@ -103,7 +103,7 @@ describe("job URL location", () => {
 });
 
 describe("useDeckAgentJob", () => {
-  it("restores a job from the URL and starts replay after its snapshot sequence", async () => {
+  it("restores a job from the URL and replays from the first unconsumed event", async () => {
     window.history.replaceState(null, "", `/?job=${jobId}`);
     const signals: AbortSignal[] = [];
     api.streamDeckJobEvents.mockImplementation(
@@ -116,13 +116,78 @@ describe("useDeckAgentJob", () => {
     await waitFor(() => expect(api.streamDeckJobEvents).toHaveBeenCalled());
     expect(api.streamDeckJobEvents).toHaveBeenLastCalledWith(
       jobId,
-      4,
+      0,
       expect.any(AbortSignal),
       expect.any(Function),
     );
 
     unmount();
     expect(signals.every((signal) => signal.aborted)).toBe(true);
+  });
+
+  it("starts a newly created job at cursor zero instead of its server watermark", async () => {
+    const signals: AbortSignal[] = [];
+    api.createDeckJob.mockResolvedValue(snapshot({ status: "queued", lastSeq: 2 }));
+    api.streamDeckJobEvents.mockImplementation(
+      (_id: string, _after: number, signal: AbortSignal) => pendingUntilAbort(signal, signals),
+    );
+
+    const { result, unmount } = renderHook(() => useDeckAgentJob());
+    await act(async () => {
+      await result.current.create({ source: "new deck" });
+    });
+
+    await waitFor(() => expect(api.streamDeckJobEvents).toHaveBeenCalled());
+    expect(api.streamDeckJobEvents).toHaveBeenLastCalledWith(
+      jobId,
+      0,
+      expect.any(AbortSignal),
+      expect.any(Function),
+    );
+    expect(result.current.state.job?.lastSeq).toBe(2);
+    expect(result.current.state.lastSeq).toBe(0);
+
+    unmount();
+  });
+
+  it("replays a restored terminal job until its accepted cursor reaches the watermark", async () => {
+    window.history.replaceState(null, "", `/?job=${jobId}`);
+    api.getDeckJob.mockResolvedValue(snapshot({
+      status: "ready",
+      lastSeq: 5,
+      revision: 1,
+      actions: {
+        canCancel: false,
+        canRetry: false,
+        canMessage: true,
+        canUndo: false,
+        canDownload: true,
+      },
+    }));
+    api.streamDeckJobEvents.mockImplementationOnce(async (
+      _id: string,
+      _after: number,
+      _signal: AbortSignal,
+      onEvent: (value: DeckJobEvent) => void,
+    ) => {
+      onEvent(event({ seq: 1, stage: "queued", type: "job", status: "queued" }));
+      onEvent(event({ seq: 5, stage: "ready", type: "job", status: "done" }));
+    });
+
+    const { result, unmount } = renderHook(() => useDeckAgentJob());
+
+    await waitFor(() => expect(result.current.state.lastSeq).toBe(5));
+    expect(api.streamDeckJobEvents).toHaveBeenCalledTimes(1);
+    expect(api.streamDeckJobEvents).toHaveBeenCalledWith(
+      jobId,
+      0,
+      expect.any(AbortSignal),
+      expect.any(Function),
+    );
+    expect(result.current.state.events.map((item) => item.seq)).toEqual([1, 5]);
+    expect(result.current.state.job?.lastSeq).toBe(5);
+
+    unmount();
   });
 
   it("aborts in-flight restoration and transport work during StrictMode cleanup", async () => {
