@@ -277,11 +277,14 @@ function validateManifest({ manifest, outline, slideIds }) {
   if (manifestIds.some((slideId) => !SLIDE_ID.test(slideId)) || new Set(manifestIds).size !== manifestIds.length) {
     throw new Error("Manifest slide identities must be stable and unique");
   }
-  for (const slide of manifest.slides) {
+  for (let index = 0; index < manifest.slides.length; index += 1) {
+    const slide = manifest.slides[index];
+    const parsedSourceRefs = outline?.slides?.[index]?.sourceBlockIds;
+    const sourceFreeSlide = Array.isArray(parsedSourceRefs) && parsedSourceRefs.length === 0;
     if (typeof slide.speakerNotes !== "string" || !slide.speakerNotes.trim()) {
       throw new Error(`Manifest speaker notes are required for ${slide.slideId}`);
     }
-    if (!Array.isArray(slide.sourceRefs) || slide.sourceRefs.length === 0
+    if (!Array.isArray(slide.sourceRefs) || (!sourceFreeSlide && slide.sourceRefs.length === 0)
       || slide.sourceRefs.some((sourceRef) => typeof sourceRef !== "string" || !SOURCE_ID.test(sourceRef))
       || new Set(slide.sourceRefs).size !== slide.sourceRefs.length) {
       throw new Error(`Manifest source references are invalid for ${slide.slideId}`);

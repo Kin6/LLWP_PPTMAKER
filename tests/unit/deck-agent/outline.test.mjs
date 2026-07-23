@@ -48,6 +48,25 @@ const valid = `# 智能制造转型方案
 
 - 《调研报告》第 8 页 <!-- source:block-031 -->`;
 
+const sourceFree = `# 猪猪侠角色介绍
+
+> **叙事主线：** 角色定位 -> 核心特征 -> 课堂总结
+
+## 幻灯片 1：认识猪猪侠
+
+**核心结论：** 猪猪侠是一名面向少儿观众的国产动画角色。
+
+**要点：**
+
+- 角色形象鲜明
+- 故事强调成长与责任
+
+**讲稿提示：** 从同学们熟悉的动画角色切入。
+
+**材料来源：**
+
+- 未提供外部材料；内容基于模型通用知识生成，重要事实需核验。`;
+
 afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
@@ -68,6 +87,35 @@ async function runValidateOutline(outlinePath, sourcesPath) {
 }
 
 describe("deck outline parser", () => {
+  it("accepts an explicit no-external-material disclosure when no source blocks were supplied", () => {
+    const outline = parseOutline(sourceFree, {
+      expectedSlideCount: 1,
+      sourceBlockIds: new Set(),
+    });
+
+    expect(outline.slides[0].sourceBlockIds).toEqual([]);
+    expect(outline.slides[0].rawMarkdown).toContain("未提供外部材料");
+  });
+
+  it("still requires a source comment when source blocks were supplied", () => {
+    expect(() => parseOutline(sourceFree, {
+      expectedSlideCount: 1,
+      sourceBlockIds: new Set(["block-018"]),
+    })).toThrow(/sources/i);
+  });
+
+  it("rejects invented human-readable sources in topic-only mode", () => {
+    const inventedSource = sourceFree.replace(
+      "未提供外部材料；内容基于模型通用知识生成，重要事实需核验。",
+      "某百科网站与虚构的参考资料。",
+    );
+
+    expect(() => parseOutline(inventedSource, {
+      expectedSlideCount: 1,
+      sourceBlockIds: new Set(),
+    })).toThrow(/no-external-material disclosure/i);
+  });
+
   it("parses free sections and GFM tables without turning them into layout instructions", () => {
     const outline = parseOutline(valid, { expectedSlideCount: 2, sourceBlockIds });
 

@@ -7,6 +7,7 @@ const processor = unified().use(remarkParse).use(remarkGfm);
 const SLIDE_HEADING = /^幻灯片\s+(\d+)[:：]\s*(.+)$/;
 const SOURCE_COMMENT = /^<!--\s*source:([A-Za-z0-9._-]+)\s*-->$/;
 const VISUAL_LABEL = /^(布局|版式|配图|图片提示|视觉方向|坐标|字号|颜色|动画|layout|image prompt|css|html)$/i;
+export const NO_EXTERNAL_MATERIALS = "未提供外部材料；内容基于模型通用知识生成，重要事实需核验。";
 
 export function parseOutline(markdown, { expectedSlideCount, sourceBlockIds }) {
   const tree = processor.parse(markdown);
@@ -63,8 +64,13 @@ function parseSlide(markdown, nodes, heading, slideIndex, sourceBlockIds) {
   const refs = readSourceReferences(nodes);
 
   const slideId = `slide-${String(slideIndex + 1).padStart(2, "0")}`;
-  if (!claim || !speakerNotes || !labels.get("材料来源")?.trim() || refs.length === 0) {
+  const sourcesRequired = sourceBlockIds.size > 0;
+  const sourceText = labels.get("材料来源")?.trim();
+  if (!claim || !speakerNotes || !sourceText || (sourcesRequired && refs.length === 0)) {
     throw new Error(`${slideId} lacks claim, speaker notes, or sources`);
+  }
+  if (!sourcesRequired && sourceText !== NO_EXTERNAL_MATERIALS) {
+    throw new Error(`${slideId} requires the no-external-material disclosure`);
   }
   for (const blockId of refs) {
     if (!sourceBlockIds.has(blockId)) throw new Error(`Unknown source reference: ${blockId}`);

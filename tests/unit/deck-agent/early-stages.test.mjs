@@ -19,6 +19,24 @@ const validOutline = `# Test deck
 <!-- source:block-a -->
 `;
 
+const sourceFreeOutline = `# Topic-only deck
+
+> **叙事主线：** 从角色定位走向课堂总结
+
+## 幻灯片 1：认识角色
+
+**核心结论：** 角色通过持续成长承担责任。
+
+**要点：**
+- 形象鲜明
+- 主题清晰
+
+**讲稿提示：** 用一句熟悉的角色印象开场。
+
+**材料来源：**
+- 未提供外部材料；内容基于模型通用知识生成，重要事实需核验。
+`;
+
 const validTheme = ":root{--deck-bg:#ffffff;--deck-surface:#f5f5f5;--deck-text:#111111;--deck-muted:#666666;--deck-primary:#0057b8;--deck-secondary:#287d3c;--deck-accent:#c43b27;--deck-positive:#287d3c;--deck-negative:#b42318;--deck-font-sans:Arial,sans-serif;--deck-font-serif:Georgia,serif;--deck-title-size:64px;--deck-heading-size:44px;--deck-body-size:30px;--deck-caption-size:20px;--deck-radius:6px;--deck-space:24px;--deck-grid-gap:32px;}";
 const formattedTheme = validTheme
   .replace(":root{", ":root {\n  ")
@@ -76,10 +94,34 @@ function baseContext(overrides = {}) {
 }
 
 describe("outline and design stages", () => {
+  it("passes a complete Markdown template and accepts topic-only outlines", async () => {
+    const context = baseContext({ sourceBlocks: [] });
+    context.runner.runStage.mockImplementationOnce(async ({ allowedTools, messages }) => {
+      const prompt = JSON.stringify(messages);
+      expect(prompt).toContain("# 演示文稿标题");
+      expect(prompt).toContain("## 幻灯片 1：页面标题");
+      expect(prompt).toContain("**核心结论：**");
+      expect(prompt).toContain("**要点：**");
+      expect(prompt).toContain("**讲稿提示：**");
+      expect(prompt).toContain("**材料来源：**");
+      expect(prompt).toContain("未提供外部材料；内容基于模型通用知识生成，重要事实需核验。");
+      await allowedTools.write_outline.execute({ markdown: sourceFreeOutline });
+      return { upstreamCalls: 1 };
+    });
+
+    await runOutlineStage(context);
+
+    expect(context.store.files.get("working/manifest.json").slides[0].sourceRefs).toEqual([]);
+  });
+
   it("publishes slides-content.md and advances without user confirmation", async () => {
     const context = baseContext();
     context.runner.runStage.mockImplementationOnce(async ({ allowedTools, messages }) => {
-      expect(JSON.stringify(messages)).toContain("EVIDENCE_BODY_42");
+      const prompt = JSON.stringify(messages);
+      const request = JSON.parse(messages[1].content);
+      expect(prompt).toContain("EVIDENCE_BODY_42");
+      expect(request.sourceMode).toBe("provided-materials");
+      expect(prompt).toContain("<!-- source:block-a -->");
       await allowedTools.write_outline.execute({ markdown: validOutline });
       return { upstreamCalls: 1 };
     });
@@ -102,6 +144,27 @@ describe("outline and design stages", () => {
 
     await expect(runOutlineStage(context)).rejects.toThrow(/outline validation failed after one repair/i);
     expect(context.runner.runStage).toHaveBeenCalledTimes(2);
+  });
+
+  it("passes the validation error and previous Markdown into the repair attempt", async () => {
+    const context = baseContext();
+    const invalidDraft = validOutline.replace("# Test deck", "# BROKEN_DRAFT_42\n\n# Duplicate title");
+    context.runner.runStage
+      .mockImplementationOnce(async ({ allowedTools }) => {
+        await allowedTools.write_outline.execute({ markdown: invalidDraft });
+      })
+      .mockImplementationOnce(async ({ allowedTools, messages }) => {
+        const repairPrompt = JSON.stringify(messages);
+        expect(repairPrompt).toContain("Outline must contain exactly one H1");
+        expect(repairPrompt).toContain("BROKEN_DRAFT_42");
+        await allowedTools.write_outline.execute({ markdown: validOutline });
+        return { upstreamCalls: 1 };
+      });
+
+    await runOutlineStage(context);
+
+    expect(context.runner.runStage).toHaveBeenCalledTimes(2);
+    expect(await context.store.readArtifact(context.jobId, "slides-content.md")).toBe(validOutline);
   });
 
   it("creates one design direction with one bounded model call and no confirmation", async () => {

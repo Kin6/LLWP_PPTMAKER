@@ -2,6 +2,12 @@
 
 Treat normalized source blocks as the only valid source namespace. Extract IDs only from `<!-- source:block-id -->` comments in the validated outline and reject any ID absent from the supplied source-block set.
 
+## No External Materials
+
+When the supplied source-block set is empty, the deck is in topic-only mode. Keep the human-readable `材料来源` section on every slide and state that no external material was provided, the content uses model general knowledge, and important facts require verification. Do not emit a `source:` comment, invent a source ID, filename, page number, citation, or URL. Store `sourceRefs` as an empty array and preserve that empty array through rendering and verification.
+
+When one or more source blocks are supplied, topic-only mode is disabled: every slide must retain at least one valid source comment and every referenced ID must exist in the supplied source-block set.
+
 For each slide:
 
 1. Preserve the stable ID `slide-NN` and write the fragment as `slide-NN.html`.

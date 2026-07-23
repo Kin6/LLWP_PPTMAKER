@@ -18,7 +18,7 @@ Run stages in this order:
 
 ## Stop Conditions
 
-- Stop `outline` when validation reports a missing claim, note, source, narrative, or continuous slide number. Do not design around invalid input.
+- Stop `outline` when validation reports a missing claim, note, narrative, continuous slide number, or a missing source while source blocks were supplied. When no source blocks were supplied, require a visible no-external-material disclosure and keep machine source references empty instead of inventing a source.
 - Stop `design` unless exactly one direction is recorded and every dependency is local and reviewable.
 - Stop `calibrating` until both calibration slides pass the visual and security rubrics. Do not build the rest first.
 - Stop `building` on an unknown source ID, unsafe fragment, overflow, or out-of-budget batch. Resolve a missing or failed optional image to a no-image layout and continue.

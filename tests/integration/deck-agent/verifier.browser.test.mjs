@@ -112,6 +112,27 @@ describe("verification report combiners", () => {
 });
 
 describe("browser verifier", () => {
+  it("accepts empty source references when they match a source-free outline", async () => {
+    const sourceFreeManifest = {
+      slides: manifest.slides.map((slide) => ({ ...slide, sourceRefs: [] })),
+    };
+    const sourceFreeOutline = {
+      slides: outline.slides.map((slide) => ({ ...slide, sourceBlockIds: [] })),
+    };
+    const renderer = createFakeRenderer(hostileDeck, sourceFreeManifest);
+    renderer.assembleStandalone = async () => {
+      throw new Error("SOURCE_FREE_MANIFEST_ACCEPTED");
+    };
+    const verifier = createVerifier({
+      renderer,
+      outlineReader: async () => sourceFreeOutline,
+      browserFactory: { launchPersistentContext: () => { throw new Error("browser must not launch"); } },
+    });
+
+    await expect(verifier.verify({ jobId, revisionId, slideIds, captureContactSheet: false }))
+      .rejects.toThrow("SOURCE_FREE_MANIFEST_ACCEPTED");
+  });
+
   it("validates manifest and outline before launching Chromium", async () => {
     const renderer = createFakeRenderer(hostileDeck, {
       slides: [

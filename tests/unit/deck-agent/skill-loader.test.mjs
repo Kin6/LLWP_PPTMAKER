@@ -112,6 +112,18 @@ describe("project Skill loader", () => {
     expect(instructions).not.toMatch(/Stop `building`.*unresolved image/i);
   });
 
+  it("routes the topic-only provenance contract without weakening supplied-source validation", async () => {
+    const loader = createSkillLoader({ skillRoot });
+    const outline = (await loader.load("outline")).instructions;
+    const building = (await loader.load("building")).instructions;
+
+    for (const instructions of [outline, building]) {
+      expect(instructions).toMatch(/no external materials/i);
+      expect(instructions).toContain("sourceRefs` as an empty array");
+      expect(instructions).toMatch(/one or more source blocks[\s\S]{0,180}every slide must retain at least one valid source comment/i);
+    }
+  });
+
   it("keeps every decided image position as an empty named slot after no-image resolution", async () => {
     const instructions = (await createSkillLoader({ skillRoot }).load("building")).instructions;
 
