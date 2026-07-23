@@ -1,4 +1,5 @@
 const MAX_HISTORY_TEXT_CHARS = 1_000;
+const MAX_MODEL_CONTENT_CHARS = 120_000;
 const REDACTED = "[redacted]";
 
 const AGENT_TURN_SCHEMA = {
@@ -57,6 +58,12 @@ function historyTurn(value) {
 
 function toolSummary(result) {
   return sanitizeHistoryText(result?.summary, "Tool completed");
+}
+
+function toolModelContent(result) {
+  if (!Object.prototype.hasOwnProperty.call(result || {}, "modelContent")) return undefined;
+  if (typeof result.modelContent !== "string") throw new TypeError("Tool modelContent must be a string");
+  return bounded(result.modelContent, MAX_MODEL_CONTENT_CHARS);
 }
 
 function budgetError(kind, limit) {
@@ -133,10 +140,12 @@ export function createAgentRunner({ modelClient }) {
             onProgress,
           });
           stageSignal.throwIfAborted();
+          const modelContent = toolModelContent(result);
           toolResults.push({
             id: sanitizeHistoryText(call.id),
             name: sanitizeHistoryText(call.name),
             summary: toolSummary(result),
+            ...(modelContent === undefined ? {} : { modelContent }),
           });
         }
 

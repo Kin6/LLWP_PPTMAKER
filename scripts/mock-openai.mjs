@@ -158,6 +158,39 @@ function htmlPatchForRequest(text) {
   };
 }
 
+const stageThemeCss = ":root{--deck-bg:#ffffff;--deck-surface:#f4f5f7;--deck-text:#111111;--deck-muted:#555555;--deck-primary:#075ccb;--deck-secondary:#243447;--deck-accent:#d9363e;--deck-positive:#14804a;--deck-negative:#b42318;--deck-font-sans:Arial,sans-serif;--deck-font-serif:Georgia,serif;--deck-title-size:72px;--deck-heading-size:48px;--deck-body-size:30px;--deck-caption-size:20px;--deck-radius:8px;--deck-space:24px;--deck-grid-gap:32px;}";
+
+function stageOutlineMarkdown(text) {
+  const count = Math.max(1, Math.min(50, Number(String(text).match(/slideCount\\?"\s*:\s*(\d+)/)?.[1]) || 1));
+  const sourceIds = [...new Set([...String(text).matchAll(/\b(?:source|block)-[A-Za-z0-9-]{1,}\b/g)].map((match) => match[0]))];
+  const fallback = sourceIds[0] || "block-mock";
+  const slides = Array.from({ length: count }, (_, index) => {
+    const sourceId = sourceIds[index % sourceIds.length] || fallback;
+    return `## 幻灯片 ${index + 1}：模拟内容页 ${index + 1}\n\n**核心观点：** 第 ${index + 1} 页给出一个可验证结论。\n\n**演讲备注：** 解释本页结论并衔接下一页。\n\n**材料来源：** 模拟输入材料\n<!-- source:${sourceId} -->`;
+  });
+  return `# 模拟 HTML 幻灯片\n\n> 叙事主线：从核心判断推进到可执行行动\n\n${slides.join("\n\n")}`;
+}
+
+function stageAgentTurn(text) {
+  if (/Write slides-content\.md|Repair slides-content\.md/i.test(text)) {
+    const markdown = String(text).includes("MOCK_INVALID_OUTLINE_TWICE") ? "# invalid" : stageOutlineMarkdown(text);
+    return { message: "Outline published", final: true, toolCalls: [{ id: "stage-outline-1", name: "write_outline", argumentsJson: JSON.stringify({ markdown }) }] };
+  }
+  if (/exactly one design direction|single design direction/i.test(text)) {
+    const designBriefMarkdown = "# Single direction\n\nTypography scale: 72/48/30/20. Palette: restrained neutral with distinct accents. Grid: 12 columns. Spacing: 24px rhythm. Image grammar: evidence-led crops. Chart grammar: direct labels and semantic colors. Motion level: low. Prohibited patterns: decorative gradients and nested cards.";
+    return { message: "Design published", final: true, toolCalls: [{ id: "stage-design-1", name: "write_theme", argumentsJson: JSON.stringify({ designBriefMarkdown, themeCss: stageThemeCss }) }] };
+  }
+  return { message: "No stage action", final: true, toolCalls: [] };
+}
+
+function calibrationReviewForRequest(text) {
+  const slideIds = [...new Set([...String(text).matchAll(/slide-\d{2}/g)].map((match) => match[0]))].slice(0, 2);
+  const failed = String(text).includes("MOCK_CALIBRATION_FALLBACK") && slideIds[0]
+    ? [{ slideId: slideIds[0], reasons: ["weak hierarchy"] }]
+    : [];
+  return { failedSlides: failed, designChanges: failed.length ? ["increase title contrast"] : [] };
+}
+
 function imageFailureMode(prompt) {
   if (disableImageFailures) return "";
   if (forcedImageFailureMode === "html-524" || forcedImageFailureMode === "json-timeout") return forcedImageFailureMode;
@@ -291,6 +324,10 @@ const server = http.createServer(async (req, res) => {
     }
     const payload = requestText.includes("mock-official-sse")
       ? { ok: true }
+      : name === "agent_turn"
+        ? stageAgentTurn(requestText)
+      : name === "calibration_review"
+        ? calibrationReviewForRequest(requestText)
       : name === "image_decomposition"
       ? decomposition
       : name === "deck_outline"
@@ -329,7 +366,12 @@ const server = http.createServer(async (req, res) => {
     if (text.includes("FORCE_EMPTY_DECK") && parsed.messages.length <= 2) {
       return res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: [{ type: "text", text: JSON.stringify({ title: "empty", slides: [] }) }] } }] }));
     }
-    const payload = text.includes("changesJson 必须")
+    const schemaName = parsed?.response_format?.json_schema?.name;
+    const payload = schemaName === "agent_turn"
+      ? stageAgentTurn(text)
+      : schemaName === "calibration_review"
+        ? calibrationReviewForRequest(text)
+      : text.includes("changesJson 必须")
       ? htmlPatchForRequest(text)
       : text.includes("DECK_OUTLINE_JSON")
         ? outlineForRequest(text)

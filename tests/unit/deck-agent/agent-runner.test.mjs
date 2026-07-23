@@ -260,6 +260,39 @@ describe("restricted Agent runner", () => {
     }
   });
 
+  it("returns only explicitly authorized bounded model content to the next turn", async () => {
+    const modelClient = {
+      completeStructured: vi.fn()
+        .mockResolvedValueOnce({
+          value: agentTurn({
+            toolCalls: [{ id: "read-1", name: "read_source_blocks", argumentsJson: "{}" }],
+          }),
+          apiCalls: 1,
+        })
+        .mockResolvedValueOnce({ value: agentTurn({ final: true }), apiCalls: 1 }),
+    };
+    const runner = createAgentRunner({ modelClient });
+
+    await runner.runStage(stageOptions({
+      allowedTools: {
+        read_source_blocks: {
+          schema: z.object({}).strict(),
+          execute: vi.fn(async () => ({
+            summary: "Source blocks loaded",
+            modelContent: `EVIDENCE_BODY_42${"x".repeat(200_000)}`,
+            artifactBody: "MUST_NOT_REACH_MODEL",
+          })),
+        },
+      },
+    }));
+
+    const history = modelClient.completeStructured.mock.calls[1][0].messages;
+    const toolResult = JSON.parse(history.at(-1).content).toolResults[0];
+    expect(toolResult.modelContent).toContain("EVIDENCE_BODY_42");
+    expect(toolResult.modelContent.length).toBeLessThanOrEqual(120_000);
+    expect(JSON.stringify(history)).not.toContain("MUST_NOT_REACH_MODEL");
+  });
+
   it("propagates external cancellation into an in-flight tool", async () => {
     const controller = new AbortController();
     let signalToolStarted;
