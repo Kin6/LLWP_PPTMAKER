@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "files": [
+    {
+      "package": "reveal.js",
+      "version": "6.0.1",
+      "relativePath": "../../../../node_modules/reveal.js/dist/reveal.js",
+      "sha256": "3fb84c30d2e610dd598843d75a123ef2c4dbc588847cda86cd8c7a61e18ddb6b"
+    },
+    {
+      "package": "reveal.js",
+      "version": "6.0.1",
+      "relativePath": "../../../../node_modules/reveal.js/dist/reveal.css",
+      "sha256": "64e6203ee2048665c9f49c368f345fb3d7f936c404934162c70369a7682f388f"
+    },
+    {
+      "package": "echarts",
+      "version": "6.1.0",
+      "relativePath": "../../../../node_modules/echarts/dist/echarts.min.js",
+      "sha256": "b66b25aeb4df84e33199dc21694014d336d222cbd9deb0e5a7c14bd6aa0d0fd0"
+    },
+    {
+      "package": "deckforge-runtime",
+      "version": "1.0.0",
+      "relativePath": "base.css",
+      "sha256": "adeec9b2522b94e8fcfca7271fcde807650a027b908911d04cb61051bd64bb19"
+    },
+    {
+      "package": "deckforge-runtime",
+      "version": "1.0.0",
+      "relativePath": "bridge.js",
+      "sha256": "80bd58d27026ce678bc957fa314a1a83fd3200d54c9d0aa77603c26d860516d6"
+    }
+  ]
+}
