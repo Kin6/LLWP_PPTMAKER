@@ -20,7 +20,6 @@ export function buildCsp({ scriptHash, styleHashes, assetOrigin }) {
     "object-src 'none'",
     "form-action 'none'",
     "base-uri 'none'",
-    "navigate-to 'none'",
   ].join("; ");
 }
 

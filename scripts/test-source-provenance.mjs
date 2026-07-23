@@ -56,32 +56,7 @@ try {
   assert.equal(payload.deck.slides[0].sourceRefs[0].confidence, 64);
   assert.equal(payload.deck.slides[0].sourceRefs[0].lowConfidence, true);
   assert.match(payload.deck.slides[0].sourceNotes[0], /report\.pdf，第 12 页，OCR 64%，低置信度，待核实/);
-  const htmlResponse = await fetch(`http://127.0.0.1:${appPort}/api/ai/generate-html-deck`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      config: { provider: "compatible", baseUrl: `http://127.0.0.1:${mockPort}/v1`, model: "mock-vision", apiKey: "test-key" },
-      deck: payload.deck,
-      styleId: "blank",
-      draft: {
-        id: "provenance-html-deck",
-        title: payload.deck.title,
-        width: 1600,
-        height: 900,
-        revision: 1,
-        theme: { name: "test", background: "#ffffff", surface: "#ffffff", text: "#111111", muted: "#666666", primary: "#0055cc", accent: "#cc3300", fontFamily: "sans-serif" },
-        slides: payload.deck.slides.map((slide, index) => ({ id: `slide-${index + 1}`, title: slide.title, background: "#ffffff", transition: "fade", nodes: [], interactions: [], speakerNotes: slide.speakerNotes, sourceRefs: slide.sourceRefs })),
-        variables: [],
-        comments: [],
-        drawings: [],
-      },
-    }),
-  });
-  const htmlPayload = await htmlResponse.json();
-  assert.equal(htmlResponse.status, 200, JSON.stringify(htmlPayload));
-  assert.equal(htmlPayload.deck.slides[0].sourceRefs[0].blockId, "block-pdf-12");
-  assert.equal(htmlPayload.deck.slides[0].sourceRefs[0].page, 12);
-  console.log("Source provenance integration test passed: prompt blockId -> DeckSpec -> HtmlDeckSpec.");
+  console.log("Source provenance integration test passed: prompt blockId -> DeckSpec.");
 } finally {
   mock.kill("SIGTERM");
   app.kill("SIGTERM");

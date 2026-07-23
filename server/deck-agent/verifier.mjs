@@ -11,9 +11,6 @@ const SLIDE_ID = /^slide-\d{2}$/;
 const ARTIFACT_ID = /^[a-z0-9-]+$/;
 const SOURCE_ID = /^[A-Za-z0-9._-]+$/;
 const NETWORK_PROTOCOLS = new Set(["http:", "https:", "ws:", "wss:"]);
-const IGNORED_BROWSER_CONSOLE_ERRORS = new Set([
-  "Unrecognized Content-Security-Policy directive 'navigate-to'.",
-]);
 const VIEWPORT = Object.freeze({ width: 1920, height: 1080 });
 const DEFAULT_TIMEOUT_MS = 90_000;
 const DEFAULT_SCREENSHOT_BYTES = 12 * 1024 * 1024;
@@ -111,10 +108,7 @@ export function createVerifier({
         const consoleErrors = [];
         page.on("console", (message) => {
           if (message.type() === "error") {
-            const text = boundedText(message.text(), 1_000);
-            if (!IGNORED_BROWSER_CONSOLE_ERRORS.has(text)) {
-              consoleErrors.push({ slideId: currentSlideId, message: text });
-            }
+            consoleErrors.push({ slideId: currentSlideId, message: boundedText(message.text(), 1_000) });
           }
         });
         page.on("pageerror", (error) => {

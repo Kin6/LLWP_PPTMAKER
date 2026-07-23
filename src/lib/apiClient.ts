@@ -1,6 +1,4 @@
 import type { NotebookDeckSpec, NormalizedRect, SourceLocation } from "../types";
-import { htmlDeckSchema } from "../html-deck/schema";
-import type { HtmlDeckPatch, HtmlDeckSpec, HtmlImageNode } from "../html-deck/types";
 
 export type ImageTextMode = "integrated" | "native";
 
@@ -108,58 +106,6 @@ export async function generateAiDeck(config: ApiConfig, source: DeckSource, onPr
     : requestJson<{ ok: true; deck: NotebookDeckSpec; meta: ApiMeta }>("/api/ai/generate-deck", body);
 }
 
-export async function generateAiHtmlDeck(config: ApiConfig, deck: NotebookDeckSpec, draft: HtmlDeckSpec, styleId: string, onProgress?: AiStreamCallback) {
-  const body = {
-    config: textConfig(config),
-    deck,
-    draft: stripHtmlDeckForApi(draft),
-    styleId,
-  };
-  type HtmlDeckResponse = {
-    ok: true;
-    deck: unknown;
-    meta: ApiMeta & { designApplied?: boolean };
-  };
-  const response = onProgress
-    ? await requestJsonStream<HtmlDeckResponse>("/api/ai/generate-html-deck-stream", body, onProgress)
-    : await requestJson<HtmlDeckResponse>("/api/ai/generate-html-deck", body);
-  const hydrated = hydrateHtmlDeck(response.deck, draft);
-  const parsed = htmlDeckSchema.safeParse(hydrated);
-  return {
-    ...response,
-    deck: parsed.success ? parsed.data as HtmlDeckSpec : draft,
-    meta: { ...response.meta, designApplied: Boolean(response.meta.designApplied && parsed.success) },
-  };
-}
-
-export async function patchAiHtmlDeck(
-  config: ApiConfig,
-  deck: HtmlDeckSpec,
-  instruction: string,
-  slideId: string,
-  nodeId?: string,
-  onProgress?: AiStreamCallback,
-) {
-  const body = {
-    config: textConfig(config),
-    deck: stripHtmlDeckForApi(deck),
-    instruction,
-    slideId,
-    nodeId,
-  };
-  return onProgress ? requestJsonStream<{
-    ok: true;
-    summary: string;
-    patches: HtmlDeckPatch[];
-    meta: ApiMeta;
-  }>("/api/ai/patch-html-deck-stream", body, onProgress) : requestJson<{
-    ok: true;
-    summary: string;
-    patches: HtmlDeckPatch[];
-    meta: ApiMeta;
-  }>("/api/ai/patch-html-deck", body);
-}
-
 export async function generateAiImages(
   config: ApiConfig,
   jobs: ImageJob[],
@@ -195,66 +141,6 @@ export async function decomposeAiImages(
 function textConfig(config: ApiConfig) {
   void config;
   return {};
-}
-
-function stripHtmlDeckForApi(deck: HtmlDeckSpec) {
-  return {
-    ...deck,
-    comments: [],
-    drawings: [],
-    slides: deck.slides.map((slide) => ({
-      ...slide,
-      nodes: slide.nodes.map((node) => {
-        if (node.type === "image") return { ...node, src: "" };
-        if (node.type === "video") return { ...node, src: "", poster: "" };
-        return node;
-      }),
-    })),
-  };
-}
-
-function hydrateHtmlDeck(value: unknown, draft: HtmlDeckSpec): unknown {
-  if (!value || typeof value !== "object") return draft;
-  const raw = value as Record<string, unknown>;
-  const rawSlides = Array.isArray(raw.slides) ? raw.slides : [];
-  if (rawSlides.length !== draft.slides.length) return draft;
-  const slides = rawSlides.map((rawSlide, slideIndex) => {
-    const sourceSlide = draft.slides[slideIndex];
-    if (!rawSlide || typeof rawSlide !== "object") return sourceSlide;
-    const slide = rawSlide as Record<string, unknown>;
-    const rawNodes = Array.isArray(slide.nodes) ? slide.nodes : [];
-    const sourceImages = sourceSlide.nodes.filter((node): node is HtmlImageNode => node.type === "image");
-    const nodes = rawNodes.map((rawNode) => {
-      if (!rawNode || typeof rawNode !== "object") return rawNode;
-      const node = rawNode as Record<string, unknown>;
-      if (node.type !== "image") return node;
-      const match = sourceImages.find((image) => image.id === node.id || image.assetId === node.assetId) || sourceImages[0];
-      return match ? { ...node, src: match.src, assetId: match.assetId || String(node.assetId || ""), prompt: match.prompt || String(node.prompt || ""), alt: match.alt || String(node.alt || "") } : node;
-    });
-    for (const image of sourceImages) {
-      if (!nodes.some((node) => node && typeof node === "object" && ((node as Record<string, unknown>).id === image.id || (node as Record<string, unknown>).assetId === image.assetId))) nodes.push(image);
-    }
-    const interactions = (Array.isArray(slide.interactions) ? slide.interactions : []).map((interaction) => {
-      if (!interaction || typeof interaction !== "object") return interaction;
-      return Object.fromEntries(Object.entries(interaction as Record<string, unknown>).filter(([, item]) => item !== null));
-    });
-    return { ...slide, id: sourceSlide.id, nodes, interactions };
-  });
-  const variables = (Array.isArray(raw.variables) ? raw.variables : draft.variables).map((variable) => {
-    if (!variable || typeof variable !== "object") return variable;
-    return Object.fromEntries(Object.entries(variable as Record<string, unknown>).filter(([, item]) => item !== null));
-  });
-  return {
-    ...raw,
-    id: draft.id,
-    width: 1600,
-    height: 900,
-    revision: Math.max(draft.revision + 1, Number(raw.revision) || 1),
-    slides,
-    variables,
-    comments: draft.comments,
-    drawings: draft.drawings,
-  };
 }
 
 async function requestJson<T>(url: string, body: unknown): Promise<T> {

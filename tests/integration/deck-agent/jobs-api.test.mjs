@@ -297,6 +297,24 @@ describe("HTML deck jobs API", () => {
     expect(revisions.renderPreview).toHaveBeenCalledTimes(1);
   });
 
+  it("uses a Chromium-compatible fallback CSP when preview HTML has no policy", async () => {
+    const created = await request(app).post("/api/html-deck/jobs").send(validRequest).expect(202);
+    const jobId = created.body.job.id;
+    await store.writeJson(jobId, "current-revision.json", {
+      revision: 1,
+      revisionId: "revision-000001",
+      status: "ready",
+    });
+    revisions.renderPreview = vi.fn(async () => "<!doctype html><title>Fallback preview</title>");
+
+    const preview = await request(app)
+      .get(`/api/html-deck/jobs/${jobId}/artifacts/deck-preview`)
+      .expect(200)
+      .expect("Content-Security-Policy", /default-src 'none'/);
+
+    expect(preview.headers["content-security-policy"]).not.toContain("navigate-to");
+  });
+
   it("validates messages and undo, emitting revision events after successful mutations", async () => {
     const created = await request(app).post("/api/html-deck/jobs").send(validRequest).expect(202);
     const jobId = created.body.job.id;

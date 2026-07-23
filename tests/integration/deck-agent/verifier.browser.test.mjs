@@ -166,7 +166,7 @@ describe("browser verifier", () => {
     expect(result.consoleErrors).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ message: expect.stringContaining("opaque verification URL") }),
     ]));
-    expect(result.consoleErrors).not.toEqual(expect.arrayContaining([
+    expect(result.consoleErrors).toEqual(expect.arrayContaining([
       expect.objectContaining({ message: expect.stringContaining("Unrecognized Content-Security-Policy directive 'navigate-to'") }),
     ]));
     expect(result.slides.every((slide) => slide.screenshotArtifactId)).toBe(true);

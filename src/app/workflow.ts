@@ -27,14 +27,6 @@ export const initialSteps: WorkflowStep[] = [
   { id: "export", title: "生成演示 PPTX", engine: "PptxGenJS", status: "idle", detail: "输出完整成片、内容源与讲稿备注" },
 ];
 
-export const htmlInitialSteps: WorkflowStep[] = [
-  { id: "logic", title: "策划演示叙事", engine: "双轮 Story Planner", status: "idle", detail: "建立主张、证据链和跨页顺序" },
-  { id: "image", title: "生成视觉素材", engine: "GPT Image 2", status: "idle", detail: "为 HTML 场景生成无文字主视觉" },
-  { id: "decompose", title: "编排 HTML 场景", engine: "HtmlDeckSpec", status: "idle", detail: "映射文字、图表、图形、素材和图层" },
-  { id: "assemble", title: "初始化交互编辑器", engine: "Reveal + ECharts", status: "idle", detail: "装载动画、选择桥接、评论和微调变量" },
-  { id: "export", title: "准备交互交付", engine: "Standalone HTML", status: "idle", detail: "可导出离线 HTML 或静态 PPTX" },
-];
-
 export function shouldRunFrom(start: StepId, target: StepId) {
   return stepOrder.indexOf(target) >= stepOrder.indexOf(start);
 }

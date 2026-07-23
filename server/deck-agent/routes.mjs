@@ -28,7 +28,6 @@ const FALLBACK_PREVIEW_CSP = [
   "object-src 'none'",
   "form-action 'none'",
   "base-uri 'none'",
-  "navigate-to 'none'",
 ].join("; ");
 
 export const editRequestSchema = z.object({

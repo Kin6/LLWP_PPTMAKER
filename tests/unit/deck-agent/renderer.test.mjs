@@ -111,6 +111,7 @@ describe("fixed deck renderer", () => {
     expect(html).toContain("--deck-height:1080px");
     expect(html).toContain("connect-src 'none'");
     expect(html).toContain("style-src-attr 'unsafe-inline'");
+    expect(html).not.toContain("navigate-to");
     expect(html).not.toContain("script-src 'unsafe-inline'");
     expect(html).not.toContain("unsafe-eval");
     expect(html).not.toMatch(/https?:\/\//);
