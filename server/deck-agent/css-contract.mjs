@@ -31,6 +31,7 @@ export const MODEL_CSS_CONTRACT = Object.freeze({
     "border-bottom-style", "border-left-style", "border-radius", "background",
     "background-color", "color", "font-family", "font-size", "font-weight",
     "line-height", "text-align", "text-transform", "letter-spacing", "opacity",
+    "list-style", "list-style-type", "list-style-position",
     "object-fit", "object-position", "aspect-ratio", "white-space", "word-break",
     "z-index", "transform",
   ]),
@@ -53,6 +54,10 @@ export const MODEL_CSS_CONTRACT = Object.freeze({
     "viewport or container-viewport units", "nonzero letter-spacing",
     "var() fallbacks or references outside the exact themeTokens list",
   ]),
+  geometryRoles: Object.freeze({
+    content: "Readable content and meaningful media must stay inside the 72px safe inset.",
+    decorative: "Text-free decoration may bleed past the safe inset only when marked data-role=\"decorative\" and clipped by the 1920x1080 slide canvas.",
+  }),
   validSelectorExamples: Object.freeze([
     ":slide{display:block}",
     ":slide .title{font-size:var(--deck-title-size)}",

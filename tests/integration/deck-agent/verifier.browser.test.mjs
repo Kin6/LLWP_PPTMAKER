@@ -179,7 +179,7 @@ describe("browser verifier", () => {
 
     expect(result.ok).toBe(false);
     expect(result.slides.find((slide) => slide.slideId === "slide-01")?.issues)
-      .toEqual(expect.arrayContaining(["horizontal-overflow", "outside-safe-area", "broken-image", "duplicate-id", "network-request-blocked"]));
+      .toEqual(expect.arrayContaining(["horizontal-overflow", "outside-canvas", "outside-safe-area", "broken-image", "duplicate-id", "network-request-blocked"]));
     expect(result.slides.find((slide) => slide.slideId === "slide-02")?.issues).toContain("blank-canvas");
     expect(result.consoleErrors).toEqual(expect.arrayContaining([
       expect.objectContaining({ slideId: "slide-01", message: expect.stringContaining("runtime boom") }),
@@ -206,6 +206,70 @@ describe("browser verifier", () => {
       viewport: { width: 1920, height: 1080 },
     });
     expect(launchOptions.options.args).toBeUndefined();
+    expect(await readdir(profileRoot)).toEqual([]);
+  }, 40_000);
+
+  it("allows clipped decorative bleed and reports measured content geometry", async () => {
+    const geometryDeck = `<!doctype html>
+<meta charset="utf-8">
+<style>
+html,body{width:1920px;height:1080px;margin:0;overflow:hidden;background:#fff}
+[data-slide-id]{box-sizing:border-box;display:none;position:absolute;inset:0;width:1920px;height:1080px;overflow:hidden;background:#fff;color:#111}
+[data-slide-id].present{display:block}
+.bleed{position:absolute;left:-24px;top:180px;width:360px;height:420px;background:#075ccb;transform:rotate(-3deg)}
+.bleed-right{position:absolute;right:-24px;bottom:-24px;width:260px;height:260px;background:#d9363e;transform:rotate(8deg)}
+.safe-title{position:absolute;left:120px;top:100px;margin:0}
+.near-edge{position:absolute;left:40px;top:120px;width:300px;margin:0}
+.outside{position:absolute;left:1850px;top:400px;width:120px;margin:0}
+</style>
+<article class="present" data-slide-id="slide-01"><div class="bleed" data-role="decorative"></div><div class="bleed-right" data-role="decorative"></div><h1 class="safe-title">Decorative bleed</h1></article>
+<article data-slide-id="slide-02"><p class="near-edge" data-role="decorative">Near edge</p><p class="outside">Outside canvas</p></article>
+<script>
+globalThis.Reveal = {
+  isReady() { return true; },
+  slide(index) {
+    const slides = [...document.querySelectorAll("[data-slide-id]")];
+    slides.forEach((slide, slideIndex) => slide.classList.toggle("present", slideIndex === index));
+  },
+};
+</script>`;
+    const profileRoot = await mkdtemp(path.join(tmpdir(), "deck-verifier-geometry-test-"));
+    temporaryRoots.push(profileRoot);
+    const verifier = createVerifier({
+      renderer: createFakeRenderer(geometryDeck),
+      outlineReader: async () => outline,
+      profileRoot,
+      timeoutMs: 30_000,
+    });
+
+    const result = await verifier.verify({
+      jobId,
+      revisionId,
+      slideIds,
+      captureContactSheet: false,
+    });
+
+    const decorative = result.slides.find((slide) => slide.slideId === "slide-01");
+    expect(decorative?.issues).not.toEqual(expect.arrayContaining(["outside-canvas", "outside-safe-area"]));
+    expect(decorative?.geometryViolations).toEqual([]);
+
+    const content = result.slides.find((slide) => slide.slideId === "slide-02");
+    expect(content?.issues).toEqual(expect.arrayContaining(["outside-canvas", "outside-safe-area"]));
+    expect(content?.geometryViolations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "outside-safe-area",
+        selector: ".near-edge",
+        role: "content",
+        overflow: expect.objectContaining({ left: 32 }),
+      }),
+      expect.objectContaining({
+        code: "outside-canvas",
+        selector: ".outside",
+        role: "content",
+        overflow: expect.objectContaining({ right: 50 }),
+        computedStyle: expect.objectContaining({ position: "absolute" }),
+      }),
+    ]));
     expect(await readdir(profileRoot)).toEqual([]);
   }, 40_000);
 

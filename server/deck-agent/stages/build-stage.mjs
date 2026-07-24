@@ -221,8 +221,10 @@ export function buildBuildStageMessages(promptContext, skill = {}, options = {})
         "Speaker notes and 讲稿提示 are server-owned metadata and are intentionally absent from targetSlides. Never invent, render, paraphrase, hide, or copy presenter cues into any generated field.",
         "Never emit a section element or a section type selector. Reveal owns section for slide navigation; use div or article containers instead.",
         "When repairSlides is non-empty, repair each supplied previousHtml and previousCss against every listed issue and the shared repairDesignChanges. Preserve correct content and the locked design direction, change only what is needed, and return a complete replacement for every required slide. Never ignore an issue or blindly reproduce the previous layout. Do not fix clipping or overflow by deleting the dominant visual anchor or collapsing the composition into the upper half; resize, reposition, or rebuild that anchor inside the safe canvas.",
+        "repairSlides.geometryViolations is authoritative measured evidence. Fix every named selector using its rect, allowedBounds, and per-side overflow values; account for the transformed bounding box, not only declared left/right/top/bottom values. Recheck the resulting geometry before responding.",
         "Treat every slide as a designed 1920x1080 composition, not a document page. Use the locked slide composition map and visual motifs. Give each slide one dominant visual anchor, distribute content across the safe canvas, and reserve clear separation above the source footer; never leave the lower half accidentally empty or let content touch or cross the safe boundary.",
         "The server-owned :slide root is an unpadded 1920x1080 canvas. Apply the 72px safe inset exactly once in the generated composition, either on the outermost composition wrapper or through explicit positions. Never add another four-sided safe inset inside an already inset full-canvas wrapper.",
+        "Mark only text-free background geometry that intentionally bleeds with data-role=\"decorative\". Decorative geometry may cross the 72px content inset when the slide clips it cleanly, but readable content, meaningful media, sources, and asset slots must never be marked decorative or leave the safe inset.",
         "Avoid repeated header bars, bordered text boxes, and uniform card grids as the main visual system. When imagePlan generation and approved assets are both unavailable, create meaningful topic-linked visuals with allowed HTML elements and CSS geometry; do not imitate an image with a blank placeholder.",
         "visualReferenceSlides contains read-only calibrated HTML/CSS visual DNA. Match its typography, spacing, motif treatment, and component language without returning or rewriting those reference IDs. Stored CSS selectors may already contain server slide IDs; emit only fresh :slide-scoped CSS for target slides.",
         "Use the locked design brief consistently. Theme values may be referenced only as var(--deck-*) tokens named by that brief; never invent custom properties.",
@@ -369,6 +371,9 @@ function buildValidationRemediation(retryErrors) {
   const forbiddenTags = [...new Set(messages.flatMap((message) => (
     [...message.matchAll(/Forbidden HTML tag:\s*([a-z0-9-]+)/gi)].map((match) => match[1].toLowerCase())
   )))];
+  const forbiddenProperties = [...new Set(messages.flatMap((message) => (
+    [...message.matchAll(/CSS property is forbidden:\s*([a-z0-9-]+)/gi)].map((match) => match[1].toLowerCase())
+  )))];
   const remediation = [];
   if (forbiddenTags.length > 0) {
     remediation.push(
@@ -382,6 +387,12 @@ function buildValidationRemediation(retryErrors) {
       "Delete every :root rule from each per-slide css field; theme tokens are already provided by the server-owned theme.",
       "Rewrite every comma-separated selector branch so it starts exactly with :slide; repeat :slide after every comma.",
       "Use forms such as :slide .title{...} and :slide header, :slide footer{...}; never use a bare .class, element, or :root branch.",
+    );
+  }
+  if (forbiddenProperties.length > 0) {
+    remediation.push(
+      `Remove or replace every forbidden CSS property: ${forbiddenProperties.join(", ")}.`,
+      "Use only cssContract.allowedProperties; preserve the same visual result with grid, flex, spacing, borders, or explicit marker elements when necessary.",
     );
   }
   if (remediation.length === 0) remediation.push("Fix every reported validation error.");
@@ -516,11 +527,34 @@ async function resolveRepairContext(context, slideIds) {
     return {
       slideId,
       issues: [...new Set(issues)],
+      geometryViolations: (Array.isArray(reportSlides.get(slideId)?.geometryViolations)
+        ? reportSlides.get(slideId).geometryViolations : [])
+        .slice(0, 24)
+        .map(normalizeGeometryViolation),
       previousHtml: typeof previousHtml === "string" ? previousHtml.slice(0, 200_000) : "",
       previousCss: typeof previousCss === "string" ? previousCss.slice(0, 120_000) : "",
     };
   }));
   return { designChanges: [...new Set(designChanges)], slides };
+}
+
+function normalizeGeometryViolation(item) {
+  const numericRecord = (value) => Object.fromEntries(Object.entries(value || {})
+    .filter(([, entry]) => Number.isFinite(Number(entry)))
+    .slice(0, 8)
+    .map(([key, entry]) => [String(key).slice(0, 40), Number(entry)]));
+  return {
+    code: String(item?.code || "geometry").slice(0, 80),
+    selector: String(item?.selector || "unknown-element").slice(0, 240),
+    role: item?.role === "decorative" ? "decorative" : "content",
+    rect: numericRecord(item?.rect),
+    allowedBounds: numericRecord(item?.allowedBounds),
+    overflow: numericRecord(item?.overflow),
+    computedStyle: {
+      position: String(item?.computedStyle?.position || "").slice(0, 80),
+      transform: String(item?.computedStyle?.transform || "").slice(0, 240),
+    },
+  };
 }
 
 async function resolveVisualReferenceSlides(context, slideIds) {

@@ -117,6 +117,16 @@ describe("slide CSS policy", () => {
     expect(result.css).toContain("border-bottom-width:3px");
     expect(result.css).toContain("border-left-color:var(--deck-positive)");
   });
+
+  it("allows explicit list marker positioning used by generated slide outlines", () => {
+    const result = validateSlideCss({
+      css: ":slide ul{list-style:disc inside}:slide ol{list-style-type:decimal;list-style-position:inside}",
+      slideId: "slide-01",
+    });
+
+    expect(result.css).toContain("list-style:disc inside");
+    expect(result.css).toContain("list-style-position:inside");
+  });
 });
 
 describe("theme CSS policy", () => {

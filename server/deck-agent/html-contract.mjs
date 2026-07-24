@@ -7,5 +7,6 @@ export const MODEL_HTML_CONTRACT = Object.freeze({
   reservedTags: Object.freeze(["aside", "section"]),
   reservedCssClasses: Object.freeze(["notes"]),
   fallbackContainerTags: Object.freeze(["div", "article"]),
+  decorativeRole: "Mark only text-free, non-semantic background geometry with data-role=\"decorative\". Never mark titles, body copy, sources, charts, tables, or meaningful images as decorative.",
   speakerNotes: "Server-owned metadata only. Never render, paraphrase, hide, or copy speaker notes into HTML, CSS, attributes, comments, asset slots, or charts.",
 });

@@ -109,6 +109,10 @@ export function useDeckAgentJob(): UseDeckAgentJobResult {
       void getDeckJob(jobId, refreshController.signal)
         .then((job) => {
           if (refreshController.signal.aborted || cursorJobIdRef.current !== jobId) return;
+          // Artifact refreshes can race ahead with the event stream. Preserve
+          // the durable artifact list even when the full snapshot is too old
+          // to replace newer status/progress state.
+          dispatch({ type: "artifacts-refreshed", jobId, artifacts: job.artifacts });
           dispatch({ type: "server-refreshed", job });
         })
         .catch((error: unknown) => {

@@ -58,13 +58,24 @@ async function persistCalibrationReport(context, relativePath, report) {
 function calibrationFailure(report) {
   const slideIds = failedSlideIds(report);
   const details = slideIds.map((slideId) => {
+    const slideReport = (report.slides || []).find((slide) => slide.slideId === slideId);
     const issues = [
-      ...((report.slides || []).find((slide) => slide.slideId === slideId)?.issues || []),
+      ...(slideReport?.issues || []),
       ...(report.consoleErrors || [])
         .filter((error) => error?.slideId === slideId)
         .map((error) => `console:${String(error.message || "Unknown console error")}`),
     ];
-    return `${slideId} [${[...new Set(issues)].join("; ") || "unknown QA failure"}]`;
+    const geometry = (Array.isArray(slideReport?.geometryViolations)
+      ? slideReport.geometryViolations : [])
+      .slice(0, 6)
+      .map((item) => {
+        const overflow = Object.entries(item?.overflow || {})
+          .filter(([, value]) => Number(value) > 0)
+          .map(([side, value]) => `${side}=${value}px`)
+          .join(",");
+        return `${item?.code || "geometry"} ${item?.selector || "unknown-element"}${overflow ? ` (${overflow})` : ""}`;
+      });
+    return `${slideId} [${[...new Set([...issues, ...geometry])].join("; ") || "unknown QA failure"}]`;
   });
   const error = new Error(`Calibration remains invalid after one targeted correction: ${details.join(", ") || "unknown QA failure"}`);
   error.slideIds = slideIds;

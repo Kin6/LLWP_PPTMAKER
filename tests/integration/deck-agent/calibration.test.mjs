@@ -139,7 +139,15 @@ it("persists the final failed report and names every remaining calibration issue
   };
   const final = {
     ok: false,
-    slides: [{ slideId: "slide-01", issues: ["outside-safe-area"] }, { slideId: "slide-06", issues: [] }],
+    slides: [{
+      slideId: "slide-01",
+      issues: ["outside-canvas"],
+      geometryViolations: [{
+        code: "outside-canvas",
+        selector: ".curtain-left",
+        overflow: { left: 10.97, top: 0, right: 0, bottom: 0 },
+      }],
+    }, { slideId: "slide-06", issues: [] }],
     consoleErrors: [],
     contactSheetArtifactId: "contact-sheet-fixed",
   };
@@ -175,7 +183,9 @@ it("persists the final failed report and names every remaining calibration issue
   expect(failure).toBeInstanceOf(Error);
   expect(failure).toMatchObject({ slideIds: ["slide-01"] });
   expect(failure.message).toContain("slide-01");
-  expect(failure.message).toContain("outside-safe-area");
+  expect(failure.message).toContain("outside-canvas");
+  expect(failure.message).toContain(".curtain-left");
+  expect(failure.message).toContain("left=10.97px");
   expect(failure.message).toContain("visual:right side is empty");
   expect(store.writeJson).toHaveBeenLastCalledWith(
     context.jobId,
@@ -185,7 +195,7 @@ it("persists the final failed report and names every remaining calibration issue
       slides: expect.arrayContaining([
         expect.objectContaining({
           slideId: "slide-01",
-          issues: ["outside-safe-area", "visual:right side is empty"],
+          issues: ["outside-canvas", "visual:right side is empty"],
         }),
       ]),
     }),

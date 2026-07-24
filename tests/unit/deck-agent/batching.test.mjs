@@ -372,6 +372,39 @@ describe("build stage", () => {
     expect(retryRequest.validationRemediation.join(" ")).toMatch(/:slide header, :slide footer/i);
   });
 
+  it("names a forbidden CSS property in the model retry remediation", async () => {
+    const targetSlideIds = ["slide-01", "slide-02"];
+    const harness = structuredBuildHarness(targetSlideIds.map(generatedSlide), { targetSlideIds });
+    let firstSlideAttempts = 0;
+    harness.completeStructuredStage
+      .mockResolvedValueOnce({
+        value: { slides: targetSlideIds.map(generatedSlide) },
+        upstreamCalls: 1,
+      })
+      .mockResolvedValueOnce({
+        value: { slides: [generatedSlide("slide-01")] },
+        upstreamCalls: 1,
+      });
+    harness.writeSlide.execute.mockImplementation(async (slide) => {
+      if (slide.slideId === "slide-01" && firstSlideAttempts++ === 0) {
+        throw new Error("CSS property is forbidden: backdrop-filter");
+      }
+      return { summary: `Slide ${slide.slideId} written` };
+    });
+
+    await runBuildStage(harness.context);
+
+    const retryRequest = JSON.parse(harness.completeStructuredStage.mock.calls[1][0].messages.at(-1).content);
+    expect(retryRequest.validationErrors).toEqual([expect.objectContaining({
+      failedSlideId: "slide-01",
+      message: "CSS property is forbidden: backdrop-filter",
+    })]);
+    expect(retryRequest.validationRemediation.join(" "))
+      .toMatch(/forbidden CSS property: backdrop-filter/i);
+    expect(retryRequest.validationRemediation.join(" "))
+      .toMatch(/cssContract\.allowedProperties/i);
+  });
+
   it("uses the calibration progress stage while retaining the building tool policy", async () => {
     const slide = generatedSlide("slide-01");
     const harness = structuredBuildHarness([slide], {
@@ -618,7 +651,19 @@ describe("build stage", () => {
       repairReport: {
         designChanges: ["Use the lower half of the canvas"],
         slides: [
-          { slideId: "slide-01", issues: ["visual:lower half is empty"] },
+          {
+            slideId: "slide-01",
+            issues: ["outside-canvas", "visual:lower half is empty"],
+            geometryViolations: [{
+              code: "outside-canvas",
+              selector: ".curtain-left",
+              role: "decorative",
+              rect: { left: -10.97, right: 424.97 },
+              allowedBounds: { left: 0, right: 1920 },
+              overflow: { left: 10.97, right: 0 },
+              computedStyle: { position: "absolute", transform: "matrix(1, 0, 0, 1, 0, 0)" },
+            }],
+          },
           { slideId: "slide-02", issues: ["vertical-overflow"] },
         ],
         consoleErrors: [{ slideId: "slide-02", message: "layout failed" }],
@@ -631,13 +676,23 @@ describe("build stage", () => {
     expect(request.promptContext.repairSlides).toEqual([
       {
         slideId: "slide-01",
-        issues: ["visual:lower half is empty"],
+        issues: ["outside-canvas", "visual:lower half is empty"],
+        geometryViolations: [{
+          code: "outside-canvas",
+          selector: ".curtain-left",
+          role: "decorative",
+          rect: { left: -10.97, right: 424.97 },
+          allowedBounds: { left: 0, right: 1920 },
+          overflow: { left: 10.97, right: 0 },
+          computedStyle: { position: "absolute", transform: "matrix(1, 0, 0, 1, 0, 0)" },
+        }],
         previousHtml: "<section>previous one</section>",
         previousCss: ":slide .one{display:grid}",
       },
       {
         slideId: "slide-02",
         issues: ["vertical-overflow", "console:layout failed"],
+        geometryViolations: [],
         previousHtml: "<section>previous two</section>",
         previousCss: ":slide .two{display:grid}",
       },

@@ -126,6 +126,7 @@ export function createVerifier({
           Math.min(timeoutMs, revealReadyTimeoutMs),
           lifecycle.signal,
         );
+        await abortable(page.evaluate(hideVerificationChrome), lifecycle.signal);
         await abortable(page.evaluate(async () => {
           if (document.fonts) await document.fonts.ready;
         }), lifecycle.signal);
@@ -149,6 +150,7 @@ export function createVerifier({
           await abortable(page.evaluate(() => new Promise((resolve) => {
             requestAnimationFrame(() => requestAnimationFrame(resolve));
           })), lifecycle.signal);
+          await abortable(page.evaluate(hideVerificationChrome), lifecycle.signal);
           const reports = await abortable(
             page.evaluate(collectDomReport, slideId),
             lifecycle.signal,
@@ -164,7 +166,8 @@ export function createVerifier({
           assertCaptureQuota(screenshot, maxScreenshotBytes, totalCaptureBytes, maxTotalCaptureBytes);
           totalCaptureBytes += screenshot.length;
 
-          const issues = reports.length === 1 ? issuesFromDom(reports[0]) : [reports.length ? "duplicate-slide-root" : "missing-slide-root"];
+          const report = reports.length === 1 ? reports[0] : undefined;
+          const issues = report ? issuesFromDom(report) : [reports.length ? "duplicate-slide-root" : "missing-slide-root"];
           if (isBlankPng(screenshot)) issues.push("blank-canvas");
           if (blockedRequests.some((request) => request.slideId === slideId)) issues.push("network-request-blocked");
 
@@ -177,7 +180,12 @@ export function createVerifier({
           }), lifecycle.signal);
           validateArtifactResult(artifact);
           captures.push({ slideId, screenshot });
-          slides.push({ slideId, issues: [...new Set(issues)], screenshotArtifactId: artifact.artifactId });
+          slides.push({
+            slideId,
+            issues: [...new Set(issues)],
+            geometryViolations: Array.isArray(report?.geometryViolations) ? report.geometryViolations : [],
+            screenshotArtifactId: artifact.artifactId,
+          });
           await assertProfileQuota(profileDir, maxProfileBytes);
         }
 
@@ -315,6 +323,41 @@ function validateManifest({ manifest, outline, slideIds }) {
 }
 
 function collectDomReport(targetSlideId) {
+  const round = (value) => Math.round(value * 100) / 100;
+  const rectWithin = (rect, bounds) => ({
+    left: round(rect.left - bounds.left),
+    top: round(rect.top - bounds.top),
+    right: round(rect.right - bounds.left),
+    bottom: round(rect.bottom - bounds.top),
+    width: round(rect.width),
+    height: round(rect.height),
+  });
+  const overflowAgainst = (rect, allowed) => ({
+    left: round(Math.max(0, allowed.left - rect.left)),
+    top: round(Math.max(0, allowed.top - rect.top)),
+    right: round(Math.max(0, rect.right - allowed.right)),
+    bottom: round(Math.max(0, rect.bottom - allowed.bottom)),
+  });
+  const hasOverflow = (overflow) => Object.values(overflow).some((value) => value > 1);
+  const selectorFor = (node) => {
+    const classes = [...node.classList]
+      .filter((name) => /^[a-z_-][a-z0-9_-]*$/i.test(name))
+      .slice(0, 3);
+    if (classes.length) return classes.map((name) => `.${name}`).join("");
+    const slot = node.getAttribute("data-slot");
+    if (slot) return `${node.tagName.toLowerCase()}[data-slot="${slot.slice(0, 80)}"]`;
+    return node.tagName.toLowerCase();
+  };
+  const meaningfulSelector = [
+    "h1", "h2", "h3", "p", "li", "blockquote", "table", "img", "figure", "figcaption",
+    "[data-slot]", "[data-asset-slot]", "[data-chart-id]",
+  ].join(",");
+  const isDecorative = (node) => {
+    const hasText = (node.textContent || "").trim().length > 0;
+    const hasMeaningfulMedia = node.matches("img,table,[data-slot],[data-asset-slot],[data-chart-id]")
+      || node.querySelector("img,table,[data-slot],[data-asset-slot],[data-chart-id]");
+    return !hasText && !hasMeaningfulMedia;
+  };
   const roots = [...document.querySelectorAll("[data-slide-id]")]
     .filter((root) => root.dataset.slideId === targetSlideId);
   const allIds = [...document.querySelectorAll("[id]")].map((node) => node.id);
@@ -323,22 +366,88 @@ function collectDomReport(targetSlideId) {
   return roots.map((root) => {
     const bounds = root.getBoundingClientRect();
     const descendants = [...root.querySelectorAll("*")];
+    const rootStyle = getComputedStyle(root);
+    const clipsCanvas = [rootStyle.overflow, rootStyle.overflowX, rootStyle.overflowY]
+      .some((value) => value === "hidden" || value === "clip");
+    const canvasBounds = {
+      left: 0,
+      top: 0,
+      right: round(bounds.width),
+      bottom: round(bounds.height),
+    };
+    const safeBounds = {
+      left: 72,
+      top: 72,
+      right: round(bounds.width - 72),
+      bottom: round(bounds.height - 72),
+    };
+    const geometryViolations = [];
+    for (const node of descendants) {
+      const rawRect = node.getBoundingClientRect();
+      if (rawRect.width === 0 && rawRect.height === 0) continue;
+      const rect = rectWithin(rawRect, bounds);
+      const role = isDecorative(node) ? "decorative" : "content";
+      const style = getComputedStyle(node);
+      const canvasOverflow = overflowAgainst(rect, canvasBounds);
+      if (hasOverflow(canvasOverflow) && !(role === "decorative" && clipsCanvas)) {
+        geometryViolations.push({
+          code: "outside-canvas",
+          selector: selectorFor(node),
+          role,
+          rect,
+          allowedBounds: canvasBounds,
+          overflow: canvasOverflow,
+          computedStyle: {
+            position: style.position,
+            transform: style.transform === "none" ? "none" : style.transform,
+          },
+        });
+      }
+      if (role === "content" && node.matches(meaningfulSelector)) {
+        const safeOverflow = overflowAgainst(rect, safeBounds);
+        if (hasOverflow(safeOverflow)) {
+          geometryViolations.push({
+            code: "outside-safe-area",
+            selector: selectorFor(node),
+            role,
+            rect,
+            allowedBounds: safeBounds,
+            overflow: safeOverflow,
+            computedStyle: {
+              position: style.position,
+              transform: style.transform === "none" ? "none" : style.transform,
+            },
+          });
+        }
+      }
+      if (geometryViolations.length >= 24) break;
+    }
     return {
       slideId: root.dataset.slideId,
       horizontalOverflow: root.scrollWidth > root.clientWidth + 1,
       verticalOverflow: root.scrollHeight > root.clientHeight + 1,
-      outsideSafeArea: descendants.some((node) => {
-        const rect = node.getBoundingClientRect();
-        if (rect.width === 0 && rect.height === 0) return false;
-        return rect.left < bounds.left - 1 || rect.top < bounds.top - 1
-          || rect.right > bounds.right + 1 || rect.bottom > bounds.bottom + 1;
-      }),
+      outsideCanvas: geometryViolations.some((item) => item.code === "outside-canvas"),
+      outsideSafeArea: geometryViolations.some((item) => item.code === "outside-safe-area"),
+      geometryViolations,
       brokenImages: [...root.querySelectorAll("img")].filter((image) => !image.complete || image.naturalWidth === 0).length,
       duplicateIds: [...root.querySelectorAll("[id]")].map((node) => node.id).filter((id) => duplicateIdSet.has(id)),
       visibleTextLength: (root.textContent || "").trim().length,
       fontErrors,
     };
   });
+}
+
+function hideVerificationChrome() {
+  const selectors = [
+    "body > .reveal > .controls",
+    "body > .reveal > .progress",
+    "body > .reveal > .slide-number",
+    "body > .reveal > .playback",
+  ];
+  for (const node of document.querySelectorAll(selectors.join(","))) {
+    node.hidden = true;
+    node.setAttribute("aria-hidden", "true");
+  }
 }
 
 async function waitForRevealReady(page, timeoutMs, signal) {
@@ -400,6 +509,7 @@ function issuesFromDom(report) {
   const issues = [];
   if (report.horizontalOverflow) issues.push("horizontal-overflow");
   if (report.verticalOverflow) issues.push("vertical-overflow");
+  if (report.outsideCanvas) issues.push("outside-canvas");
   if (report.outsideSafeArea) issues.push("outside-safe-area");
   if (report.brokenImages > 0) issues.push("broken-image");
   if (report.duplicateIds.length > 0) issues.push("duplicate-id");

@@ -354,6 +354,63 @@ describe("useDeckAgentJob", () => {
     unmount();
   });
 
+  it("keeps artifact summaries when their refresh snapshot trails newer stream events", async () => {
+    window.history.replaceState(null, "", `/?job=${jobId}`);
+    let resolveRefresh!: (job: DeckJobSnapshot) => void;
+    let pushEvent!: (value: DeckJobEvent) => void;
+    api.getDeckJob
+      .mockResolvedValueOnce(snapshot())
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveRefresh = resolve;
+      }));
+    api.streamDeckJobEvents.mockImplementation((
+      _id: string,
+      _after: number,
+      signal: AbortSignal,
+      onEvent: (value: DeckJobEvent) => void,
+    ) => {
+      pushEvent = onEvent;
+      onEvent(event({
+        seq: 5,
+        stage: "outline",
+        type: "artifact",
+        status: "done",
+        artifactId: "slides-content",
+      }));
+      return pendingUntilAbort(signal, []);
+    });
+
+    const { result, unmount } = renderHook(() => useDeckAgentJob());
+    await waitFor(() => expect(api.getDeckJob).toHaveBeenCalledTimes(2));
+
+    act(() => {
+      pushEvent(event({ seq: 6, stage: "design", type: "progress", status: "running" }));
+    });
+    await act(async () => {
+      resolveRefresh(snapshot({
+        status: "outline",
+        lastSeq: 5,
+        artifacts: [{
+          id: "slides-content",
+          filename: "slides-content.md",
+          kind: "markdown",
+          stage: "outline",
+          previewable: true,
+          downloadable: true,
+        }],
+      }));
+      await Promise.resolve();
+    });
+
+    expect(result.current.state.lastSeq).toBe(6);
+    expect(result.current.state.status).toBe("design");
+    expect(result.current.state.artifacts).toEqual([
+      expect.objectContaining({ id: "slides-content", filename: "slides-content.md" }),
+    ]);
+
+    unmount();
+  });
+
   it("aborts a stale artifact refresh when the active job changes", async () => {
     window.history.replaceState(null, "", `/?job=${jobId}`);
     const nextJobId = "job-00000000-0000-4000-8000-000000000002";

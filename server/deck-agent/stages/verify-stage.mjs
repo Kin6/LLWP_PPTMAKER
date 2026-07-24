@@ -61,7 +61,7 @@ export async function applyDeterministicRepairs(context, slideIds, report) {
     if (issues.has("font-load-failed") && typeof context.useBundledFontFallback === "function") {
       slideChanged = await context.useBundledFontFallback(slideId) !== false || slideChanged;
     }
-    if (["horizontal-overflow", "vertical-overflow", "outside-safe-area"].some((issue) => issues.has(issue))
+    if (["horizontal-overflow", "vertical-overflow", "outside-canvas", "outside-safe-area"].some((issue) => issues.has(issue))
       && typeof context.setTightDensity === "function") {
       slideChanged = await context.setTightDensity(slideId) !== false || slideChanged;
     }
