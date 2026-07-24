@@ -33,7 +33,7 @@ export const MODEL_CSS_CONTRACT = Object.freeze({
     "line-height", "text-align", "text-transform", "letter-spacing", "opacity",
     "list-style", "list-style-type", "list-style-position",
     "object-fit", "object-position", "aspect-ratio", "white-space", "word-break",
-    "z-index", "transform",
+    "z-index", "transform", "transform-origin",
   ]),
   allowedValueFunctions: Object.freeze([
     "rgb", "rgba", "hsl", "hsla", "calc", "min", "max", "clamp", "minmax",

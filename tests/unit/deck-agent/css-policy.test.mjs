@@ -127,6 +127,15 @@ describe("slide CSS policy", () => {
     expect(result.css).toContain("list-style:disc inside");
     expect(result.css).toContain("list-style-position:inside");
   });
+
+  it("allows transform origins for anchored decorative geometry", () => {
+    const result = validateSlideCss({
+      css: ":slide .pointer{transform:rotate(12deg);transform-origin:0 50%}",
+      slideId: "slide-01",
+    });
+
+    expect(result.css).toContain("transform-origin:0 50%");
+  });
 });
 
 describe("theme CSS policy", () => {
